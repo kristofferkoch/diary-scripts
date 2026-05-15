@@ -42,6 +42,9 @@ LOG_DIR = WORKSPACE / "memory" / "mail"
 MAIL_ROOT = pathlib.Path.home() / "Mail" / "Proton"
 INBOX_DIR = MAIL_ROOT / "INBOX"
 ARCHIVE_DIR = MAIL_ROOT / "Archive"
+# Proton label applied to every auto-archived message. Created via webmail or
+# IMAP CREATE Labels/autoarchived; visible in Proton web UI as a filterable tag.
+LABEL_DIR = MAIL_ROOT / "Labels" / "autoarchived"
 
 # Strip mbsync's `,U=<n>` UID tracker from a maildir filename.
 _UID_SUFFIX = re.compile(r",U=\d+")
@@ -69,11 +72,22 @@ def inbox_files(query: str, max_age_days: int) -> list[pathlib.Path]:
 
 
 def move_to_archive(src: pathlib.Path, apply: bool) -> pathlib.Path:
-    """Move INBOX/{cur,new}/<name> → Archive/{cur,new}/<name-without-Uid>."""
+    """Move INBOX/{cur,new}/<name> → Archive/{cur,new}/<name-without-Uid>.
+
+    Also copies the message to Labels/autoarchived/{cur,new}/ so it shows up
+    in Proton as a filterable label. Both the Archive and Labels copies have
+    their `,U=<n>` suffix stripped (per mbsync UID-collision constraint).
+    """
     sub = src.parent.name  # 'cur' or 'new'
-    dest = ARCHIVE_DIR / sub / strip_uid(src.name)
+    stripped = strip_uid(src.name)
+    dest = ARCHIVE_DIR / sub / stripped
+    label_dest = LABEL_DIR / sub / stripped
     if apply:
         dest.parent.mkdir(parents=True, exist_ok=True)
+        if LABEL_DIR.exists():
+            label_dest.parent.mkdir(parents=True, exist_ok=True)
+            # Copy first (preserves source until both copies exist), then move.
+            shutil.copy2(str(src), str(label_dest))
         shutil.move(str(src), str(dest))
     return dest
 
