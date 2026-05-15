@@ -1,0 +1,16 @@
+{
+  "rules": [
+    {
+      "name": "filter-newsletters",
+      "query": "from:filtermedia.no",
+      "max_age_days": 5,
+      "comment": "Filter Kaffe / Aktuelt / Krig / Nyheter / Elendig Fredag — fine to leave for ~5d in inbox then archive."
+    },
+    {
+      "name": "linkedin",
+      "query": "from:linkedin.com",
+      "max_age_days": 5,
+      "comment": "LinkedIn notifications. Rarely actionable, never urgent."
+    }
+  ]
+}
