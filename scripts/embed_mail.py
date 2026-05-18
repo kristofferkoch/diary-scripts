@@ -46,12 +46,12 @@ import psycopg
 from psycopg.types.json import Json
 
 try:
-    import talon
-    from talon import quotations, signature
-    talon.init()
-    HAVE_TALON = True
+    from mailparser_reply import EmailReplyParser
+    # 'da' catches Norwegian "skrev" / Danish; 'sv' covers Swedish.
+    _REPLY_PARSER = EmailReplyParser(languages=["en", "da", "sv"])
+    HAVE_REPLY_PARSER = True
 except Exception:
-    HAVE_TALON = False
+    HAVE_REPLY_PARSER = False
 
 ME = [a.strip() for a in os.environ.get(
     "ME_ADDRS", "user@example.com").split(",") if a.strip()]
@@ -107,11 +107,9 @@ _FROM_HEADER = re.compile(
 _SIG_DASH = re.compile(r"\n-- ?\n.*\Z", re.DOTALL)
 
 def strip_quotes_sig(text: str) -> str:
-    if HAVE_TALON:
+    if HAVE_REPLY_PARSER:
         try:
-            t = quotations.extract_from_plain(text)
-            t = signature.bruteforce.extract_signature(t)[0]
-            return t.strip()
+            return _REPLY_PARSER.read(text).latest_reply.strip()
         except Exception:
             pass
     t = _ON_WROTE.sub("", text)

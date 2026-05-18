@@ -42,9 +42,20 @@ def main(argv):
     ap.add_argument("--tier", type=int, choices=[1, 2, 3])
     ap.add_argument("--since")
     ap.add_argument("--from", dest="from_addr")
+    ap.add_argument("--not-from", dest="not_from", action="append", default=[],
+                    help="Exclude messages whose From matches this substring (repeatable).")
+    ap.add_argument("--minus", action="append", default=[],
+                    help="Semantically subtract a phrase from the query (repeatable). "
+                         "Example: --minus dogs.  Combine with --weight.")
+    ap.add_argument("--weight", type=float, default=0.3,
+                    help="How strongly to subtract --minus terms (default 0.3; 0.7+ breaks the query).")
     args = ap.parse_args(argv)
 
-    qv = vec_lit(embed(args.query))
+    q = embed(args.query)
+    for m in args.minus:
+        nv = embed(m)
+        q = [a - args.weight * b for a, b in zip(q, nv)]
+    qv = vec_lit(q)
     where, params = ["TRUE"], []
     if args.tier:
         where.append("m.tier = %s")
@@ -55,6 +66,9 @@ def main(argv):
     if args.from_addr:
         where.append("m.from_addr ILIKE %s")
         params.append(f"%{args.from_addr}%")
+    for nf in args.not_from:
+        where.append("m.from_addr NOT ILIKE %s")
+        params.append(f"%{nf}%")
 
     sql = f"""
         SELECT m.date, m.from_addr, m.subject, m.message_id,
