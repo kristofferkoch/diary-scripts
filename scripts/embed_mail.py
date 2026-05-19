@@ -40,7 +40,9 @@ import subprocess
 import sys
 import time
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from email.policy import default as email_default
+from email.utils import parsedate_to_datetime
 
 import psycopg
 from psycopg.types.json import Json
@@ -118,10 +120,29 @@ def strip_quotes_sig(text: str) -> str:
     t = _SIG_DASH.sub("", t)
     return t.strip()
 
+def pick_date(msg) -> str | None:
+    # Some (mostly spammy) messages carry multiple Date: headers, the first of
+    # which is garbage like year 2270. Pick the first one that parses to a
+    # plausible instant (1990..now+1d) instead of trusting msg.get("Date").
+    lo = datetime(1990, 1, 1, tzinfo=timezone.utc)
+    hi = datetime.now(timezone.utc) + timedelta(days=1)
+    for raw in msg.get_all("Date", []):
+        try:
+            dt = parsedate_to_datetime(raw)
+        except Exception:
+            continue
+        if dt is None:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if lo <= dt <= hi:
+            return dt.isoformat()
+    return None
+
 def parse_message(raw: bytes) -> tuple[dict, str]:
     msg = email.message_from_bytes(raw, policy=email_default)
     headers = {
-        "date":    msg.get("Date", ""),
+        "date":    pick_date(msg),
         "from":    msg.get("From", ""),
         "to":      msg.get("To", ""),
         "subject": msg.get("Subject", ""),
@@ -196,14 +217,6 @@ def tier_query(tier: int) -> str:
 
 # ---------- main loop ----------
 
-def parse_date(s: str) -> str | None:
-    try:
-        from email.utils import parsedate_to_datetime
-        dt = parsedate_to_datetime(s)
-        return dt.isoformat() if dt else None
-    except Exception:
-        return None
-
 def process(conn, tier: int, limit: int | None, verbose: bool) -> None:
     q = tier_query(tier)
     if verbose:
@@ -240,7 +253,7 @@ def process(conn, tier: int, limit: int | None, verbose: bool) -> None:
                        thread_id, tier, body_chars)
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
                     RETURNING id
-                """, (mid, parse_date(hdr["date"]), hdr["from"], hdr["to"],
+                """, (mid, hdr["date"], hdr["from"], hdr["to"],
                       hdr["subject"], tid, tier, len(body)))
                 row_id = cur.fetchone()[0]
                 for i, (c, v) in enumerate(zip(chunks, vecs)):
