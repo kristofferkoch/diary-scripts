@@ -1,0 +1,147 @@
+# scripts/
+
+Local helper scripts for the workspace. Python deps live in a **uv project at
+workspace root** (`pyproject.toml` + `uv.lock`). Invoke any script with
+
+```bash
+cd ~/.openclaw/workspace
+uv run scripts/<name>.py …
+```
+
+`uv run` creates/syncs `.venv/` on demand; you never need to activate
+anything. Tests: `uv run pytest scripts/` (doctests + `test_embed_mail.py`).
+
+> **`scripts/` is a stopgap name.** Once we add scripts that aren't
+> mail-related, this whole folder will get split by subsystem (e.g.
+> `mail/`, …). Don't write naming around the current layout.
+
+---
+
+## Mail (notmuch + Proton archive)
+
+- **Location:** `~/Mail/Proton` (40 GB, ~205k indexed messages, going back to ~1982 via imported gmail)
+- **Index:** `notmuch` 0.40, db at `~/Mail/Proton/.notmuch`, config `~/.notmuch-config`
+- **Primary email:** user@example.com
+- **Existing tags from Claude Code's digest pass:**
+  - `digest::keep` — worth surfacing
+  - `digest::list`, `digest::list-protected` — mailing list noise
+  - `digest::newsletter` — newsletters
+  - `digest::receipt` — order/payment receipts
+  - `digest::transactional` — auth links, notifications, etc.
+- **`tag:unread` is meaningless** for now — the import marked ~125k messages as unread. Use `date:` filters instead.
+- **`tag:inbox` mirrors `folder:INBOX`** — kept in sync automatically by the `post-new` hook (`scripts/notmuch_sync_tags.py`). Same for `tag:spam`, `tag:archive`, `tag:sent`, `tag:draft`, `tag:trash`. The hook also clears stale `unread` from `Sent`. Either query form is fine now.
+- **Before 2026-05-15 the `inbox` tag was unreliable** (the bulk import marked ~205 k messages as `inbox` regardless of folder). If you see old digests or notes that say "use `date:` filters because `tag:inbox` is meaningless" — that's no longer true. Backup of pre-reconciliation tag state is in `memory/notmuch-dumps/`.
+- **State file:** `memory/mail-state.json` (when I build the digest cron).
+- **Digests:** `memory/mail/YYYY-MM-DD.md`.
+
+### Reading mail bodies — `mailshow.py`
+
+Use `scripts/mailshow.py` — handles the boilerplate (raw fetch, html→text, encoding,
+attachment summary). Examples:
+
+```bash
+uv run scripts/mailshow.py --limit=5 'tag:inbox and date:today..'
+uv run scripts/mailshow.py thread:00000000000349df
+uv run scripts/mailshow.py --headers-only --limit=20 'from:gonordic'
+uv run scripts/mailshow.py --max-chars=8000 id:<message-id>
+```
+
+Don't write fresh inline `python3 -c "..."` blocks for body extraction — extend this
+script instead so improvements stick.
+
+### Semantic search — `search_mail.py` (pgvector + bge-m3)
+
+Use `scripts/search_mail.py` for fuzzy / cross-language / topical queries —
+useful when the exact word probably isn't in the mail (e.g. "byggematerialer"
+finds renovation threads even when none contain that word). For exact-text
+matching prefer plain `notmuch search`; semantic search is the right tool when
+you don't know the keyword.
+
+```bash
+# basic
+uv run scripts/search_mail.py "examplefund utbetaling 2025"
+
+# filter by tier (1=last 1y, 2=threads I'm in, 3=known senders), sender, date
+uv run scripts/search_mail.py --tier 1 --since 2025-01-01 "fakturaer fra strøm"
+uv run scripts/search_mail.py --from astrid "ukeplan"
+
+# exclude a sender (substring, repeatable)
+uv run scripts/search_mail.py --not-from exampleconcrete "byggematerialer"
+
+# semantic minus — subtract a concept (default --weight 0.3; 0.7+ breaks query)
+uv run scripts/search_mail.py --minus mikrosement "byggematerialer"
+uv run scripts/search_mail.py --weight 0.5 --minus dogs "animals"
+```
+
+Each hit prints distance, date, sender, subject, `id:<message-id>`, and a
+240-char snippet. Pipe an `id:` into `scripts/mailshow.py` for the full body.
+
+**Backend:** Postgres `mailvec` (pg18) + `pgvector` HNSW index, embeddings
+from local Ollama `bge-m3` (1024d, multilingual NO/EN). Quote/signature
+stripping via `mail-parser-reply` (`en`/`da`/`sv` — `da` catches Norwegian
+"skrev"); the regex post-pass also strips `-- ` signature blocks.
+
+### Embedding new mail — `embed_mail.py` (automated)
+
+`scripts/embed_mail.py --all` (idempotent on `message_id`, resumable). Runs
+**automatically every 15 min** via the systemd user unit
+`mail-sync.service` (chains `mbsync -a && notmuch new && uv run --frozen
+scripts/embed_mail.py --all --quiet`). The script is silent on success;
+failures print `!! <mid>: <err>` to stderr and exit nonzero so `chronic`
+surfaces them in the journal.
+
+Re-run manually after a big mail import. After a large batch, drop+rebuild
+the HNSW index for best recall:
+
+```sql
+DROP INDEX chunks_embed_hnsw;
+CREATE INDEX chunks_embed_hnsw ON chunks USING hnsw (embedding vector_cosine_ops);
+```
+
+Env vars (defaults usually fine): `PG_DSN=dbname=mailvec`,
+`OLLAMA_URL=http://localhost:11434`, `EMBED_MODEL=bge-m3`,
+`ME_ADDRS=user@example.com`. Do **not** try to install `talon` — won't
+build on Python 3.14 (`cchardet` needs `longintrepr.h`, removed in 3.12+).
+
+### Auto-archiving the inbox — `archive_inbox.py`
+
+For "archive after N days" workflows, use `scripts/archive_inbox.py`. Rules
+live in `scripts/archive_inbox_rules.json`. Systemd timer `archive-inbox.timer`
+runs it daily at ~03:30.
+
+### Maildir gotchas (mbsync + manual moves)
+
+If writing custom maildir moves: **always strip the `,U=<n>` suffix** from the
+filename when moving across folders. That suffix is mbsync's IMAP-UID tracker
+and is scoped per folder — leaving it in place causes
+`Maildir error: duplicate UID N in /<folder>`, which **aborts the entire
+mbsync run**. Other related gotchas:
+
+- `notmuch search --output=files` returns one path per maildir copy of the
+  message (Proton's `All Mail/` mirrors every message). Filter to
+  `/INBOX/` (or whichever folder) before acting.
+- `find -mmin -N` won't catch just-moved files — `mv` preserves mtime. Find
+  by path/name pattern instead.
+- After moving files, `notmuch new` detects them as renames (content hash),
+  no re-index needed. The `post-new` hook then reconciles tags.
+- Lesson learned 2026-05-15 archiving the Filter newsletters.
+
+### Extracting attachments
+
+For attachments (e.g. ukeplan PDFs, .ics, .odt protokoller) use:
+
+```bash
+notmuch show --format=raw id:<message-id> | munpack -C <outdir>
+```
+
+Always pin to the exact `id:` (not a thread or search) to avoid concatenated
+streams. Lesson from 2026-04-27 (`MEMORY.md`).
+
+### Ingest cadence
+
+- **Cron-driven**, not heartbeat. Schedule TBD once Signal is wired up.
+- Mail is seldom urgent — default to digesting, not pinging.
+- Only interrupt for genuinely time-sensitive things (school/kindergarten,
+  doctors, real bank fraud, calendar conflicts).
+- Don't translate between Norwegian and English unnecessarily; never mix them
+  mid-sentence.
