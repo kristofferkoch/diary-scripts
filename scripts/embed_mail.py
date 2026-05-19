@@ -210,7 +210,8 @@ def process(conn, tier: int, limit: int | None, verbose: bool) -> None:
         print(f"[tier {tier}] query: {q[:200]}{'…' if len(q)>200 else ''}",
               file=sys.stderr)
     ids = nm_search_ids(q, limit)
-    print(f"[tier {tier}] {len(ids)} candidate messages", file=sys.stderr)
+    if verbose:
+        print(f"[tier {tier}] {len(ids)} candidate messages", file=sys.stderr)
 
     done = skipped = failed = 0
     t0 = time.time()
@@ -257,8 +258,9 @@ def process(conn, tier: int, limit: int | None, verbose: bool) -> None:
             print(f"  {n}/{len(ids)}  {rate:.1f} msg/s  eta {eta/60:.1f} min  "
                   f"done={done} skipped={skipped} failed={failed}",
                   file=sys.stderr)
-    print(f"[tier {tier}] done={done} skipped={skipped} failed={failed} "
-          f"elapsed={(time.time()-t0)/60:.1f} min", file=sys.stderr)
+    if verbose or failed:
+        print(f"[tier {tier}] done={done} skipped={skipped} failed={failed} "
+              f"elapsed={(time.time()-t0)/60:.1f} min", file=sys.stderr)
 
 def main(argv):
     ap = argparse.ArgumentParser(description=__doc__,
