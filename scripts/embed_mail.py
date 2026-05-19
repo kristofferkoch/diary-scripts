@@ -91,6 +91,16 @@ _WS_RUN = re.compile(r"[ \t]+")
 _BLANKLINES = re.compile(r"\n\s*\n+")
 
 def html_to_text(html: str) -> str:
+    """
+    >>> html_to_text("<p>hello <b>world</b></p>").strip()
+    'hello world'
+    >>> html_to_text("<style>x{}</style><p>hi</p>").strip()
+    'hi'
+    >>> html_to_text("a &amp; b &lt;c&gt; &nbsp; d").strip()
+    'a & b <c> d'
+    >>> html_to_text("<script>alert(1)</script>safe").strip()
+    'safe'
+    """
     t = _HTML_STYLE.sub(" ", html)
     t = _HTML_TAG.sub(" ", t)
     t = (t.replace("&nbsp;", " ").replace("&amp;", "&")
@@ -111,10 +121,15 @@ _SIG_DASH = re.compile(r"\n-- ?\n.*\Z", re.DOTALL)
 def strip_quotes_sig(text: str) -> str:
     if HAVE_REPLY_PARSER:
         try:
-            return _REPLY_PARSER.read(text).latest_reply.strip()
+            t = _REPLY_PARSER.read(text).latest_reply
         except Exception:
-            pass
-    t = _ON_WROTE.sub("", text)
+            t = text
+    else:
+        t = text
+    # mail-parser-reply strips quoted history but not "-- " sig blocks; the
+    # regex fallback strips both. Apply the sig stripper to both paths so
+    # behavior is consistent.
+    t = _ON_WROTE.sub("", t)
     t = _FROM_HEADER.sub("", t)
     t = _QUOTE_LINE.sub("", t)
     t = _SIG_DASH.sub("", t)
@@ -162,6 +177,17 @@ CHUNK_CHARS = 2048
 OVERLAP = 256
 
 def chunk_text(text: str) -> list[str]:
+    """
+    >>> chunk_text("")
+    []
+    >>> chunk_text("   ")
+    []
+    >>> chunk_text("short message")
+    ['short message']
+    >>> chunks = chunk_text("x" * 5000)
+    >>> len(chunks) >= 2 and all(len(c) <= CHUNK_CHARS for c in chunks)
+    True
+    """
     text = text.strip()
     if not text:
         return []
@@ -194,6 +220,12 @@ def embed(text: str) -> list[float]:
         return json.loads(r.read())["embedding"]
 
 def vec_literal(v: list[float]) -> str:
+    """
+    >>> vec_literal([0.1, -0.25, 1.0])
+    '[0.100000,-0.250000,1.000000]'
+    >>> vec_literal([])
+    '[]'
+    """
     return "[" + ",".join(f"{x:.6f}" for x in v) + "]"
 
 # ---------- tier queries ----------
