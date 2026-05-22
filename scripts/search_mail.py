@@ -17,8 +17,8 @@ import urllib.request
 import psycopg
 
 PG_DSN = os.environ.get("PG_DSN", "dbname=mailvec")
-OLLAMA = os.environ.get("OLLAMA_URL", "http://localhost:11434").rstrip("/")
-MODEL = os.environ.get("EMBED_MODEL", "bge-m3")
+OLLAMA = os.environ.get("OLLAMA_URL", "http://gpu-host:11434").rstrip("/")
+MODEL = os.environ.get("EMBED_MODEL", "bge-m3:latest")
 
 
 def embed(text: str) -> list[float]:
@@ -56,31 +56,36 @@ def main(argv):
         nv = embed(m)
         q = [a - args.weight * b for a, b in zip(q, nv)]
     qv = vec_lit(q)
-    where, params = ["TRUE"], []
+
+    # Build WHERE clause from typed (LiteralString, value) pairs so the SQL
+    # composition stays type-safe. No user input lands in the SQL fragments.
+    from psycopg import sql as _sql
+    clauses: list[_sql.SQL] = [_sql.SQL("TRUE")]
+    params: list[object] = []
     if args.tier:
-        where.append("m.tier = %s")
+        clauses.append(_sql.SQL("m.tier = %s"))
         params.append(args.tier)
     if args.since:
-        where.append("m.date >= %s")
+        clauses.append(_sql.SQL("m.date >= %s"))
         params.append(args.since)
     if args.from_addr:
-        where.append("m.from_addr ILIKE %s")
+        clauses.append(_sql.SQL("m.from_addr ILIKE %s"))
         params.append(f"%{args.from_addr}%")
     for nf in args.not_from:
-        where.append("m.from_addr NOT ILIKE %s")
+        clauses.append(_sql.SQL("m.from_addr NOT ILIKE %s"))
         params.append(f"%{nf}%")
 
-    sql = f"""
+    query = _sql.SQL("""
         SELECT m.date, m.from_addr, m.subject, m.message_id,
                c.embedding <=> %s::vector AS dist,
                left(c.text, 240) AS snippet
         FROM chunks c JOIN messages m ON m.id = c.message_id
-        WHERE {' AND '.join(where)}
+        WHERE {where_clause}
         ORDER BY c.embedding <=> %s::vector
         LIMIT %s
-    """
+    """).format(where_clause=_sql.SQL(" AND ").join(clauses))
     with psycopg.connect(PG_DSN) as conn, conn.cursor() as cur:
-        cur.execute(sql, [qv, *params, qv, args.k])
+        cur.execute(query, [qv, *params, qv, args.k])
         for date, frm, subj, mid, dist, snip in cur:
             print(f"[{dist:.3f}] {date}  {frm}")
             print(f"        {subj}")

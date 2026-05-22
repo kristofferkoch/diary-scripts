@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Embed mail from notmuch into Postgres + pgvector using a local Ollama model.
+Embed mail from notmuch into Postgres + pgvector using Ollama on gpu-host.
 
 Tiers (set with --tier or run all three sequentially):
     1  date:1y..                                          (~6.3k msgs)
@@ -8,19 +8,21 @@ Tiers (set with --tier or run all three sequentially):
     3  from:<addr1> or from:<addr2> or ...                (~9k msgs)
        (addresses harvested from your past recipients)
 
-Pipeline per message:
-    notmuch raw → email.parse → prefer text/plain → html_to_text fallback
-    → quote/sig strip (talon if installed, else heuristic)
-    → chunk (≈512 tokens, ≈64 overlap)
-    → POST /api/embeddings to Ollama
-    → INSERT into messages + chunks
+Per message: notmuch raw → email.parse → main text body (plain/html)
++ extract text from PDF/DOCX/ODT/ICS/text attachments
+→ chunk (≈512 tok, ≈64 overlap, ≈2048 chars) → accumulate across messages
+→ batched POST /api/embed (≥32 chunks per call) → write rows in one tx per msg.
+
+Image / unsupported attachments still get an `attachments` row with text_chars=0,
+so a later VLM pass (`scripts/embed_images.py`, todo) can find them.
 
 Re-runs are idempotent: messages with an existing message_id are skipped.
 
 Env:
-    PG_DSN              postgres://user@host/mailvec   (default: dbname=mailvec)
-    OLLAMA_URL          http://localhost:11434          (default)
-    EMBED_MODEL         bge-m3                          (default; 1024d)
+    PG_DSN              postgres://user@host/mailvec      (default: dbname=mailvec)
+    OLLAMA_URL          http://gpu-host:11434           (default; Mac Studio on LAN)
+    EMBED_MODEL         bge-m3:latest                     (default; 1024d)
+    EMBED_BATCH         32                                (default; chunks/api call)
     ME_ADDRS            comma-separated; default: user@example.com
 
 Examples:
@@ -33,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import email
+import io
 import json
 import os
 import re
@@ -40,12 +43,42 @@ import subprocess
 import sys
 import time
 import urllib.request
+import zipfile
+from collections import defaultdict
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from email.policy import default as email_default
 from email.utils import parsedate_to_datetime
+from typing import TypedDict
 
 import psycopg
-from psycopg.types.json import Json
+
+
+# `from` is a Python keyword, so use TypedDict's functional syntax to keep the
+# dict key matching the email header name exactly.
+Headers = TypedDict("Headers", {
+    "date":    "str | None",
+    "from":    str,
+    "to":      str,
+    "subject": str,
+})
+
+
+class AttachmentPayload(TypedDict):
+    filename: str
+    mime: str
+    size: int
+    text_chars: int
+    chunks: list[str]
+
+
+class MessagePayload(TypedDict):
+    mid: str
+    hdr: Headers
+    tid: str | None
+    body_chars: int
+    body_chunks: list[str]
+    attachments: list[AttachmentPayload]
 
 try:
     from mailparser_reply import EmailReplyParser
@@ -58,8 +91,9 @@ except Exception:
 ME = [a.strip() for a in os.environ.get(
     "ME_ADDRS", "user@example.com").split(",") if a.strip()]
 PG_DSN = os.environ.get("PG_DSN", "dbname=mailvec")
-OLLAMA = os.environ.get("OLLAMA_URL", "http://localhost:11434").rstrip("/")
-MODEL = os.environ.get("EMBED_MODEL", "bge-m3")
+OLLAMA = os.environ.get("OLLAMA_URL", "http://gpu-host:11434").rstrip("/")
+MODEL = os.environ.get("EMBED_MODEL", "bge-m3:latest")
+BATCH_CHUNKS = int(os.environ.get("EMBED_BATCH", "32"))
 
 # ---------- notmuch helpers ----------
 
@@ -121,7 +155,7 @@ _SIG_DASH = re.compile(r"\n-- ?\n.*\Z", re.DOTALL)
 def strip_quotes_sig(text: str) -> str:
     if HAVE_REPLY_PARSER:
         try:
-            t = _REPLY_PARSER.read(text).latest_reply
+            t = _REPLY_PARSER.read(text).latest_reply or text
         except Exception:
             t = text
     else:
@@ -154,9 +188,9 @@ def pick_date(msg) -> str | None:
             return dt.isoformat()
     return None
 
-def parse_message(raw: bytes) -> tuple[dict, str]:
+def parse_message(raw: bytes) -> tuple[Headers, str]:
     msg = email.message_from_bytes(raw, policy=email_default)
-    headers = {
+    headers: Headers = {
         "date":    pick_date(msg),
         "from":    msg.get("From", ""),
         "to":      msg.get("To", ""),
@@ -169,6 +203,105 @@ def parse_message(raw: bytes) -> tuple[dict, str]:
     if body.get_content_type() == "text/html":
         content = html_to_text(content)
     return headers, strip_quotes_sig(content)
+
+# ---------- attachment extraction ----------
+
+# MIME types we extract text from. Everything else gets a metadata-only row
+# (text_chars=0) so a future VLM pass can find image/unsupported attachments.
+_DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+_ODT_MIME = "application/vnd.oasis.opendocument.text"
+_PLAIN_TEXT_MIMES = {
+    "text/plain", "text/csv", "text/markdown", "text/calendar",
+    "application/ics", "application/json",
+}
+
+def _strip_xml(text: str) -> str:
+    """
+    >>> _strip_xml('<w:p><w:r><w:t>Hello</w:t></w:r></w:p>').strip()
+    'Hello'
+    >>> _strip_xml('a &amp; b &lt;c&gt;').strip()
+    'a & b <c>'
+    """
+    t = re.sub(r"<[^>]+>", " ", text)
+    t = (t.replace("&amp;", "&").replace("&lt;", "<")
+          .replace("&gt;", ">").replace("&quot;", '"').replace("&apos;", "'"))
+    t = _HTML_ENTITY.sub("", t)
+    t = _WS_RUN.sub(" ", t)
+    return _BLANKLINES.sub("\n\n", t).strip()
+
+def extract_pdf(data: bytes) -> str:
+    """Run `pdftotext - -` on the bytes. Returns '' on any failure."""
+    try:
+        r = subprocess.run(
+            ["pdftotext", "-q", "-layout", "-", "-"],
+            input=data, capture_output=True, timeout=60)
+        if r.returncode != 0:
+            return ""
+        return r.stdout.decode("utf-8", errors="replace").strip()
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return ""
+
+def _extract_from_zip(data: bytes, inner: str) -> str:
+    """Open `data` as a zip, read `inner`, strip XML. '' on failure."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            with z.open(inner) as f:
+                return _strip_xml(f.read().decode("utf-8", errors="replace"))
+    except (zipfile.BadZipFile, KeyError, UnicodeDecodeError):
+        return ""
+
+def extract_docx(data: bytes) -> str:
+    return _extract_from_zip(data, "word/document.xml")
+
+def extract_odt(data: bytes) -> str:
+    return _extract_from_zip(data, "content.xml")
+
+def extract_attachment_text(mime: str, data: bytes) -> str:
+    """
+    Dispatch on MIME. Returns '' for unsupported types (images, video, blobs).
+    >>> extract_attachment_text("text/plain", b"hello world").strip()
+    'hello world'
+    >>> extract_attachment_text("image/png", b"\\x89PNG...")
+    ''
+    """
+    mime = (mime or "").lower()
+    if mime == "application/pdf":
+        return extract_pdf(data)
+    if mime == _DOCX_MIME:
+        return extract_docx(data)
+    if mime == _ODT_MIME:
+        return extract_odt(data)
+    if mime == "text/html":
+        return html_to_text(data.decode("utf-8", errors="replace")).strip()
+    if mime in _PLAIN_TEXT_MIMES:
+        return data.decode("utf-8", errors="replace").strip()
+    return ""
+
+def iter_attachments(raw: bytes) -> Iterator[tuple[str, str, bytes, str]]:
+    """Yield (filename, mime_type, bytes, extracted_text) per attachment part.
+
+    A part is treated as an attachment if it has a `filename` parameter OR an
+    explicit `Content-Disposition: attachment`. This skips body alternatives
+    that parse_message already returned.
+    """
+    msg = email.message_from_bytes(raw, policy=email_default)
+    for part in msg.walk():
+        if part.is_multipart():
+            continue
+        fn = part.get_filename()
+        disp = (part.get_content_disposition() or "").lower()
+        if not fn and disp != "attachment":
+            continue
+        try:
+            data = part.get_payload(decode=True)
+        except Exception:
+            continue
+        # decode=True returns bytes for non-multipart leaf parts; skip otherwise.
+        if not isinstance(data, bytes):
+            continue
+        mime = part.get_content_type()
+        text = extract_attachment_text(mime, data)
+        yield (fn or "(unnamed)", mime, data, text)
 
 # ---------- chunking ----------
 
@@ -208,16 +341,24 @@ def chunk_text(text: str) -> list[str]:
         i = max(end - OVERLAP, i + 1)
     return [c for c in chunks if c]
 
-# ---------- embedding (Ollama HTTP) ----------
+# ---------- embedding (Ollama batched /api/embed) ----------
 
-def embed(text: str) -> list[float]:
+def embed_batch(texts: list[str]) -> list[list[float]]:
+    """POST a list of strings, get a list of embedding vectors back."""
+    if not texts:
+        return []
     req = urllib.request.Request(
-        f"{OLLAMA}/api/embeddings",
-        data=json.dumps({"model": MODEL, "prompt": text}).encode(),
+        f"{OLLAMA}/api/embed",
+        data=json.dumps({"model": MODEL, "input": texts}).encode(),
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=120) as r:
-        return json.loads(r.read())["embedding"]
+    with urllib.request.urlopen(req, timeout=300) as r:
+        out = json.loads(r.read())
+    vecs = out.get("embeddings")
+    if vecs is None or len(vecs) != len(texts):
+        raise RuntimeError(
+            f"embed: expected {len(texts)} vectors, got {len(vecs) if vecs else 0}")
+    return vecs
 
 def vec_literal(v: list[float]) -> str:
     """
@@ -249,35 +390,58 @@ def tier_query(tier: int) -> str:
 
 # ---------- main loop ----------
 
-def process(conn, tier: int, limit: int | None, verbose: bool) -> None:
-    q = tier_query(tier)
-    if verbose:
-        print(f"[tier {tier}] query: {q[:200]}{'…' if len(q)>200 else ''}",
-              file=sys.stderr)
-    ids = nm_search_ids(q, limit)
-    if verbose:
-        print(f"[tier {tier}] {len(ids)} candidate messages", file=sys.stderr)
+def _prepare_message(mid: str) -> MessagePayload | None:
+    """Pull raw, parse body + attachments. Returns a payload dict, or None
+    if nothing about this message is worth recording (no body chunks and no
+    attachments at all). Raises on notmuch / parse errors."""
+    raw = nm_raw(mid)
+    hdr, body = parse_message(raw)
+    body_chunks = chunk_text(body) if len(body) >= 40 else []
+    attachments = []
+    for fn, mime, data, text in iter_attachments(raw):
+        a_chunks = chunk_text(text) if text else []
+        attachments.append({
+            "filename": fn,
+            "mime": mime,
+            "size": len(data),
+            "text_chars": len(text),
+            "chunks": a_chunks,
+        })
+    if not body_chunks and not attachments:
+        return None
+    return {
+        "mid": mid,
+        "hdr": hdr,
+        "tid": nm_thread_id(mid),
+        "body_chars": len(body),
+        "body_chunks": body_chunks,
+        "attachments": attachments,
+    }
 
-    done = skipped = failed = 0
-    t0 = time.time()
-    for n, mid in enumerate(ids, 1):
-        with conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM messages WHERE message_id = %s", (mid,))
-            if cur.fetchone():
-                skipped += 1
-                continue
+def _flush_batch(conn: psycopg.Connection, tier: int, batch: list[MessagePayload],
+                 verbose: bool) -> tuple[int, int]:
+    """Embed all chunks in one HTTP call, then write each message in its own tx."""
+    flat: list[str] = []
+    Slot = tuple[str, int] | tuple[str, int, int]   # ("body", ci) or ("att", ai, ci)
+    locator: list[tuple[int, Slot]] = []
+    for mi, payload in enumerate(batch):
+        for ci, c in enumerate(payload["body_chunks"]):
+            flat.append(c)
+            locator.append((mi, ("body", ci)))
+        for ai, att in enumerate(payload["attachments"]):
+            for ci, c in enumerate(att["chunks"]):
+                flat.append(c)
+                locator.append((mi, ("att", ai, ci)))
+
+    embeds = embed_batch(flat) if flat else []
+    per_msg: dict[int, dict[Slot, list[float]]] = defaultdict(dict)
+    for (mi, slot), v in zip(locator, embeds):
+        per_msg[mi][slot] = v
+
+    done = failed = 0
+    for mi, payload in enumerate(batch):
+        slots = per_msg.get(mi, {})
         try:
-            raw = nm_raw(mid)
-            hdr, body = parse_message(raw)
-            if len(body) < 40:        # too short to be worth embedding
-                skipped += 1
-                continue
-            chunks = chunk_text(body)
-            if not chunks:
-                skipped += 1
-                continue
-            vecs = [embed(c) for c in chunks]
-            tid = nm_thread_id(mid)
             with conn.cursor() as cur, conn.transaction():
                 cur.execute("""
                     INSERT INTO messages
@@ -285,29 +449,108 @@ def process(conn, tier: int, limit: int | None, verbose: bool) -> None:
                        thread_id, tier, body_chars)
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
                     RETURNING id
-                """, (mid, hdr["date"], hdr["from"], hdr["to"],
-                      hdr["subject"], tid, tier, len(body)))
-                row_id = cur.fetchone()[0]
-                for i, (c, v) in enumerate(zip(chunks, vecs)):
+                """, (payload["mid"], payload["hdr"]["date"],
+                      payload["hdr"]["from"], payload["hdr"]["to"],
+                      payload["hdr"]["subject"], payload["tid"], tier,
+                      payload["body_chars"]))
+                row = cur.fetchone()
+                assert row is not None, "RETURNING id must yield a row"
+                row_id = row[0]
+                for ci, c in enumerate(payload["body_chunks"]):
                     cur.execute(
-                        "INSERT INTO chunks (message_id, chunk_idx, text, embedding) "
-                        "VALUES (%s,%s,%s,%s::vector)",
-                        (row_id, i, c, vec_literal(v)))
+                        "INSERT INTO chunks "
+                        "(message_id, attachment_id, chunk_idx, text, embedding) "
+                        "VALUES (%s, NULL, %s, %s, %s::vector)",
+                        (row_id, ci, c, vec_literal(slots[("body", ci)])))
+                for ai, att in enumerate(payload["attachments"]):
+                    cur.execute("""
+                        INSERT INTO attachments
+                          (message_id, filename, mime_type, size_bytes, text_chars)
+                        VALUES (%s,%s,%s,%s,%s) RETURNING id
+                    """, (row_id, att["filename"], att["mime"],
+                          att["size"], att["text_chars"]))
+                    att_row = cur.fetchone()
+                    assert att_row is not None, "RETURNING id must yield a row"
+                    att_id = att_row[0]
+                    for ci, c in enumerate(att["chunks"]):
+                        cur.execute(
+                            "INSERT INTO chunks "
+                            "(message_id, attachment_id, chunk_idx, text, embedding) "
+                            "VALUES (%s, %s, %s, %s, %s::vector)",
+                            (row_id, att_id, ci, c,
+                             vec_literal(slots[("att", ai, ci)])))
             done += 1
         except Exception as e:
             failed += 1
-            print(f"  !! {mid}: {e}", file=sys.stderr)
-        if verbose and n % 50 == 0:
+            if verbose:
+                print(f"  !! {payload['mid']} (write): {e}", file=sys.stderr)
+    return done, failed
+
+def process(conn: psycopg.Connection, tier: int, limit: int | None, verbose: bool) -> None:
+    q = tier_query(tier)
+    if verbose:
+        print(f"[tier {tier}] query: {q[:200]}{'…' if len(q)>200 else ''}",
+              file=sys.stderr)
+    ids = nm_search_ids(q, limit)
+    if verbose:
+        print(f"[tier {tier}] {len(ids)} candidate messages "
+              f"(batch={BATCH_CHUNKS})", file=sys.stderr)
+
+    done = skipped = failed = 0
+    pending: list[MessagePayload] = []
+    pending_chunks = 0
+    t0 = time.time()
+
+    for n, mid in enumerate(ids, 1):
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM messages WHERE message_id = %s", (mid,))
+            if cur.fetchone():
+                skipped += 1
+                continue
+        try:
+            payload = _prepare_message(mid)
+        except Exception as e:
+            failed += 1
+            print(f"  !! {mid} (prepare): {e}", file=sys.stderr)
+            continue
+        if payload is None:
+            skipped += 1
+            continue
+        pending.append(payload)
+        pending_chunks += (len(payload["body_chunks"])
+                           + sum(len(a["chunks"]) for a in payload["attachments"]))
+        if pending_chunks >= BATCH_CHUNKS:
+            try:
+                d, f = _flush_batch(conn, tier, pending, verbose)
+                done += d; failed += f
+            except Exception as e:
+                failed += len(pending)
+                print(f"  !! batch embed failed ({len(pending)} msgs): {e}",
+                      file=sys.stderr)
+            pending = []
+            pending_chunks = 0
+
+        if verbose and n % 100 == 0:
             rate = n / (time.time() - t0)
             eta = (len(ids) - n) / rate if rate else 0
             print(f"  {n}/{len(ids)}  {rate:.1f} msg/s  eta {eta/60:.1f} min  "
                   f"done={done} skipped={skipped} failed={failed}",
                   file=sys.stderr)
+
+    if pending:
+        try:
+            d, f = _flush_batch(conn, tier, pending, verbose)
+            done += d; failed += f
+        except Exception as e:
+            failed += len(pending)
+            print(f"  !! final batch embed failed ({len(pending)} msgs): {e}",
+                  file=sys.stderr)
+
     if verbose or failed:
         print(f"[tier {tier}] done={done} skipped={skipped} failed={failed} "
               f"elapsed={(time.time()-t0)/60:.1f} min", file=sys.stderr)
 
-def main(argv):
+def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--tier", type=int, choices=[1, 2, 3])

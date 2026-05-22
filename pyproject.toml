@@ -11,9 +11,19 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8",
+    "ty>=0.0.38",   # Astral's modern type checker (alpha but works)
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["scripts"]
 python_files = ["test_*.py", "*_test.py"]
 addopts = "--doctest-modules"
+
+[tool.ty.src]
+include = ["scripts"]
+
+[tool.ty.rules]
+# Tests intentionally probe with weird inputs; relax a couple of the noisiest
+# checks rather than littering tests with `# type: ignore`.
+unresolved-import = "warn"
+possibly-missing-attribute = "warn"

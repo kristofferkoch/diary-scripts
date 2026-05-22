@@ -77,9 +77,18 @@ Each hit prints distance, date, sender, subject, `id:<message-id>`, and a
 240-char snippet. Pipe an `id:` into `scripts/mailshow.py` for the full body.
 
 **Backend:** Postgres `mailvec` (pg18) + `pgvector` HNSW index, embeddings
-from local Ollama `bge-m3` (1024d, multilingual NO/EN). Quote/signature
-stripping via `mail-parser-reply` (`en`/`da`/`sv` — `da` catches Norwegian
-"skrev"); the regex post-pass also strips `-- ` signature blocks.
+from Ollama `bge-m3:latest` (1024d, multilingual NO/EN) served by
+`gpu-host:11434` (Mac Studio M3 Ultra, 256 GB — GPU-accelerated, much
+faster than CPU-only Ollama on `server`). Quote/signature stripping
+via `mail-parser-reply` (`en`/`da`/`sv` — `da` catches Norwegian "skrev");
+the regex post-pass also strips `-- ` signature blocks.
+
+Schema lives in `migrations/`:
+- `001_pgvector.sql` — `messages` + `chunks` (1024-d vector).
+- `002_attachments.sql` — `attachments` (one row per MIME part with a filename
+  or `Content-Disposition: attachment`) + `chunks.attachment_id` column.
+  Body chunks have `attachment_id IS NULL`; attachment chunks reference the
+  attachment.
 
 ### Embedding new mail — `embed_mail.py` (automated)
 
@@ -90,6 +99,26 @@ scripts/embed_mail.py --all --quiet`). The script is silent on success;
 failures print `!! <mid>: <err>` to stderr and exit nonzero so `chronic`
 surfaces them in the journal.
 
+Per message the script extracts:
+- **Body**: text/plain preferred, text/html fallback (HTML→text + quote/sig strip).
+- **Attachments** (any part with a filename or `Content-Disposition: attachment`):
+  - `application/pdf` → `pdftotext -layout - -`
+  - `.docx` (OOXML) → stdlib `zipfile` + `word/document.xml` (no extra deps)
+  - `.odt` (OpenDocument) → stdlib `zipfile` + `content.xml`
+  - `text/html` → existing HTML→text
+  - `text/plain`, `text/csv`, `text/markdown`, `text/calendar`,
+    `application/ics`, `application/json` → decoded as text
+  - Images / `application/octet-stream` / unsupported → metadata-only row
+    (`text_chars=0`). A future VLM pass (`embed_images.py`, TBD) will
+    walk these and describe with `qwen2.5vl:7b`.
+
+Embedding calls the batched `/api/embed` endpoint (`{"input": [...]}`),
+accumulating ~32 chunks across messages per HTTP call. Ollama serialises
+embedding requests per model, so concurrency from the client doesn't help —
+**batch size is the only useful knob.** Measured throughput on gpu-host:
+~27 ms/chunk batched 32 vs ~260 ms/chunk solo. Override the threshold with
+`EMBED_BATCH=N`.
+
 Re-run manually after a big mail import. After a large batch, drop+rebuild
 the HNSW index for best recall:
 
@@ -99,9 +128,16 @@ CREATE INDEX chunks_embed_hnsw ON chunks USING hnsw (embedding vector_cosine_ops
 ```
 
 Env vars (defaults usually fine): `PG_DSN=dbname=mailvec`,
-`OLLAMA_URL=http://localhost:11434`, `EMBED_MODEL=bge-m3`,
-`ME_ADDRS=user@example.com`. Do **not** try to install `talon` — won't
-build on Python 3.14 (`cchardet` needs `longintrepr.h`, removed in 3.12+).
+`OLLAMA_URL=http://gpu-host:11434`, `EMBED_MODEL=bge-m3:latest`,
+`EMBED_BATCH=32`, `ME_ADDRS=user@example.com`. Do **not** try to
+install `talon` — won't build on Python 3.14 (`cchardet` needs
+`longintrepr.h`, removed in 3.12+).
+
+### Typechecking + tests
+
+`uv run pytest scripts/` runs doctests + unit tests + integration tests
+against `~/Mail` (skipped if absent). `uv run ty check scripts/` runs
+Astral's `ty` typechecker. Both should pass clean before commit.
 
 ### Auto-archiving the inbox — `archive_inbox.py`
 
