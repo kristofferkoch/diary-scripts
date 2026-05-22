@@ -1,30 +1,36 @@
 <h2>Tankekart</h2>
-{% if not related %}
+{% if not branches %}
 <p class="empty">Ingen relaterte funn.</p>
 {% else %}
-<ul class="cards">
-{% for r in related %}
-  {% set pct = (r.similarity * 100) | round | int %}
-  <li class="card">
-    <a href="{{ url_for('get_message', message_id=r.message_id) }}">
-      <div class="sim" aria-label="{{ pct }}% likhet">
-        <span class="sim-pct">{{ pct }}%</span>
-        <span class="sim-bar" style="--sim: {{ pct }}%"></span>
-      </div>
-      <div class="card-body">
-        <div class="card-meta">
-          <span class="from">{{ r.from_addr }}</span>
-          <span class="date">{{ r.date.strftime('%d. %b') if r.date else '' }}</span>
-        </div>
-        <div class="subject">{{ r.subject or '(uten emne)' }}</div>
-        {% if r.summary %}
-          <p class="summary">{{ r.summary }}</p>
-        {% else %}
-          <p class="summary empty">(ingen sammendrag ennå)</p>
-        {% endif %}
-      </div>
-    </a>
-  </li>
+<div class="branches">
+{% for b in branches %}
+  <section class="branch">
+    <h3 class="branch-label">{{ b.label }}</h3>
+    <ul class="cards">
+    {% for r in b.leaves %}
+      {% set pct = (r.similarity * 100) | round | int %}
+      {% set sub_quoted = r.message_id | urlencode %}
+      <li class="card">
+        <a href="{{ url_for('get_message', message_id=r.message_id) }}">
+          <div class="sim" aria-label="{{ pct }}% likhet">
+            <span class="sim-pct">{{ pct }}%</span>
+            <span class="sim-bar" style="--sim: {{ pct }}%"></span>
+          </div>
+          <div class="card-body">
+            <div class="card-meta">
+              <span class="from">{{ r.from_addr }}</span>
+              <span class="date">{{ r.date | short_date }}</span>
+            </div>
+            <div class="subject">{{ r.subject or '(uten emne)' }}</div>
+            {% with status=r.summary_status, short=r.summary, error=r.summary_error, msg_id_quoted=sub_quoted %}
+              {% include "_sum.html" %}
+            {% endwith %}
+          </div>
+        </a>
+      </li>
+    {% endfor %}
+    </ul>
+  </section>
 {% endfor %}
-</ul>
+</div>
 {% endif %}

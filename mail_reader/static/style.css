@@ -148,6 +148,24 @@ a:hover { color: var(--accent); }
 }
 .topbar .logo .mark svg { display: block; }
 
+/* Queue indicator: pushed to the right of the topbar via margin-left.
+   Discrete — small, faint, fades into the chrome when idle. */
+.queue-slot {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: baseline;
+  min-height: 1em;
+}
+.queue {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--faint);
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+.queue-empty { visibility: hidden; }
+.queue-pass { white-space: nowrap; }
+
 main {
   max-width: 760px;
   margin: 0 auto;
@@ -515,6 +533,22 @@ article.message .subject {
    -------------------------------------------------------------------------- */
 
 .tankekart { margin-top: var(--s-6); }
+
+/* Branches — each chunk of the open mail becomes its own section. */
+.branches { display: grid; gap: var(--s-6); }
+.branch { display: grid; gap: var(--s-3); }
+.branch-label {
+  font-family: var(--font-serif);
+  font-size: 1rem;
+  font-style: italic;
+  font-weight: 400;
+  color: var(--muted);
+  margin: 0;
+  padding-left: var(--s-3);
+  border-left: 2px solid var(--accent-soft);
+  line-height: 1.4;
+}
+
 .tankekart .loading {
   color: var(--muted);
   font-family: var(--font-serif);
@@ -643,18 +677,73 @@ ul.cards {
   margin: 0 0 var(--s-2);
   letter-spacing: -0.005em;
 }
-.card .summary {
+/* Summary card: used in tankekart cards (.card .summary) AND in inbox
+   rows (.thread .summary). Selectors are unscoped — the rule applies
+   wherever the class lands. */
+.summary {
   font-family: var(--font-serif);
   font-size: 0.95rem;
   line-height: 1.5;
   color: var(--ink);
   margin: 0;
 }
-.card .summary.empty {
+.summary.empty {
   font-style: italic;
   color: var(--faint);
   padding: 0;
   text-align: left;
+}
+.summary.pending {
+  color: var(--faint);
+  font-style: italic;
+}
+.summary.pending .dots::after {
+  content: "";
+  display: inline-block;
+  width: 0.6em;
+  text-align: left;
+  animation: dots 1.4s infinite steps(4, jump-none);
+}
+@keyframes dots {
+  0%   { content: ""; }
+  25%  { content: "."; }
+  50%  { content: ".."; }
+  75%  { content: "..."; }
+}
+.summary.failed {
+  color: var(--accent);
+  font-style: italic;
+  cursor: pointer;
+}
+/* `done_draft`: tier-1 has finished, tier-2 still cooking. Visually
+   marked as provisional — duller color and italic so the eye knows the
+   final replacement is on its way. */
+.summary.draft {
+  color: var(--muted);
+  font-style: italic;
+}
+/* `done_stale`: show old text with a faint regen hint on the side. */
+.summary.stale {
+  position: relative;
+}
+.summary.stale::after {
+  content: "oppdaterer…";
+  position: absolute;
+  right: 0;
+  top: -1.1em;
+  font-size: 0.7rem;
+  font-style: italic;
+  color: var(--faint);
+}
+/* Inbox-row spacing: the summary sits below the meta line, slightly
+   indented and noticeably smaller so it doesn't compete with the
+   subject. Default colour matches the row's main ink — drafts override
+   to `--muted` via `.summary.draft` so the eye sees a real brightness
+   lift when the final pass lands. */
+.thread .summary {
+  margin-top: var(--s-2);
+  font-size: 0.78rem;
+  color: var(--ink);
 }
 
 /* --------------------------------------------------------------------------

@@ -128,7 +128,87 @@ enough on M3 Ultra. Bump to q8 if q4 output looks sloppy in practice.
 - No write paths in v1 → no CSRF surface.
 - Tailnet only — verify by binding to the tailscale IP and *not* `0.0.0.0`.
 
-## 11. Decisions log (2026-05-22)
+## 11. Summary generation state machine (2026-05-22)
+
+`summaries` rows carry an enum `status` field. State transitions:
+
+```
+absent  →  pending  →  done
+                   →  failed
+failed  →  pending  (manual retry)
+```
+
+Migration `004_summary_status.sql`:
+
+```sql
+CREATE TYPE summary_status AS ENUM ('pending', 'streaming', 'done', 'failed');
+ALTER TABLE summaries
+  ADD COLUMN status summary_status NOT NULL DEFAULT 'done',
+  ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ADD COLUMN error TEXT;
+CREATE INDEX summaries_status_inflight_idx
+  ON summaries(updated_at) WHERE status IN ('pending', 'streaming');
+```
+
+(`'done'` default keeps existing rows valid. `streaming` is reserved for
+the future token-streaming variant — no schema change needed when SSE
+lands; it just becomes a transient state between `pending` and `done`.)
+
+### Atomic claim
+
+A request wanting a summary issues:
+
+```sql
+INSERT INTO summaries (message_id, model, short, status)
+VALUES (%s, %s, '', 'pending')
+ON CONFLICT (message_id, model) DO NOTHING
+RETURNING id;
+```
+
+If `RETURNING` yielded a row → **we claimed**; we run the LLM and
+`UPDATE … SET short=…, status='done'` at the end (or `'failed'` with an
+error message). If no row was returned → another request already owns
+the generation; we just read the current row's state and render
+accordingly.
+
+### Endpoint shape
+
+- `GET /api/tankekart/{mid}` — returns the ranked card list. For each
+  card it reads the summary row and renders one of:
+  - `done` → final summary text, no polling
+  - `pending` / `streaming` → "Genererer…" placeholder + an `hx-get`
+    poll on `/api/sum/{mid}` every 2 s
+  - `failed` → error chip + retry button
+  - absent → claim + schedule a `BackgroundTask`, render same placeholder
+- `GET /api/sum/{mid}` — returns one card-summary fragment. Same state
+  switch; once the row is `done`, the response includes a card without
+  the polling trigger, so HTMX stops on its own.
+
+### Reclaim
+
+A row stuck in `pending` for >5 min without an `updated_at` bump is
+considered abandoned (process restarted mid-generation, Ollama hung,
+etc.). The next claim attempt that sees such a row reclaims by updating
+`status='failed', error='timeout'` and inserting fresh — manual policy
+in code; no separate reaper process in v1.
+
+## 12. Live embedding fallback (2026-05-22)
+
+Embed pipeline only catches messages every 15 min. When the user opens
+a brand-new mail, `tankekart()` can't find it in `messages` and returns
+`[]`, which the template renders as "Ingen relaterte funn". This is
+indistinguishable from "no semantic neighbours."
+
+Fix: when the open message is missing from `messages`, fetch its body
+via notmuch, run bge-m3 on the chunks (single `/api/embed` call —
+~250 ms solo), mean-pool, and use as the query vector. Cache nothing —
+the embed pipeline will pick it up on the next 15-min cycle. The
+result: any message in notmuch can be opened, not just embedded ones.
+
+(This also means the tankekart view itself is robust to
+embed-pipeline lag.)
+
+## 13. Decisions log (2026-05-22)
 
 - **Frontend:** FastAPI + Jinja2 + HTMX. No SPA, no build step.
 - **Tankekart:** ranked list of cards. Graph view deferred to IDEAS.md.

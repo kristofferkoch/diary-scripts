@@ -1,0 +1,39 @@
+{# One card-summary fragment. Branches map 1:1 to summary status:
+   - done       : final, no polling
+   - done_stale : show old text + poll for v-bump regen
+   - failed     : error message, click to retry
+   - pending/streaming : placeholder + poll
+#}
+{% if status == 'done' %}
+  <p class="summary">{{ short }}</p>
+{% elif status == 'done_draft' %}
+  {# Lower-tier draft is done; a better pass is still running. Show the
+     draft and keep polling so the final replaces it when ready. #}
+  <p class="summary draft"
+     hx-get="{{ url_for('get_summary_fragment', message_id=msg_id_quoted) }}"
+     hx-trigger="load delay:2s"
+     hx-swap="outerHTML"
+     title="utkast — bedre versjon på vei">{{ short }}</p>
+{% elif status == 'done_stale' %}
+  <p class="summary stale"
+     hx-get="{{ url_for('get_summary_fragment', message_id=msg_id_quoted) }}"
+     hx-trigger="load delay:2s"
+     hx-swap="outerHTML"
+     title="oppdaterer sammendrag">{{ short }}</p>
+{% elif status == 'failed' %}
+  <p class="summary failed"
+     hx-get="{{ url_for('get_summary_fragment', message_id=msg_id_quoted) }}"
+     hx-trigger="click"
+     hx-swap="outerHTML"
+     title="{{ error or 'feilet' }} (klikk for å prøve igjen)">
+    (summarisering feilet)
+  </p>
+{% else %}
+  {# pending or streaming — partial text if any, plus polling. #}
+  <p class="summary pending"
+     hx-get="{{ url_for('get_summary_fragment', message_id=msg_id_quoted) }}"
+     hx-trigger="load delay:2s"
+     hx-swap="outerHTML">
+    {% if short %}{{ short }}{% else %}<span class="dots">Genererer&hellip;</span>{% endif %}
+  </p>
+{% endif %}

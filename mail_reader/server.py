@@ -1,13 +1,19 @@
 """FastAPI app: inbox + message detail + tankekart fragment.
 
 Run directly (`uv run -m mail_reader.server`) or via the systemd unit.
-Behind Caddy at `/mail/` — `root_path=/mail` so url_for() generates
-absolute paths the browser can follow.
+Behind Caddy at `/mail/` — root_path is set on uvicorn so url_for()
+generates `/mail/...` while the proxy-stripped inbound path matches
+routes registered at `/`.
+
+Summary generation runs in background workers (see `workers.py`),
+spawned at app startup via the lifespan. Requesting a summary just
+INSERTs a pending row — the worker queue picks it up.
 """
 from __future__ import annotations
 
 import os
 import urllib.parse
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -17,16 +23,25 @@ from fastapi.templating import Jinja2Templates
 
 from . import db, inbox as inbox_mod, message as message_mod, related as related_mod
 from . import summarize as summarize_mod
+from . import workers as workers_mod
+from .date_format import short_date
 
 HERE = Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=str(HERE / "templates"))
+TEMPLATES.env.filters["short_date"] = short_date
 
-# `root_path` is set on uvicorn (see main()), not the FastAPI constructor.
-# With Caddy's `handle_path /mail/*` stripping the prefix, uvicorn-level
-# root_path is the "proxy already stripped, here's the prefix only for URL
-# generation" mode. Setting it on FastAPI() instead made routing require the
-# /mail prefix on the inbound path, so static assets 404'd through Caddy.
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    tasks = workers_mod.spawn_all()
+    try:
+        yield
+    finally:
+        for t in tasks:
+            t.cancel()
+
+
+app = FastAPI(lifespan=lifespan)
 
 app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
 
@@ -39,6 +54,39 @@ def healthz() -> dict[str, str]:
 @app.get("/", response_class=HTMLResponse)
 def get_inbox(request: Request, limit: int = 50):
     threads = inbox_mod.list_inbox(limit=limit)
+    # Attach the best-available summary state to each thread row. Same
+    # scheduling/bump logic as the tankekart endpoint: missing rows get
+    # both passes scheduled, stale rows get a regen, all visible rows
+    # get their requested_at bumped so they rise to the front of the
+    # worker queue.
+    with db.connect() as conn:
+        tids = [t["thread"] for t in threads]
+        thread_to_mid = inbox_mod.thread_latest_mids(conn, tids)
+        all_mids: list[str] = []
+        for t in threads:
+            mid = thread_to_mid.get(t["thread"])
+            if mid is None:
+                # No embedded message yet — render the thread without a
+                # summary card. Embedding catches up via mail-sync.
+                t["summary_status"] = None
+                t["summary"] = None
+                t["summary_error"] = None
+                t["summary_mid_quoted"] = None
+                continue
+            all_mids.append(mid)
+            state = summarize_mod.read_state(conn, mid)
+            if state is None:
+                summarize_mod.schedule_all_passes(conn, mid)
+                state = summarize_mod.SummaryState(
+                    status="pending", short="", error=None,
+                )
+            elif state["status"] == "done_stale":
+                summarize_mod.schedule_all_passes(conn, mid)
+            t["summary_status"] = state["status"]
+            t["summary"] = state["short"]
+            t["summary_error"] = state["error"]
+            t["summary_mid_quoted"] = urllib.parse.quote(mid, safe="")
+        summarize_mod.bump_priority(conn, all_mids)
     return TEMPLATES.TemplateResponse(
         request, "inbox.html", {"threads": threads},
     )
@@ -71,13 +119,77 @@ def _render_message(request: Request, msg_id: str, thread_id: str | None):
 
 @app.get("/api/tankekart/{message_id:path}", response_class=HTMLResponse)
 def get_tankekart(request: Request, message_id: str):
+    """Render branches. For each leaf, attach summary state. If no row
+    yet, schedule **all** configured passes (draft + final). On stale
+    reads, schedule a regen for the current prompt version. Then bump
+    priority for every leaf so currently-viewed mails rise to the top
+    of the worker queue."""
     msg_id = urllib.parse.unquote(message_id)
     with db.connect() as conn:
-        related = related_mod.tankekart(conn, msg_id, k=10)
-        for r in related:
-            r["summary"] = summarize_mod.get_or_create_summary(conn, r["message_id"])
+        branches = related_mod.tankekart(conn, msg_id)
+        all_leaf_mids: list[str] = []
+        for branch in branches:
+            for leaf in branch["leaves"]:
+                lid = leaf["message_id"]
+                all_leaf_mids.append(lid)
+                state = summarize_mod.read_state(conn, lid)
+                if state is None:
+                    summarize_mod.schedule_all_passes(conn, lid)
+                    state = summarize_mod.SummaryState(
+                        status="pending", short="", error=None,
+                    )
+                elif state["status"] == "done_stale":
+                    # Old prompt version: enqueue regen at current.
+                    summarize_mod.schedule_all_passes(conn, lid)
+                elif state["status"] == "done_draft":
+                    # Lower-tier done, higher-tier still in flight. The
+                    # workers will pick it up; just keep its priority high.
+                    pass
+                leaf["summary_status"] = state["status"]
+                leaf["summary"] = state["short"]
+                leaf["summary_error"] = state["error"]
+        # Bump priority for everything visible in this view.
+        summarize_mod.bump_priority(conn, all_leaf_mids)
     return TEMPLATES.TemplateResponse(
-        request, "_tankekart.html", {"related": related},
+        request, "_tankekart.html", {"branches": branches},
+    )
+
+
+@app.get("/api/queue", response_class=HTMLResponse)
+def get_queue_indicator(request: Request):
+    """Tiny topbar fragment showing pending+streaming counts per pass.
+    Polled by HTMX every few seconds via the base template."""
+    with db.connect() as conn:
+        counts = summarize_mod.queue_counts(conn)
+    return TEMPLATES.TemplateResponse(
+        request, "_queue.html", {"counts": counts},
+    )
+
+
+@app.get("/api/sum/{message_id:path}", response_class=HTMLResponse)
+def get_summary_fragment(request: Request, message_id: str):
+    """Single-card summary fragment, used by HTMX polling. Schedules all
+    passes if no row exists; bumps priority on every poll so an active
+    card stays at the front of the worker queue."""
+    msg_id = urllib.parse.unquote(message_id)
+    with db.connect() as conn:
+        state = summarize_mod.read_state(conn, msg_id)
+        if state is None:
+            summarize_mod.schedule_all_passes(conn, msg_id)
+            state = summarize_mod.SummaryState(
+                status="pending", short="", error=None,
+            )
+        elif state["status"] == "done_stale":
+            summarize_mod.schedule_all_passes(conn, msg_id)
+        summarize_mod.bump_priority(conn, [msg_id])
+    return TEMPLATES.TemplateResponse(
+        request, "_sum.html",
+        {
+            "msg_id_quoted": urllib.parse.quote(msg_id, safe=""),
+            "status": state["status"],
+            "short": state["short"],
+            "error": state["error"],
+        },
     )
 
 

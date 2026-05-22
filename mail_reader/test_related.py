@@ -49,16 +49,23 @@ def conn():
         yield c
 
 
-def _pick_message_id(conn: psycopg.Connection, where: str) -> str | None:
+_PICK_SQL_NON_NULL_THREAD = (
+    "SELECT m.message_id FROM messages m "
+    "JOIN chunks c ON c.message_id = m.id AND c.attachment_id IS NULL "
+    "WHERE m.thread_id IS NOT NULL "
+    "GROUP BY m.id, m.message_id LIMIT 1"
+)
+_PICK_SQL_NULL_THREAD = (
+    "SELECT m.message_id FROM messages m "
+    "JOIN chunks c ON c.message_id = m.id AND c.attachment_id IS NULL "
+    "WHERE m.thread_id IS NULL "
+    "GROUP BY m.id, m.message_id LIMIT 1"
+)
+
+
+def _pick_message_id(conn: psycopg.Connection, null_thread: bool) -> str | None:
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT m.message_id "
-            "FROM messages m "
-            "JOIN chunks c ON c.message_id = m.id AND c.attachment_id IS NULL "
-            f"WHERE {where} "
-            "GROUP BY m.id, m.message_id "
-            "LIMIT 1"
-        )
+        cur.execute(_PICK_SQL_NULL_THREAD if null_thread else _PICK_SQL_NON_NULL_THREAD)
         row = cur.fetchone()
         return row[0] if row else None
 
@@ -72,31 +79,80 @@ def test_tankekart_does_not_raise_on_indeterminate_datatype(conn):
     Fix: add `::text` casts on the thread_id parameter placeholders.
 
     Drop the casts in `related.py` and this test fails. Keep them and it
-    returns a list (possibly empty)."""
-    mid = _pick_message_id(conn, "m.thread_id IS NOT NULL")
+    returns a list of branches (possibly empty)."""
+    mid = _pick_message_id(conn, null_thread=False)
     if mid is None:
         pytest.skip("no embedded messages in mailvec to exercise the SQL")
-    out = tankekart(conn, mid, k=3)
-    assert isinstance(out, list)
-    for r in out:
-        assert "message_id" in r
-        assert 0.0 <= r["similarity"] <= 1.0
-        assert r["summary"] is None  # tankekart() leaves this for the caller
+    branches = tankekart(conn, mid, n_per_branch=3)
+    assert isinstance(branches, list)
+    for b in branches:
+        assert isinstance(b["chunk_idx"], int)
+        assert isinstance(b["label"], str)
+        for leaf in b["leaves"]:
+            assert "message_id" in leaf
+            assert 0.0 <= leaf["similarity"] <= 1.0
+            assert leaf["summary"] is None
 
 
-def test_tankekart_handles_null_thread_id_branch(conn):
-    """Belt-and-suspenders: if a row with NULL thread_id ever lands in
-    mailvec, the `m.thread_id IS NULL OR …` branch should still execute
-    cleanly. Currently there are no such rows in the fixture DB, so this
-    test will skip — left in to exercise the code path if/when one appears
-    (e.g. messages without an In-Reply-To chain)."""
-    mid = _pick_message_id(conn, "m.thread_id IS NULL")
-    if mid is None:
-        pytest.skip("no message with thread_id IS NULL in fixtures")
-    out = tankekart(conn, mid, k=3)
-    assert isinstance(out, list)
+@pytest.fixture
+def msg_temporarily_null_thread(conn):
+    """Take a real embedded message, NULL its thread_id for the duration
+    of the test, restore in teardown. Exercises the `IS NULL` branches
+    of the tankekart SQL — those rarely arise in production but the
+    code path exists, and the previous IndeterminateDatatype bug lived
+    exactly in that branch's parameter handling."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT m.id, m.thread_id, m.message_id
+            FROM messages m
+            JOIN chunks c
+              ON c.message_id = m.id AND c.attachment_id IS NULL
+            WHERE m.thread_id IS NOT NULL
+            GROUP BY m.id
+            ORDER BY m.id
+            LIMIT 1
+            """
+        )
+        row = cur.fetchone()
+    if row is None:
+        pytest.skip("no embedded message with thread_id available")
+    row_id, original_thread, mid = row
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE messages SET thread_id = NULL WHERE id = %s", (row_id,)
+        )
+        conn.commit()
+    try:
+        yield mid
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE messages SET thread_id = %s WHERE id = %s",
+                (original_thread, row_id),
+            )
+            conn.commit()
 
 
-def test_tankekart_returns_empty_for_unknown_message(conn):
-    out = tankekart(conn, "this-message-does-not-exist@example.invalid", k=5)
-    assert out == []
+def test_tankekart_handles_null_thread_id_branch(conn, msg_temporarily_null_thread):
+    """The `m.thread_id IS NULL OR …` branch should execute cleanly.
+
+    Production thread_ids are always set by `embed_mail.py` (notmuch
+    assigns one), so this scenario doesn't arise organically — but the
+    SQL covers it, and the previous IndeterminateDatatype bug lived
+    in exactly this branch's parameter typing. The fixture forces the
+    condition by mutating a real row + restoring on teardown."""
+    branches = tankekart(conn, msg_temporarily_null_thread, n_per_branch=3)
+    assert isinstance(branches, list)
+    # We have an embedded message, so there should be at least one branch
+    # (the source mail has at least one chunk).
+    assert branches, "expected at least one branch for an embedded message"
+
+
+def test_tankekart_unknown_message_uses_live_embed_or_returns_empty(conn):
+    """An unknown message_id can't be embedded live either (notmuch will
+    fail to fetch raw), so the live-embed fallback returns []."""
+    branches = tankekart(
+        conn, "this-message-does-not-exist@example.invalid", n_per_branch=3,
+    )
+    assert branches == []
