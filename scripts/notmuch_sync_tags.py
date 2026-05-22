@@ -47,6 +47,38 @@ RULES: list[tuple[str, str, tuple[str, ...]]] = [
 WORKSPACE = pathlib.Path(__file__).resolve().parent.parent
 BACKUP_DIR = WORKSPACE / "memory" / "notmuch-dumps"
 
+MAILDIR_ROOT = pathlib.Path.home() / "Mail" / "Proton"
+
+
+def _folder_query(folder: str) -> str:
+    """Format a folder: query, quoting when the path needs it."""
+    if any(c in folder for c in ' "()[]{}\\'):
+        escaped = folder.replace("\\", "\\\\").replace('"', '\\"')
+        return f'folder:"{escaped}"'
+    return f"folder:{folder}"
+
+
+def discover_label_rules() -> list[tuple[str, str, tuple[str, ...]]]:
+    """Auto-discover `Labels/<name>` maildirs and emit additive label rules.
+
+    Proton labels are additive: a message can carry many labels alongside its
+    canonical folder (INBOX/Archive/…). So these rules only add `tag:<name>`
+    and never strip `inbox` etc. Bridge-internal `[Imap]/*` namespaces are
+    skipped.
+    """
+    labels_dir = MAILDIR_ROOT / "Labels"
+    if not labels_dir.is_dir():
+        return []
+    rules: list[tuple[str, str, tuple[str, ...]]] = []
+    for entry in sorted(labels_dir.iterdir()):
+        if not (entry / "cur").is_dir():
+            continue
+        name = entry.name
+        if name.startswith("[Imap]"):
+            continue
+        rules.append((f"Labels/{name}", name, ()))
+    return rules
+
 
 def nm_count(query: str) -> int:
     out = subprocess.run(
@@ -88,8 +120,8 @@ def backup_dump() -> pathlib.Path:
 def plan() -> list[dict]:
     """Compute deltas for each rule without changing anything."""
     out = []
-    for folder, add_tag, remove_tags in RULES:
-        folder_q = f"folder:{folder}"
+    for folder, add_tag, remove_tags in RULES + discover_label_rules():
+        folder_q = _folder_query(folder)
         to_add = nm_count(f"{folder_q} and not tag:{add_tag}")
         removals = {}
         for rt in remove_tags:
@@ -106,8 +138,8 @@ def plan() -> list[dict]:
 
 
 def apply(quiet: bool = False) -> None:
-    for folder, add_tag, remove_tags in RULES:
-        folder_q = f"folder:{folder}"
+    for folder, add_tag, remove_tags in RULES + discover_label_rules():
+        folder_q = _folder_query(folder)
         add_q = f"{folder_q} and not tag:{add_tag}"
         if nm_count(add_q):
             if not quiet:

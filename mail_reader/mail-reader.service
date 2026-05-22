@@ -1,0 +1,20 @@
+[Unit]
+Description=mail_reader webapp (FastAPI + HTMX behind Caddy /mail/)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/diary
+Environment=HOST=127.0.0.1
+Environment=PORT=8800
+Environment=ROOT_PATH=/mail
+Environment=PG_DSN=dbname=mailvec
+Environment=OLLAMA_URL=http://gpu-host:11434
+Environment=SUMMARY_MODEL=qwen3.6:35b-a3b
+ExecStart=%h/.local/bin/uv run --frozen --no-sync python -m mail_reader.server
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

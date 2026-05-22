@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Innboks{% endblock %}
+{% block content %}
+<div class="inbox-head">
+  <h1>Innboks</h1>
+  {% if threads %}<span class="count">{{ threads|length }} tråder</span>{% endif %}
+</div>
+{% if not threads %}
+<p class="empty">Innboksen er tom.</p>
+{% else %}
+<ul class="threads">
+{% for t in threads %}
+  {% set extra_tags = t.tags | reject('in', ['inbox', 'unread']) | list %}
+  <li class="thread{% if 'unread' in t.tags %} unread{% endif %}">
+    <a href="{{ url_for('get_thread', thread_id=t.thread) }}">
+      <div class="subject">{{ t.subject or '(uten emne)' }}{% if t.total > 1 %}<span class="count">{{ t.total }}</span>{% endif %}</div>
+      <div class="date">{{ t.date_relative }}</div>
+      <div class="meta">
+        <span class="from">{{ t.authors }}</span>
+        {% if extra_tags %}
+        <span class="tags">
+          {% for tag in extra_tags %}<span class="tag">{{ tag }}</span>{% endfor %}
+        </span>
+        {% endif %}
+      </div>
+    </a>
+  </li>
+{% endfor %}
+</ul>
+{% endif %}
+{% endblock %}

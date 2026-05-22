@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}{{ msg.subject or '(uten emne)' }}{% endblock %}
+{% block content %}
+<a href="{{ url_for('get_inbox') }}" class="back-link">
+  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+       stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M10 3 L5 8 L10 13"/>
+  </svg>
+  <span>Innboks</span>
+</a>
+
+<article class="message">
+  <header class="msg-header">
+    <h1 class="subject">{{ msg.subject or '(uten emne)' }}</h1>
+
+    {# Split "Name <addr>" into name + address for nicer display. #}
+    {% set from_raw = msg.from_addr %}
+    {% if '<' in from_raw and '>' in from_raw %}
+      {% set from_name = from_raw.split('<')[0].strip().strip('"') %}
+      {% set from_addr = from_raw.split('<')[1].rsplit('>', 1)[0].strip() %}
+    {% else %}
+      {% set from_name = from_raw %}
+      {% set from_addr = '' %}
+    {% endif %}
+
+    <div class="byline">
+      <span class="from">
+        {{ from_name }}{% if from_addr and from_addr != from_name %}<span class="addr">&lt;{{ from_addr }}&gt;</span>{% endif %}
+      </span>
+      <span class="sep">·</span>
+      <span class="date">{{ msg.date }}</span>
+    </div>
+    {% if msg.to %}
+    <div class="to-line">
+      <span class="label">Til</span>{{ msg.to }}
+    </div>
+    {% endif %}
+
+    {% if msg.attachments %}
+    <ul class="attachments">
+      {% for a in msg.attachments %}
+      <li>
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+             stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M10.5 4 L5.5 9 a1.8 1.8 0 0 0 2.55 2.55 L13 6.5 a3.2 3.2 0 0 0 -4.5 -4.5 L3.5 7 a4.5 4.5 0 0 0 6.4 6.4 L14 9.3"/>
+        </svg>
+        <span class="fname">{{ a.filename }}</span>
+        <span class="mime">{{ a.mime }} · {{ (a.size / 1024) | round | int }} KiB</span>
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </header>
+  <section class="body {% if msg.body_is_plain %}plain{% else %}rich{% endif %}">
+    {{ msg.body_html | safe }}
+  </section>
+</article>
+
+<section class="tankekart"
+         hx-get="{{ url_for('get_tankekart', message_id=msg_id_quoted) }}"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+  <h2>Tankekart</h2>
+  <p class="loading">Laster relaterte e-poster</p>
+</section>
+{% endblock %}
