@@ -149,6 +149,16 @@ def test_chunk_text_long_input_chunks_with_overlap():
     assert len(joined) >= len(text.strip())
 
 
+def test_chunk_text_strips_nul_bytes():
+    # PG TEXT can't store NULs; regression for failures seen on 7 ancient
+    # ifi.uio.no / blackberry.rim.net / NTNU webmail messages.
+    out = chunk_text("hello\x00world\x00")
+    assert out == ["helloworld"]
+    # Even with NULs inside a chunk that's otherwise large.
+    big = ("a\x00" * 500) + "\n\n" + ("b" * 500)
+    assert all("\x00" not in c for c in chunk_text(big))
+
+
 def test_chunk_text_snaps_to_blank_line_when_available():
     head = "a" * (CHUNK_CHARS - 100)
     text = head + "\n\nTAIL" + ("z" * 3000)
@@ -223,6 +233,35 @@ def test_tier_query_tier2_includes_me():
     q = tier_query(2)
     assert q.startswith('thread:"{from:')
     assert q.endswith('}"')
+
+
+def test_tier_query_tier4_digest_keep():
+    assert tier_query(4) == "tag:digest::keep"
+
+
+def test_tier_query_tier5_attachment():
+    # Bare 'attachment'; dedup with tiers 1-3 happens via message_id
+    # idempotency in the writer, not via query exclusion.
+    assert tier_query(5) == "attachment"
+
+
+def test_tier_query_tier6_institutional_domains():
+    from embed_mail import TIER6_DOMAINS
+    q = tier_query(6)
+    # All configured domains must appear as `from:*@<domain>` clauses joined
+    # with ' or '.
+    for d in TIER6_DOMAINS:
+        assert f"from:*@{d}" in q
+    # And nothing else — fragment count matches.
+    assert q.count(" or ") == len(TIER6_DOMAINS) - 1
+
+
+def test_tier_query_invalid_raises():
+    import pytest
+    with pytest.raises(ValueError):
+        tier_query(7)
+    with pytest.raises(ValueError):
+        tier_query(0)
 
 
 # ---------- attachment extractors ----------

@@ -2,11 +2,16 @@
 """
 Embed mail from notmuch into Postgres + pgvector using Ollama on gpu-host.
 
-Tiers (set with --tier or run all three sequentially):
+Tiers (set with --tier or run them all sequentially):
     1  date:1y..                                          (~6.3k msgs)
-    2  thread:"{from:<me>}"                               (~733 msgs)
+    2  thread:"{from:<me>}"                               (~0.7k msgs)
     3  from:<addr1> or from:<addr2> or ...                (~9k msgs)
        (addresses harvested from your past recipients)
+    4  tag:digest::keep                                   (~48k msgs)
+    5  attachment                                         (~7k msgs, mostly
+       overlapping tiers 1-3; idempotency dedups automatically)
+    6  from:*@<NO institution>                            (~1k msgs)
+       (skatteetaten, oslo.kommune, altinn, digipost, nav, posten, vy, ...)
 
 Per message: notmuch raw → email.parse → main text body (plain/html)
 + extract text from PDF/DOCX/ODT/ICS/text attachments
@@ -320,8 +325,14 @@ def chunk_text(text: str) -> list[str]:
     >>> chunks = chunk_text("x" * 5000)
     >>> len(chunks) >= 2 and all(len(c) <= CHUNK_CHARS for c in chunks)
     True
+    >>> chunk_text("hello\\x00world")    # NULs stripped (TEXT cols reject them)
+    ['helloworld']
     """
-    text = text.strip()
+    # PostgreSQL TEXT cannot store NUL bytes; strip them everywhere before
+    # they reach the writer. Real mail with NULs has been seen from ancient
+    # senders (ifi.uio.no, blackberry.rim.net) — usually a stray byte in PDF
+    # or DOCX extracted text.
+    text = text.replace("\x00", "").strip()
     if not text:
         return []
     if len(text) <= CHUNK_CHARS:
@@ -371,6 +382,18 @@ def vec_literal(v: list[float]) -> str:
 
 # ---------- tier queries ----------
 
+# Tier 6: Norwegian governmental / institutional senders. These are addresses
+# whose mail is rarely replied to (so tier 3 misses them) but is high-value
+# for retrieval — tax letters, school portal notifications, postal pickups,
+# health system mail, etc. Extend as needed.
+TIER6_DOMAINS: tuple[str, ...] = (
+    "skatteetaten.no", "altinn.no", "digipost.no", "oslo.kommune.no",
+    "nav.no", "helsenorge.no", "helsedirektoratet.no", "fhi.no",
+    "pasientreiser.no", "politiet.no", "statensvegvesen.no", "digdir.no",
+    "posten.no", "bring.no", "vy.no", "ruter.no",
+)
+
+
 def tier_query(tier: int) -> str:
     me_or = " or ".join(f"from:{a}" for a in ME)
     if tier == 1:
@@ -386,6 +409,12 @@ def tier_query(tier: int) -> str:
         # drop our own
         addrs = [a for a in addrs if a.lower() not in {m.lower() for m in ME}]
         return " or ".join(f"from:{a}" for a in addrs)
+    if tier == 4:
+        return "tag:digest::keep"
+    if tier == 5:
+        return "attachment"
+    if tier == 6:
+        return " or ".join(f"from:*@{d}" for d in TIER6_DOMAINS)
     raise ValueError(tier)
 
 # ---------- main loop ----------
@@ -553,8 +582,9 @@ def process(conn: psycopg.Connection, tier: int, limit: int | None, verbose: boo
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--tier", type=int, choices=[1, 2, 3])
-    ap.add_argument("--all", action="store_true", help="run tiers 2,1,3 in order")
+    ap.add_argument("--tier", type=int, choices=[1, 2, 3, 4, 5, 6])
+    ap.add_argument("--all", action="store_true",
+                    help="run tiers in order 2,1,3,6,5,4 (smallest first)")
     ap.add_argument("--limit", type=int)
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
@@ -563,7 +593,13 @@ def main(argv: list[str]) -> int:
         ap.error("pass --tier N or --all")
 
     with psycopg.connect(PG_DSN, autocommit=True) as conn:
-        tiers = [2, 1, 3] if args.all else [args.tier]
+        # Order matters only for runtime feedback (smaller tiers finish first
+        # so failures surface fast). Idempotency on message_id means overlap
+        # between tiers gets skipped on the second visit, so the ORDER also
+        # determines which tier label each message ends up tagged with: a
+        # message in both tier 1 and tier 4 will be embedded under tier 1
+        # (whichever runs first) and skipped by tier 4.
+        tiers = [2, 1, 3, 6, 5, 4] if args.all else [args.tier]
         for t in tiers:
             process(conn, t, args.limit, verbose=not args.quiet)
     return 0

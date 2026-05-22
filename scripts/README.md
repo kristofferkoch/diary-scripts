@@ -61,7 +61,7 @@ you don't know the keyword.
 # basic
 uv run scripts/search_mail.py "examplefund utbetaling 2025"
 
-# filter by tier (1=last 1y, 2=threads I'm in, 3=known senders), sender, date
+# filter by tier (see "tier definitions" below), sender, date
 uv run scripts/search_mail.py --tier 1 --since 2025-01-01 "fakturaer fra strøm"
 uv run scripts/search_mail.py --from astrid "ukeplan"
 
@@ -89,6 +89,22 @@ Schema lives in `migrations/`:
   or `Content-Disposition: attachment`) + `chunks.attachment_id` column.
   Body chunks have `attachment_id IS NULL`; attachment chunks reference the
   attachment.
+
+**Tier definitions** (`messages.tier`, filterable in search):
+
+| tier | query | rationale |
+|---:|---|---|
+| 1 | `date:1y..` | recent mail — high recall for now |
+| 2 | `thread:"{from:me}"` | every thread I sent into |
+| 3 | `from:<recipient_addrs>` | senders I've ever replied to |
+| 4 | `tag:digest::keep` | mail Claude's digest pass marked worth keeping |
+| 5 | `attachment` | every mail with attachments (PDF/ICS/DOCX/…) |
+| 6 | `from:*@<NO institution>` | governmental + utilities (skatteetaten, oslo.kommune, altinn, digipost, nav, posten, vy, …) — defined as `TIER6_DOMAINS` in `embed_mail.py` |
+
+Idempotency on `message_id` means tiers overlap freely: a mail in both
+tier 1 and tier 4 gets embedded once (under whichever tier ran first) and
+skipped by later tiers. `--all` order is `2,1,3,6,5,4` — smallest tier
+first so failures surface fast.
 
 ### Embedding new mail — `embed_mail.py` (automated)
 
