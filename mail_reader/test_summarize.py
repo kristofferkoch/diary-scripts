@@ -433,6 +433,109 @@ def test_reclaim_of_stale_pending_row(conn, fresh_msg):
     assert any("abandoned" in (e or "") for e in failed_errors)
 
 
+def test_reclaim_stale_streaming_clears_old_rows(conn, fresh_msg):
+    """Reclaim sweeps streaming rows older than the cutoff and flips them
+    to `failed`. Regression: 154 zombie rows at prompt_version='p2' that
+    `_claim_one`'s per-pass reclaim could never reach (because the
+    user-visible prompt version had moved to 'p5' by then). The sweep
+    must be prompt_version-agnostic."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM messages WHERE message_id = %s", (fresh_msg,))
+        mrid_row = cur.fetchone()
+        assert mrid_row is not None
+        mrid = mrid_row[0]
+        # Insert one streaming row at a (deliberately) ancient prompt
+        # version, then backdate updated_at past the threshold. The
+        # trigger bumps updated_at on insert, so we backdate after.
+        cur.execute(
+            """
+            INSERT INTO summaries
+                (message_id, model, prompt_version, short, status)
+            VALUES (%s, %s, 'p-ancient', '', 'streaming')
+            RETURNING id
+            """,
+            (mrid, TEST_MODEL),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        sid = row[0]
+        cur.execute(
+            "UPDATE summaries SET updated_at = now() - interval '2 hours' WHERE id = %s",
+            (sid,),
+        )
+        conn.commit()
+    n = summarize.reclaim_stale_streaming(conn, max_age_seconds=600)
+    assert n >= 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT status::text, error FROM summaries WHERE id = %s",
+                    (sid,))
+        row = cur.fetchone()
+    assert row is not None
+    status, error = row
+    assert status == "failed"
+    assert error and "abandoned" in error
+
+
+def test_reclaim_stale_streaming_leaves_young_rows_alone(conn, fresh_msg):
+    """A streaming row younger than the cutoff stays put — we don't want
+    to kill rows that an active worker is currently processing."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM messages WHERE message_id = %s", (fresh_msg,))
+        mrid_row = cur.fetchone()
+        assert mrid_row is not None
+        mrid = mrid_row[0]
+        cur.execute(
+            """
+            INSERT INTO summaries
+                (message_id, model, prompt_version, short, status)
+            VALUES (%s, %s, 'p-ancient', '', 'streaming')
+            RETURNING id
+            """,
+            (mrid, TEST_MODEL),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        sid = row[0]
+        conn.commit()
+    summarize.reclaim_stale_streaming(conn, max_age_seconds=600)
+    with conn.cursor() as cur:
+        cur.execute("SELECT status::text FROM summaries WHERE id = %s", (sid,))
+        row = cur.fetchone()
+    assert row is not None
+    assert row[0] == "streaming"
+
+
+def test_reclaim_stale_streaming_max_age_zero_clears_all(conn, fresh_msg):
+    """At worker startup we pass max_age=0 to clear any orphaned streaming
+    rows — they're necessarily orphans since the only producer of
+    streaming rows in this process hasn't started yet."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM messages WHERE message_id = %s", (fresh_msg,))
+        mrid_row = cur.fetchone()
+        assert mrid_row is not None
+        mrid = mrid_row[0]
+        cur.execute(
+            """
+            INSERT INTO summaries
+                (message_id, model, prompt_version, short, status)
+            VALUES (%s, %s, 'p-ancient', '', 'streaming')
+            RETURNING id
+            """,
+            (mrid, TEST_MODEL),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        sid = row[0]
+        conn.commit()
+    n = summarize.reclaim_stale_streaming(conn, max_age_seconds=0)
+    assert n >= 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT status::text FROM summaries WHERE id = %s", (sid,))
+        row = cur.fetchone()
+    assert row is not None
+    assert row[0] == "failed"
+
+
 def test_prompts_contain_no_copyable_concrete_facts():
     """Regression for the few-shot leak: qwen2.5 was parroting "Faktura
     nr 41463", "Eksempel Elektriske", "bekreft oppmøte innen tirsdag",

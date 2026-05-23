@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 import urllib.error
 
 import anyio.to_thread
@@ -26,6 +27,9 @@ log = logging.getLogger(__name__)
 
 IDLE_SLEEP_SECONDS = float(os.environ.get("WORKER_IDLE_SLEEP", "2.0"))
 ERROR_SLEEP_SECONDS = float(os.environ.get("WORKER_ERROR_SLEEP", "10.0"))
+# How often each worker loop sweeps for stale `streaming` rows whose
+# claiming worker died mid-process. Cheap (one indexed UPDATE).
+REAPER_INTERVAL_SECONDS = float(os.environ.get("WORKER_REAPER_INTERVAL", "60.0"))
 
 
 def _claim_next(model: str, tier: int) -> str | None:
@@ -72,11 +76,17 @@ def _process_one(model: str, tier: int) -> bool:
     return True
 
 
+def _reap_stale(max_age_seconds: int) -> int:
+    with db.connect() as conn:
+        return summarize.reclaim_stale_streaming(conn, max_age_seconds)
+
+
 async def worker_loop(model: str, tier: int) -> None:
     """Long-running async task. Yields back to the event loop between
     items so the FastAPI app stays responsive. Sync DB + HTTP work
     happens in the default threadpool via `anyio.to_thread.run_sync`."""
     log.info("[worker] started tier=%s model=%s", tier, model)
+    last_reap = time.monotonic()
     try:
         while True:
             try:
@@ -92,6 +102,14 @@ async def worker_loop(model: str, tier: int) -> None:
                 log.exception("[worker tier=%s] unexpected error", tier)
                 await asyncio.sleep(ERROR_SLEEP_SECONDS)
                 continue
+            if time.monotonic() - last_reap >= REAPER_INTERVAL_SECONDS:
+                last_reap = time.monotonic()
+                n = await anyio.to_thread.run_sync(
+                    _reap_stale, summarize.RECLAIM_AFTER_SECONDS,
+                )
+                if n:
+                    log.warning("[reaper tier=%s] failed %s stale streaming row(s)",
+                                tier, n)
             if not processed:
                 await asyncio.sleep(IDLE_SLEEP_SECONDS)
     except asyncio.CancelledError:
@@ -100,7 +118,13 @@ async def worker_loop(model: str, tier: int) -> None:
 
 
 def spawn_all() -> list[asyncio.Task]:
-    """Launch one worker task per configured pass."""
+    """Launch one worker task per configured pass. Reclaims any rows still
+    in `streaming` at boot — those are by definition orphans from a dead
+    previous worker process, since spawn_all is the only thing that creates
+    workers for this process."""
+    n = _reap_stale(0)
+    if n:
+        log.warning("[reaper] cleaned %s orphaned streaming row(s) at startup", n)
     return [
         asyncio.create_task(
             worker_loop(p["model"], p["tier"]),

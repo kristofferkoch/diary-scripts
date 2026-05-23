@@ -469,6 +469,39 @@ def claim_for_generation(conn: psycopg.Connection, notmuch_msg_id: str,
     return _claim_one(conn, mrid, model, tier)
 
 
+def reclaim_stale_streaming(conn: psycopg.Connection,
+                             max_age_seconds: int = 0) -> int:
+    """Flip any `streaming` row older than `max_age_seconds` to `failed`.
+
+    Independent of `model` and `prompt_version` — the per-pass reclaim in
+    `_claim_one` only fires when a new claim hits the same (mid, model,
+    version), so rows whose prompt version is no longer active (e.g. p2
+    after we moved to p5) would otherwise stay stuck forever.
+
+    `updated_at` is bumped to `now()` by the `summaries_touch_updated_at`
+    trigger on every UPDATE; for a row currently in `streaming`, that's
+    the time the worker claimed it. So `now() - updated_at` is the
+    processing age. With `max_age_seconds=0` every streaming row is
+    reclaimed (intended for worker startup — any row in `streaming` at
+    boot is from a dead previous worker).
+
+    Returns the number of rows reclaimed."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE summaries
+               SET status = 'failed',
+                   error  = 'abandoned (reaper)'
+             WHERE status = 'streaming'
+               AND updated_at < now() - make_interval(secs => %s)
+            """,
+            (max_age_seconds,),
+        )
+        n = cur.rowcount
+        conn.commit()
+    return n
+
+
 def schedule_all_passes(conn: psycopg.Connection,
                         notmuch_msg_id: str) -> int:
     """Enqueue every configured pass for this mail. Returns the count of
