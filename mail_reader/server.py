@@ -21,14 +21,16 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from . import agenda as agenda_mod
 from . import db, inbox as inbox_mod, message as message_mod, related as related_mod
 from . import summarize as summarize_mod
 from . import workers as workers_mod
-from .date_format import short_date
+from .date_format import relative_day, short_date
 
 HERE = Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=str(HERE / "templates"))
 TEMPLATES.env.filters["short_date"] = short_date
+TEMPLATES.env.filters["relative_day"] = relative_day
 
 
 @asynccontextmanager
@@ -87,8 +89,9 @@ def get_inbox(request: Request, limit: int = 50):
             t["summary_error"] = state["error"]
             t["summary_mid_quoted"] = urllib.parse.quote(mid, safe="")
         summarize_mod.bump_priority(conn, all_mids)
+        agenda = agenda_mod.list_upcoming(conn)
     return TEMPLATES.TemplateResponse(
-        request, "inbox.html", {"threads": threads},
+        request, "inbox.html", {"threads": threads, "agenda": agenda},
     )
 
 

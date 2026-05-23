@@ -5,6 +5,7 @@
   <h1>Innboks</h1>
   {% if threads %}<span class="count">{{ threads|length }} tråder</span>{% endif %}
 </div>
+{% include "_agenda.html" %}
 {% if not threads %}
 <p class="empty">Innboksen er tom.</p>
 {% else %}
