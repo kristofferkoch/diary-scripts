@@ -9,6 +9,113 @@ Format: `## YYYY-MM-DD — short title` headings, newest at top. Tag author with
 
 ---
 
+## 2026-05-23 — tier-2 escalation flag → second-level agent (user)
+
+> "Tier 2 should recommend launching another high-level model (with
+> thinking) to run with more context (e.g. CALENDAR.md or other
+> things) if appropriate. Should not write, but could provide e.g.
+> pull requestable branches?"
+>
+> Addendum: "Should not inject all .md into context, but give somehow
+> a reader-window+grep+semantic chunk search interface. General search
+> function for the markdown should probably be implemented first."
+
+A third layer above the existing two-pass queue. Tier-2's structured
+JSON (qwen3.6) gets a new boolean `escalate` + a one-sentence
+`escalate_reason`. When true, a separate agent runs — bigger model,
+extended thinking, broader context — and writes its proposal as a
+*branch* the user reviews before any state changes.
+
+**Why a third layer.** Tier-2 is structured-but-shallow: it tags
+deadlines, themes, entities. It doesn't reason across the workspace
+("does this collide with the offsite Astrid mentioned in last
+Tuesday's mail?"). A deeper pass with the right context can. But
+running a deep pass on every mail is wasteful — most mail is
+LinkedIn-notification noise. Tier-2 already knows the difference;
+let it decide.
+
+**Read-only by construction.** No auto-writes. The escalator's
+output is a git branch with diffs against `CALENDAR.md` / `BILLS.md`
+/ `DELIVERIES.md` / a draft reply. User reviews and merges (or doesn't)
+in a follow-up turn. Same trust model as `ultrareview`: agent
+proposes, human disposes.
+
+**Context interface (per addendum).** Don't dump CLAUDE.md +
+USER.md + CALENDAR.md + ... into the escalator's prompt — it'll
+drown and the bills will scale poorly. Instead:
+
+1. **General markdown-search tool — build this first.** New script
+   `scripts/search_md.py` (or extend `search_mail.py` to also index
+   the workspace's own .md files). Same pgvector + bge-m3 backend;
+   new table `md_chunks` with `(path, chunk_idx, embedding, text)`.
+   Walks `*.md` outside `memory/mail/`. Re-indexed on the same
+   15-min `mail-sync.timer` cycle, idempotent by `(path,
+   chunk_idx, content_hash)`.
+
+2. **Tools handed to the escalator agent**, as a small allowlist:
+   - `md_read(path, offset=0, limit=200)` — windowed read.
+   - `md_grep(pattern, paths=None)` — literal/regex over the
+     curated set.
+   - `md_search(query, k=8)` — semantic top-K over `md_chunks`,
+     returning `(path, line_range, snippet)` tuples.
+   - Optional: `mail_search(query, k=5)` reusing search_mail.py for
+     cross-corpus questions ("did Astrid mention the offsite?").
+
+   No writes. No shell. The agent reads, reasons, then emits a
+   structured proposal (diff hunks + summary).
+
+3. **Loop guard.** Hard cap on tool-call count per escalation
+   (say 30) and on wall time (60 s). If the agent spins, the
+   proposal is discarded and the escalation marked `failed`.
+
+**Where it surfaces in the UI.** In the message view, near the
+agenda card / action_required badge: a chip "⚑ escalert — forslag
+klart" (proposal ready) → click opens a side panel with the diff
+hunks and accept/reject buttons (UI-level only — the actual merge
+is a `git apply` triggered by a button-press, still confirmed).
+
+**Schema sketch.**
+
+```sql
+ALTER TABLE summaries
+  ADD COLUMN escalate BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN escalate_reason TEXT;
+
+CREATE TABLE escalations (
+  id            BIGSERIAL PRIMARY KEY,
+  summary_id    BIGINT REFERENCES summaries(id) ON DELETE CASCADE,
+  status        TEXT NOT NULL,    -- pending / running / done / failed
+  branch_name   TEXT,             -- git branch with the proposal
+  diff_summary  TEXT,             -- 1-3 sentence overview
+  tool_calls    INT,
+  ms_elapsed    INT,
+  created_at    TIMESTAMPTZ DEFAULT now()
+);
+```
+
+**Caveats.**
+
+- **Cost.** Bigger model + extended thinking + tool-loop = real
+  money per call. Tier-2's `escalate` decision needs high
+  precision — false positives are expensive. Calibrate on a hold-out
+  set before turning it on globally.
+- **Latency.** Minutes, not seconds. Has to be background-only;
+  the user view never blocks on an escalation.
+- **Trust.** The diff-as-output keeps blast radius small but raises
+  the bar on diff quality. Bad proposals waste user's review time
+  more than they save.
+- **Order of work.** Per user's addendum, the markdown-search tool
+  (`scripts/search_md.py` + the three `md_*` tool surfaces) is the
+  prerequisite. Build and stabilise it on its own first — it's
+  useful in many other contexts (general workspace Q&A, the LLM
+  natural-language search idea), and the escalator can land on top
+  once it's solid.
+
+Related: [[#2026-05-22-—-llm-composed-search-via-read-only-db-role]]
+extends this in the SQL direction; this idea extends it in the
+markdown direction. The two could share a single agent harness with
+different tool allowlists.
+
 ## 2026-05-22 — inbox view should show summaries (user)
 
 > "I want summaries visible in the inbox view."
