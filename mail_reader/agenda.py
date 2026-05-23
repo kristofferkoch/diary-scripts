@@ -69,7 +69,11 @@ def list_upcoming(conn: psycopg.Connection, days: int = 14) -> list[AgendaItem]:
             kind=r[1],
             note=r[2],
             subject=r[3],
-            thread_id=r[4],
+            # DB stores `thread:XXXX` (prefixed). The /t/{thread_id} route
+            # passes its arg straight to notmuch, which would re-prefix and
+            # get `thread:thread:XXXX` (not found). Strip here so the
+            # contract matches `inbox.py`'s bare-form output.
+            thread_id=r[4].removeprefix("thread:"),
             message_id=r[5],
             summary=r[6],
         )

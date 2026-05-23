@@ -213,7 +213,9 @@ def test_dedupes_across_thread_replies(conn, isolated_prompt, fixture_thread):
         conn.commit()
     try:
         items = agenda.list_upcoming(conn, days=14)
-        hits = [it for it in items if it["thread_id"] == thread_id
+        # agenda returns the bare form; fixture stores the prefixed form.
+        bare_thread_id = thread_id.removeprefix("thread:")
+        hits = [it for it in items if it["thread_id"] == bare_thread_id
                 and it["occurs_at"] == target and it["kind"] == "deadline"]
         assert len(hits) == 1, f"expected 1 dedup'd row, got {len(hits)}: {hits}"
         # And the surviving row should be from the latest reply (highest m.date).
@@ -286,6 +288,30 @@ def test_skips_unfinished_summaries(conn, isolated_prompt, fixture_thread):
     items = agenda.list_upcoming(conn, days=14)
     assert not any(it["note"] == "should not appear (pending)"
                    for it in items)
+
+
+def test_thread_id_is_bare_no_thread_prefix(conn, isolated_prompt,
+                                              fixture_thread):
+    """Regression: messages.thread_id is stored 'thread:XXXX' in the DB
+    (prefixed), but the /t/{thread_id} route passes the value straight
+    to notmuch which re-prefixes it → 'thread:thread:XXXX' → 404.
+
+    agenda items must return the bare form (matching inbox.py's shape)
+    so url_for('get_thread', thread_id=...) builds a URL the route
+    actually resolves."""
+    _, mrid, _ = fixture_thread
+    sid = _insert_summary(conn, mrid)
+    _insert_temporal(
+        conn, sid, "deadline",
+        datetime.date.today() + datetime.timedelta(days=2),
+        "bare-thread-id-check",
+    )
+    items = agenda.list_upcoming(conn, days=14)
+    hits = [it for it in items if it["note"] == "bare-thread-id-check"]
+    assert len(hits) == 1
+    assert not hits[0]["thread_id"].startswith("thread:"), (
+        f"thread_id should be bare, got {hits[0]['thread_id']!r}"
+    )
 
 
 def test_sorts_by_date_then_kind(conn, isolated_prompt, fixture_thread):
