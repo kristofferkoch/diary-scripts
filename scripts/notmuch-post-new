@@ -1,0 +1,10 @@
+#!/bin/sh
+# notmuch post-new hook — reconcile tag:inbox / tag:archive / etc. to
+# match the actual Proton maildir folder layout after every `notmuch new`.
+#
+# Installed by scripts/install_notmuch_hooks. The canonical copy of this
+# file lives in scripts/ so it survives a .notmuch/ rebuild (the previous
+# in-place install at ~/Mail/Proton/.notmuch/hooks/post-new was lost when
+# the xapian DB was rebuilt — see commits b873c96 and the 2026-05-22 fix).
+exec /home/user/.local/bin/uv run --project /home/user/diary --frozen --no-sync \
+    /home/user/diary/scripts/notmuch_sync_tags.py --apply --quiet

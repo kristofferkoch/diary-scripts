@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Install notmuch hooks into ~/Mail/Proton/.notmuch/hooks/. Idempotent.
+#
+# The .notmuch/ directory is not git-tracked, so hooks vanish whenever
+# the xapian DB is rebuilt. Re-run this script after such a rebuild.
+
+set -euo pipefail
+
+cd "$(dirname "$(readlink -f "$0")")"
+
+MAILDIR="${MAILDIR:-$HOME/Mail/Proton}"
+HOOKS_DIR="$MAILDIR/.notmuch/hooks"
+
+if [ ! -d "$MAILDIR/.notmuch" ]; then
+	echo "error: $MAILDIR/.notmuch does not exist — has notmuch been initialised?" >&2
+	exit 1
+fi
+
+mkdir -p "$HOOKS_DIR"
+
+echo "==> installing $HOOKS_DIR/post-new"
+install -m 0755 notmuch-post-new "$HOOKS_DIR/post-new"
+
+echo "ok — run 'notmuch new' to trigger it once"

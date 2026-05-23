@@ -161,6 +161,22 @@ For "archive after N days" workflows, use `scripts/archive_inbox.py`. Rules
 live in `scripts/archive_inbox_rules.json`. Systemd timer `archive-inbox.timer`
 runs it daily at ~03:30.
 
+### notmuch post-new hook
+
+`notmuch new` runs `~/Mail/Proton/.notmuch/hooks/post-new` after indexing,
+which calls `scripts/notmuch_sync_tags.py --apply --quiet`. Without this,
+folder moves on the Proton side (e.g. archiving a mail) don't update
+`tag:inbox` and the mail-reader inbox view goes stale.
+
+The hooks dir lives **inside** `.notmuch/`, which isn't git-tracked. If
+the xapian DB is ever rebuilt the hook vanishes — reinstall with:
+
+```bash
+scripts/install_notmuch_hooks
+```
+
+Canonical copy lives at `scripts/notmuch-post-new`.
+
 ### Maildir gotchas (mbsync + manual moves)
 
 If writing custom maildir moves: **always strip the `,U=<n>` suffix** from the
