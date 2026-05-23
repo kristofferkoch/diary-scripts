@@ -19,24 +19,14 @@ the richer extraction work (themes column on `summaries`).
 from __future__ import annotations
 
 import re
-import sys as _sys
 from datetime import datetime
-from pathlib import Path as _Path
 from typing import TypedDict
 
 import psycopg
 
-# scripts/ isn't a Python package; put it on sys.path so we can import
-# the already-tested mail helpers instead of duplicating notmuch+MIME code.
-_SCRIPTS_DIR = str(_Path(__file__).resolve().parent.parent / "scripts")
-if _SCRIPTS_DIR not in _sys.path:
-    _sys.path.insert(0, _SCRIPTS_DIR)
-from embed_mail import (  # noqa: E402  (sys.path tweak above)
-    chunk_text,
-    embed_batch,
-    nm_raw,
-    parse_message,
-)
+from scripts.embed_mail import chunk_text, embed_batch, nm_raw, parse_message
+
+from .thread_id import ThreadId
 
 
 class Related(TypedDict):
@@ -98,7 +88,7 @@ def _leaf_row(mid: str, date, from_addr: str | None,
 # ----------------- indexed path (open mail is in mailvec) -----------------
 
 def _branches_indexed(conn: psycopg.Connection, msg_row_id: int,
-                      thread_id: str | None,
+                      thread_id: ThreadId | None,
                       n_per_branch: int) -> list[Branch]:
     """One SQL query: for each chunk of the source message, take the
     top-N nearest neighbours (one row per neighbour message)."""
@@ -131,7 +121,10 @@ def _branches_indexed(conn: psycopg.Connection, msg_row_id: int,
             ) r
             ORDER BY s.chunk_idx ASC, r.dist ASC
             """,
-            (msg_row_id, MAX_BRANCHES, msg_row_id, thread_id, thread_id, n_per_branch),
+            (msg_row_id, MAX_BRANCHES, msg_row_id,
+             thread_id.db_form if thread_id is not None else None,
+             thread_id.db_form if thread_id is not None else None,
+             n_per_branch),
         )
         rows = cur.fetchall()
     return _group_branches(rows)
@@ -223,5 +216,6 @@ def tankekart(conn: psycopg.Connection, notmuch_msg_id: str,
         row = cur.fetchone()
     if row is None:
         return _branches_live(conn, notmuch_msg_id, n_per_branch)
-    msg_row_id, thread_id = row
+    msg_row_id, thread_id_raw = row
+    thread_id = ThreadId(thread_id_raw) if thread_id_raw is not None else None
     return _branches_indexed(conn, msg_row_id, thread_id, n_per_branch)

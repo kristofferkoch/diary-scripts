@@ -20,6 +20,7 @@ from typing import TypedDict
 import psycopg
 
 from . import summarize
+from .thread_id import ThreadId
 
 
 class AgendaItem(TypedDict):
@@ -27,7 +28,7 @@ class AgendaItem(TypedDict):
     kind: str            # 'deadline' | 'event' | 'valid_until'
     note: str | None
     subject: str
-    thread_id: str
+    thread_id: ThreadId
     message_id: str
     summary: str | None  # the `short` summary of the source mail
 
@@ -69,11 +70,10 @@ def list_upcoming(conn: psycopg.Connection, days: int = 14) -> list[AgendaItem]:
             kind=r[1],
             note=r[2],
             subject=r[3],
-            # DB stores `thread:XXXX` (prefixed). The /t/{thread_id} route
-            # passes its arg straight to notmuch, which would re-prefix and
-            # get `thread:thread:XXXX` (not found). Strip here so the
-            # contract matches `inbox.py`'s bare-form output.
-            thread_id=r[4].removeprefix("thread:"),
+            # DB stores the prefixed form; ThreadId normalizes to bare
+            # so URL building and notmuch queries always get the right
+            # shape — see mail_reader/thread_id.py.
+            thread_id=ThreadId(r[4]),
             message_id=r[5],
             summary=r[6],
         )

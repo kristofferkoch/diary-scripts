@@ -17,18 +17,11 @@ from __future__ import annotations
 
 import json
 import re
-import sys as _sys
-from pathlib import Path as _Path
 from typing import Any, TypedDict
 
 import psycopg
 
-# scripts/ isn't a Python package; reuse its embed helper rather than
-# duplicating the Ollama call. Matches the pattern in related.py.
-_SCRIPTS_DIR = str(_Path(__file__).resolve().parent.parent / "scripts")
-if _SCRIPTS_DIR not in _sys.path:
-    _sys.path.insert(0, _SCRIPTS_DIR)
-from embed_mail import embed_batch, vec_literal  # noqa: E402
+from scripts.embed_mail import embed_batch, vec_literal
 
 
 # Two theme strings whose bge-m3 vectors are within this cosine of each

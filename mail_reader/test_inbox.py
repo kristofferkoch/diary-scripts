@@ -12,6 +12,7 @@ import psycopg
 import pytest
 
 from mail_reader import inbox
+from mail_reader.thread_id import ThreadId
 
 
 PG_DSN = os.environ.get("PG_DSN", "dbname=mailvec")
@@ -55,7 +56,8 @@ def test_thread_latest_mids_returns_newest_per_thread(conn):
         row = cur.fetchone()
     if row is None:
         pytest.skip("no multi-message thread in DB")
-    thread_id = row[0]
+    db_thread_id = row[0]
+    tid = ThreadId(db_thread_id)
 
     with conn.cursor() as cur:
         cur.execute(
@@ -66,21 +68,21 @@ def test_thread_latest_mids_returns_newest_per_thread(conn):
             ORDER BY date DESC
             LIMIT 1
             """,
-            (thread_id,),
+            (db_thread_id,),
         )
         expected_row = cur.fetchone()
     assert expected_row is not None
     expected_mid = expected_row[0]
 
-    result = inbox.thread_latest_mids(conn, [thread_id])
-    assert result == {thread_id: expected_mid}
+    result = inbox.thread_latest_mids(conn, [tid])
+    assert result == {tid: expected_mid}
 
 
 def test_thread_latest_mids_omits_unknown_threads(conn):
     """Threads not present in `messages` are omitted from the result
     (not represented as None) so callers see the absent ones clearly."""
     result = inbox.thread_latest_mids(
-        conn, ["definitely-not-a-real-thread-id"],
+        conn, [ThreadId("definitely-not-a-real-thread-id")],
     )
     assert result == {}
 
@@ -89,11 +91,10 @@ def test_thread_latest_mids_empty_input_returns_empty(conn):
     assert inbox.thread_latest_mids(conn, []) == {}
 
 
-def test_thread_latest_mids_accepts_unprefixed_notmuch_form(conn):
-    """Regression: notmuch search emits `00000000000348fc` (bare hex);
-    the DB stores `thread:00000000000348fc`. Inbox passed bare IDs and
-    got no matches back → every inbox row rendered without a summary
-    card. The helper now normalizes either form."""
+def test_thread_latest_mids_accepts_either_form_via_threadid(conn):
+    """ThreadId normalizes both forms (bare from notmuch, prefixed from
+    DB) at construction time. The helper takes ThreadId values now —
+    callers don't need to think about the form."""
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -109,8 +110,8 @@ def test_thread_latest_mids_accepts_unprefixed_notmuch_form(conn):
     prefixed = row[0]
     assert prefixed.startswith("thread:")
     bare = prefixed[len("thread:"):]
-    result = inbox.thread_latest_mids(conn, [bare])
-    # Caller-provided form is the key in the returned dict.
-    assert bare in result, (
-        f"expected unprefixed key {bare!r}, got keys {list(result)!r}"
-    )
+    # Both inputs normalize to the same ThreadId.
+    from_bare = inbox.thread_latest_mids(conn, [ThreadId(bare)])
+    from_prefixed = inbox.thread_latest_mids(conn, [ThreadId(prefixed)])
+    assert from_bare and from_prefixed
+    assert list(from_bare.values()) == list(from_prefixed.values())

@@ -26,6 +26,7 @@ from . import db, inbox as inbox_mod, message as message_mod, related as related
 from . import summarize as summarize_mod
 from . import workers as workers_mod
 from .date_format import relative_day, short_date
+from .thread_id import ThreadId
 
 HERE = Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=str(HERE / "templates"))
@@ -97,10 +98,11 @@ def get_inbox(request: Request, limit: int = 50):
 
 @app.get("/t/{thread_id}", response_class=HTMLResponse)
 def get_thread(request: Request, thread_id: str):
-    msg_id = inbox_mod.latest_message_id_in_thread(thread_id)
+    tid = ThreadId(thread_id)
+    msg_id = inbox_mod.latest_message_id_in_thread(tid)
     if msg_id is None:
         raise HTTPException(404, "thread not found")
-    return _render_message(request, msg_id, thread_id)
+    return _render_message(request, msg_id, tid)
 
 
 @app.get("/m/{message_id:path}", response_class=HTMLResponse)
@@ -108,7 +110,7 @@ def get_message(request: Request, message_id: str):
     return _render_message(request, urllib.parse.unquote(message_id), thread_id=None)
 
 
-def _render_message(request: Request, msg_id: str, thread_id: str | None):
+def _render_message(request: Request, msg_id: str, thread_id: ThreadId | None):
     msg = message_mod.fetch_message(msg_id)
     return TEMPLATES.TemplateResponse(
         request, "message.html",

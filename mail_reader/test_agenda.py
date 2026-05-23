@@ -17,6 +17,7 @@ import psycopg
 import pytest
 
 from mail_reader import agenda, summarize
+from mail_reader.thread_id import ThreadId
 
 
 PG_DSN = os.environ.get("PG_DSN", "dbname=mailvec")
@@ -213,9 +214,9 @@ def test_dedupes_across_thread_replies(conn, isolated_prompt, fixture_thread):
         conn.commit()
     try:
         items = agenda.list_upcoming(conn, days=14)
-        # agenda returns the bare form; fixture stores the prefixed form.
-        bare_thread_id = thread_id.removeprefix("thread:")
-        hits = [it for it in items if it["thread_id"] == bare_thread_id
+        # agenda returns ThreadId; fixture stores the prefixed-form string.
+        expected_tid = ThreadId(thread_id)
+        hits = [it for it in items if it["thread_id"] == expected_tid
                 and it["occurs_at"] == target and it["kind"] == "deadline"]
         assert len(hits) == 1, f"expected 1 dedup'd row, got {len(hits)}: {hits}"
         # And the surviving row should be from the latest reply (highest m.date).
@@ -309,9 +310,13 @@ def test_thread_id_is_bare_no_thread_prefix(conn, isolated_prompt,
     items = agenda.list_upcoming(conn, days=14)
     hits = [it for it in items if it["note"] == "bare-thread-id-check"]
     assert len(hits) == 1
-    assert not hits[0]["thread_id"].startswith("thread:"), (
+    # ThreadId normalizes to bare internally; str(tid) gives the
+    # bare form used in URLs (no `thread:` prefix).
+    assert not str(hits[0]["thread_id"]).startswith("thread:"), (
         f"thread_id should be bare, got {hits[0]['thread_id']!r}"
     )
+    # And it must be a ThreadId, not a raw str — that's the whole guard.
+    assert isinstance(hits[0]["thread_id"], ThreadId)
 
 
 def test_sorts_by_date_then_kind(conn, isolated_prompt, fixture_thread):

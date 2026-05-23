@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from embed_mail import (
+from scripts.embed_mail import (
     CHUNK_CHARS,
     _strip_xml,
     chunk_text,
@@ -246,7 +246,7 @@ def test_tier_query_tier5_attachment():
 
 
 def test_tier_query_tier6_institutional_domains():
-    from embed_mail import TIER6_DOMAINS
+    from scripts.embed_mail import TIER6_DOMAINS
     q = tier_query(6)
     # All configured domains must appear as `from:*@<domain>` clauses joined
     # with ' or '.
@@ -354,7 +354,7 @@ class TestExtractPdf:
         # Force the binary lookup to fail by replacing subprocess.run.
         def boom(*a, **kw):
             raise FileNotFoundError("pdftotext")
-        monkeypatch.setattr("embed_mail.subprocess.run", boom)
+        monkeypatch.setattr("scripts.embed_mail.subprocess.run", boom)
         assert extract_pdf(b"%PDF-1.4\n") == ""
 
 
@@ -422,10 +422,10 @@ class TestIterAttachments:
 
 class TestPrepareMessage:
     def test_body_only(self, monkeypatch):
-        from embed_mail import _prepare_message
+        from scripts.embed_mail import _prepare_message
         raw = b"From: a@b\r\nSubject: s\r\nContent-Type: text/plain\r\n\r\n" + b"x" * 200
-        monkeypatch.setattr("embed_mail.nm_raw", lambda mid: raw)
-        monkeypatch.setattr("embed_mail.nm_thread_id", lambda mid: "tid-1")
+        monkeypatch.setattr("scripts.embed_mail.nm_raw", lambda mid: raw)
+        monkeypatch.setattr("scripts.embed_mail.nm_thread_id", lambda mid: "tid-1")
         p = _prepare_message("id@x")
         assert p is not None
         assert p["mid"] == "id@x"
@@ -434,22 +434,22 @@ class TestPrepareMessage:
         assert p["attachments"] == []
 
     def test_returns_none_for_empty_message(self, monkeypatch):
-        from embed_mail import _prepare_message
+        from scripts.embed_mail import _prepare_message
         raw = b"From: a@b\r\nSubject: s\r\nContent-Type: text/plain\r\n\r\nshort"
-        monkeypatch.setattr("embed_mail.nm_raw", lambda mid: raw)
-        monkeypatch.setattr("embed_mail.nm_thread_id", lambda mid: None)
+        monkeypatch.setattr("scripts.embed_mail.nm_raw", lambda mid: raw)
+        monkeypatch.setattr("scripts.embed_mail.nm_thread_id", lambda mid: None)
         # body is "short" (5 chars, < 40) and no attachments → None.
         assert _prepare_message("id@x") is None
 
     def test_short_body_plus_attachment_is_kept(self, monkeypatch):
-        from embed_mail import _prepare_message
+        from scripts.embed_mail import _prepare_message
         raw = _multipart_msg(
             [("a.ics", "text/calendar",
               b"BEGIN:VCALENDAR\nSUMMARY:Foo\nEND:VCALENDAR")],
             plain_body="hi",
         )
-        monkeypatch.setattr("embed_mail.nm_raw", lambda mid: raw)
-        monkeypatch.setattr("embed_mail.nm_thread_id", lambda mid: None)
+        monkeypatch.setattr("scripts.embed_mail.nm_raw", lambda mid: raw)
+        monkeypatch.setattr("scripts.embed_mail.nm_thread_id", lambda mid: None)
         p = _prepare_message("id@x")
         assert p is not None
         assert p["body_chunks"] == []     # body too short
@@ -461,7 +461,7 @@ class TestPrepareMessage:
 
 class TestEmbedBatch:
     def test_calls_api_embed_with_list(self, monkeypatch):
-        import embed_mail
+        from scripts import embed_mail
         captured: dict = {}
 
         class FakeResp:
@@ -478,7 +478,7 @@ class TestEmbedBatch:
                 {"embeddings": [[0.1] * 1024, [0.2] * 1024, [0.3] * 1024]}
             ).encode())
 
-        monkeypatch.setattr("embed_mail.urllib.request.urlopen", fake_urlopen)
+        monkeypatch.setattr("scripts.embed_mail.urllib.request.urlopen", fake_urlopen)
         out = embed_mail.embed_batch(["a", "b", "c"])
         assert len(out) == 3
         assert all(len(v) == 1024 for v in out)
@@ -489,14 +489,14 @@ class TestEmbedBatch:
         assert body["model"]    # whatever EMBED_MODEL resolved to at import
 
     def test_empty_input_skips_http(self, monkeypatch):
-        import embed_mail
+        from scripts import embed_mail
         def explode(*a, **kw):
             raise AssertionError("should not call HTTP for empty input")
-        monkeypatch.setattr("embed_mail.urllib.request.urlopen", explode)
+        monkeypatch.setattr("scripts.embed_mail.urllib.request.urlopen", explode)
         assert embed_mail.embed_batch([]) == []
 
     def test_mismatched_count_raises(self, monkeypatch):
-        import embed_mail
+        from scripts import embed_mail
 
         class FakeResp:
             def __init__(self, payload: bytes): self.payload = payload
@@ -508,7 +508,7 @@ class TestEmbedBatch:
             import json
             return FakeResp(json.dumps({"embeddings": [[0.1] * 1024]}).encode())
 
-        monkeypatch.setattr("embed_mail.urllib.request.urlopen", fake_urlopen)
+        monkeypatch.setattr("scripts.embed_mail.urllib.request.urlopen", fake_urlopen)
         with pytest.raises(RuntimeError, match="expected 2"):
             embed_mail.embed_batch(["a", "b"])
 

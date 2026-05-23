@@ -8,13 +8,15 @@ from __future__ import annotations
 
 import json
 import subprocess
-from typing import TypedDict
+from typing import TypedDict, cast
 
 import psycopg
 
+from .thread_id import ThreadId
+
 
 class ThreadSummary(TypedDict, total=False):
-    thread: str
+    thread: ThreadId
     timestamp: int
     date_relative: str
     matched: int
@@ -37,14 +39,20 @@ def list_inbox(limit: int = 50, query: str = "tag:inbox") -> list[ThreadSummary]
          "--sort=newest-first", f"--limit={limit}", query],
         check=True, capture_output=True, text=True,
     ).stdout
-    return json.loads(out)
+    raw: list[dict] = json.loads(out)
+    # notmuch's JSON returns the bare form; wrap at the boundary so
+    # downstream code never sees a raw str thread id.
+    for row in raw:
+        if "thread" in row:
+            row["thread"] = ThreadId(row["thread"])
+    return cast(list[ThreadSummary], raw)
 
 
-def latest_message_id_in_thread(thread_id: str) -> str | None:
+def latest_message_id_in_thread(thread_id: ThreadId) -> str | None:
     """Newest Message-ID in a thread, without `<>` (notmuch's id: format)."""
     out = subprocess.run(
         ["notmuch", "search", "--format=json", "--output=messages",
-         "--sort=newest-first", "--limit=1", f"thread:{thread_id}"],
+         "--sort=newest-first", "--limit=1", thread_id.notmuch_query],
         check=True, capture_output=True, text=True,
     ).stdout
     ids: list[str] = json.loads(out)
@@ -52,26 +60,17 @@ def latest_message_id_in_thread(thread_id: str) -> str | None:
 
 
 def thread_latest_mids(conn: psycopg.Connection,
-                       thread_ids: list[str]) -> dict[str, str]:
+                       thread_ids: list[ThreadId]) -> dict[ThreadId, str]:
     """Newest embedded message_id for each thread, in a single query.
 
     Used by the inbox view to attach a summary card to every visible
     thread without N+1 calls into notmuch. Threads with no embedded
     messages are omitted from the result (rather than mapped to None) —
     callers can branch on `tid in result` to render the no-summary case.
-
-    Accepts both notmuch's bare form (`00000000000348fc`) and the DB's
-    prefixed form (`thread:00000000000348fc`). Keys in the returned
-    dict match the *input* form so callers can look up by whatever they
-    passed in.
     """
     if not thread_ids:
         return {}
-    # Build a lookup back from prefixed → caller-provided form.
-    prefixed_to_input: dict[str, str] = {}
-    for tid in thread_ids:
-        prefixed = tid if tid.startswith("thread:") else f"thread:{tid}"
-        prefixed_to_input[prefixed] = tid
+    db_to_tid: dict[str, ThreadId] = {tid.db_form: tid for tid in thread_ids}
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -80,7 +79,7 @@ def thread_latest_mids(conn: psycopg.Connection,
             WHERE thread_id = ANY(%s)
             ORDER BY thread_id, date DESC
             """,
-            (list(prefixed_to_input.keys()),),
+            (list(db_to_tid.keys()),),
         )
         rows = cur.fetchall()
-    return {prefixed_to_input[tid]: mid for tid, mid in rows}
+    return {db_to_tid[db_form]: mid for db_form, mid in rows}
