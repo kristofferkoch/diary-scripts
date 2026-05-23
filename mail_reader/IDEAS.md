@@ -89,9 +89,39 @@ CREATE TABLE escalations (
   diff_summary  TEXT,             -- 1-3 sentence overview
   tool_calls    INT,
   ms_elapsed    INT,
+  workspace_git_sha TEXT,         -- HEAD of the workspace repo at escalation start
   created_at    TIMESTAMPTZ DEFAULT now()
 );
+
+CREATE TABLE escalation_tool_calls (
+  id            BIGSERIAL PRIMARY KEY,
+  escalation_id BIGINT REFERENCES escalations(id) ON DELETE CASCADE,
+  seq           INT  NOT NULL,    -- order within the escalation
+  tool          TEXT NOT NULL,    -- md_read / md_grep / md_search / mail_search
+  args          JSONB NOT NULL,   -- exact args the agent passed
+  result        JSONB,            -- what we returned to the agent (capped/truncated)
+  git_sha       TEXT NOT NULL,    -- workspace HEAD at the moment of THIS call
+  called_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ms_elapsed    INT,
+  UNIQUE (escalation_id, seq)
+);
+CREATE INDEX escalation_tool_calls_esc ON escalation_tool_calls(escalation_id, seq);
 ```
+
+**Audit / replay (per user).** Every tool call the escalator makes
+against the workspace .md store gets a row with the **git SHA of the
+workspace repo at the time of that call**. Together with the captured
+`args` and `result`, this means any past proposal can be reconstructed:
+take the SHA, `git checkout` it, re-run the same `md_grep`/`md_read`/
+`md_search` with the recorded args, and you see exactly what the LLM
+saw. Without this the escalator is a black box — proposals materialise
+and there's no way to ask "why did it think that?" once the repo has
+moved on. Capture the SHA per-call (not once per escalation) because
+the loop can outlive a `git commit` triggered by an unrelated process
+mid-run; `escalations.workspace_git_sha` is the *starting* SHA, the
+per-call `git_sha` is the *seen* SHA. Storing `result` (truncated to
+e.g. 16 KiB) means you don't need the LLM model to be deterministic
+or even available later — the inputs are the record.
 
 **Caveats.**
 
