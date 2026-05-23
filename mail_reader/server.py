@@ -24,6 +24,7 @@ from fastapi.templating import Jinja2Templates
 
 from . import agenda as agenda_mod
 from . import db, inbox as inbox_mod, message as message_mod, related as related_mod
+from . import entities as entities_mod
 from . import summarize as summarize_mod
 from . import workers as workers_mod
 from .date_format import relative_day, short_date
@@ -80,6 +81,7 @@ def get_inbox(request: Request, limit: int = 50):
                 t["summary"] = None
                 t["summary_error"] = None
                 t["summary_mid_quoted"] = None
+                t["summary_action_required"] = False
                 continue
             all_mids.append(mid)
             state = summarize_mod.read_state(conn, mid)
@@ -87,6 +89,7 @@ def get_inbox(request: Request, limit: int = 50):
                 summarize_mod.schedule_all_passes(conn, mid)
                 state = summarize_mod.SummaryState(
                     status="pending", short="", error=None,
+                    action_required=False,
                 )
             elif state["status"] == "done_stale":
                 summarize_mod.schedule_all_passes(conn, mid)
@@ -94,6 +97,7 @@ def get_inbox(request: Request, limit: int = 50):
             t["summary"] = state["short"]
             t["summary_error"] = state["error"]
             t["summary_mid_quoted"] = urllib.parse.quote(mid, safe="")
+            t["summary_action_required"] = state["action_required"]
         summarize_mod.bump_priority(conn, all_mids)
         agenda = agenda_mod.list_upcoming(conn)
     return TEMPLATES.TemplateResponse(
@@ -117,13 +121,33 @@ def get_message(request: Request, message_id: str):
 
 def _render_message(request: Request, msg_id: str, thread_id: ThreadId | None):
     msg = message_mod.fetch_message(msg_id)
+    with db.connect() as conn:
+        chips = entities_mod.chips_for_message(conn, msg_id)
     return TEMPLATES.TemplateResponse(
         request, "message.html",
         {
             "msg": msg,
             "msg_id_quoted": urllib.parse.quote(msg_id, safe=""),
             "thread_id": thread_id,
+            "entity_chips": chips,
         },
+    )
+
+
+@app.get("/e/{entity_id:int}", response_class=HTMLResponse)
+def get_entity(request: Request, entity_id: int):
+    """Entity detail: a list of mails where tier-2 extracted this entity.
+    One row per thread (latest mention wins). Reuses the same row look
+    as the inbox — same shape, same .summary card behaviour."""
+    with db.connect() as conn:
+        ent = entities_mod.entity_by_id(conn, entity_id)
+        if ent is None:
+            raise HTTPException(404, "entity not found")
+        rows = entities_mod.messages_for_entity(conn, entity_id)
+        summarize_mod.bump_priority(conn, [r["message_id"] for r in rows])
+    return TEMPLATES.TemplateResponse(
+        request, "entity.html",
+        {"entity": ent, "rows": rows},
     )
 
 
@@ -164,6 +188,7 @@ def get_tankekart(request: Request, message_id: str):
                     summarize_mod.schedule_all_passes(conn, lid)
                     state = summarize_mod.SummaryState(
                         status="pending", short="", error=None,
+                        action_required=False,
                     )
                 elif state["status"] == "done_stale":
                     # Old prompt version: enqueue regen at current.
@@ -175,6 +200,7 @@ def get_tankekart(request: Request, message_id: str):
                 leaf["summary_status"] = state["status"]
                 leaf["summary"] = state["short"]
                 leaf["summary_error"] = state["error"]
+                leaf["summary_action_required"] = state["action_required"]
         # Bump priority for everything visible in this view.
         summarize_mod.bump_priority(conn, all_leaf_mids)
     return TEMPLATES.TemplateResponse(
@@ -205,6 +231,7 @@ def get_summary_fragment(request: Request, message_id: str):
             summarize_mod.schedule_all_passes(conn, msg_id)
             state = summarize_mod.SummaryState(
                 status="pending", short="", error=None,
+                action_required=False,
             )
         elif state["status"] == "done_stale":
             summarize_mod.schedule_all_passes(conn, msg_id)
@@ -216,6 +243,7 @@ def get_summary_fragment(request: Request, message_id: str):
             "status": state["status"],
             "short": state["short"],
             "error": state["error"],
+            "action": state["action_required"],
         },
     )
 

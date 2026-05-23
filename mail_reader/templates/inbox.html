@@ -25,7 +25,7 @@
         {% endif %}
       </div>
       {% if t.summary_status %}
-        {% with status=t.summary_status, short=t.summary, error=t.summary_error, msg_id_quoted=t.summary_mid_quoted %}
+        {% with status=t.summary_status, short=t.summary, error=t.summary_error, msg_id_quoted=t.summary_mid_quoted, action=t.summary_action_required %}
           {% include "_sum.html" %}
         {% endwith %}
       {% endif %}

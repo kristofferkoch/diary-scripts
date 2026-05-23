@@ -36,6 +36,25 @@
     </div>
     {% endif %}
 
+    {% if entity_chips %}
+    <ul class="entity-chips" aria-label="Nevnt i denne mailen">
+      {% for c in entity_chips %}
+      <li>
+        <a class="chip chip-{{ c.kind }}" href="{{ url_for('get_entity', entity_id=c.id) }}">
+          <span class="chip-kind" aria-hidden="true">{{ {
+            'person': 'p',
+            'org': 'o',
+            'place': 's',
+            'money': 'kr',
+            'identifier': '#',
+            'contact': '@',
+          }.get(c.kind, '·') }}</span><span class="chip-label">{{ c.label }}</span>
+        </a>
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+
     {% if msg.attachments %}
     <ul class="attachments">
       {% for a in msg.attachments %}

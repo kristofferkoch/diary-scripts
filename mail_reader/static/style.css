@@ -421,6 +421,85 @@ article.message .subject {
   margin-right: var(--s-1);
 }
 
+/* Entity chips — tier-2's extracted people/orgs/places/etc. as
+   tappable pivots under the To line. Each chip routes to /e/{id}. */
+.entity-chips {
+  list-style: none;
+  margin: var(--s-3) 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+.entity-chips .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: 3px 10px;
+  background: var(--tag-bg);
+  color: var(--ink);
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  line-height: 1.6;
+  text-decoration: none;
+  transition: background 120ms ease, border-color 120ms ease;
+  max-width: 100%;
+}
+.entity-chips .chip:hover {
+  background: var(--accent-bg);
+  border-color: var(--accent-soft);
+  color: var(--ink-strong);
+}
+.entity-chips .chip-kind {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+  flex: 0 0 auto;
+}
+.entity-chips .chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Per-kind tint — pick out money / identifiers so amounts pop. */
+.entity-chips .chip-money .chip-kind { color: var(--accent); }
+.entity-chips .chip-identifier .chip-kind { color: var(--accent); }
+
+/* Entity detail page header. */
+.entity-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--s-3);
+  margin: var(--s-2) 0 var(--s-5);
+}
+.entity-head .entity-kind {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  padding: 3px 8px;
+  background: var(--tag-bg);
+  border-radius: 4px;
+}
+.entity-head .entity-value {
+  font-family: var(--font-serif);
+  font-size: 1.4rem;
+  line-height: 1.2;
+  font-weight: 600;
+  color: var(--ink-strong);
+  margin: 0;
+}
+.entity-head .entity-count {
+  font-size: 0.85rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .attachments {
   margin: var(--s-4) 0 0;
   padding: 0;
@@ -734,6 +813,20 @@ ul.cards {
   font-size: 0.7rem;
   font-style: italic;
   color: var(--faint);
+}
+/* `action_required`: tier-2 flagged this mail as asking the recipient
+   to do something (reply, pay, RSVP, decide). Lead with an accent arrow
+   so the summary line reads as "this wants you." Cooperates with .draft
+   (which never sets action) and .stale (which can). */
+.summary.action::before {
+  content: "→";
+  display: inline-block;
+  margin-right: 0.35em;
+  color: var(--accent);
+  font-weight: 700;
+}
+.summary.action {
+  color: var(--ink-strong);
 }
 /* Inbox-row spacing: the summary sits below the meta line, slightly
    indented and noticeably smaller so it doesn't compete with the

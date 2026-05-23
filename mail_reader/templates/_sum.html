@@ -3,9 +3,12 @@
    - done_stale : show old text + poll for v-bump regen
    - failed     : error message, click to retry
    - pending/streaming : placeholder + poll
+   `action` (bool, default false): tier-2's `action_required`. When set,
+   the summary picks up an `action` modifier — see .summary.action in CSS.
 #}
+{% set action = action|default(false) %}
 {% if status == 'done' %}
-  <p class="summary">{{ short }}</p>
+  <p class="summary{% if action %} action{% endif %}">{{ short }}</p>
 {% elif status == 'done_draft' %}
   {# Lower-tier draft is done; a better pass is still running. Show the
      draft and keep polling so the final replaces it when ready. #}
@@ -15,7 +18,7 @@
      hx-swap="outerHTML"
      title="utkast — bedre versjon på vei">{{ short }}</p>
 {% elif status == 'done_stale' %}
-  <p class="summary stale"
+  <p class="summary stale{% if action %} action{% endif %}"
      hx-get="{{ url_for('get_summary_fragment', message_id=msg_id_quoted) }}"
      hx-trigger="load delay:2s"
      hx-swap="outerHTML"

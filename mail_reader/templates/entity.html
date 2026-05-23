@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}{{ entity.value }}{% endblock %}
+{% block content %}
+<a href="{{ url_for('get_inbox') }}" class="back-link">
+  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+       stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M10 3 L5 8 L10 13"/>
+  </svg>
+  <span>Innboks</span>
+</a>
+
+<header class="entity-head">
+  <span class="entity-kind">{{ {
+    'person': 'person',
+    'org': 'org',
+    'place': 'sted',
+    'money': 'beløp',
+    'identifier': 'id',
+    'contact': 'kontakt',
+    'url': 'url',
+  }.get(entity.kind, entity.kind) }}</span>
+  <h1 class="entity-value">{{ entity.value }}</h1>
+  {% if rows %}<span class="entity-count">{{ rows|length }} tråder</span>{% endif %}
+</header>
+
+{% if not rows %}
+<p class="empty">Ingen mail nevner denne enheten enda.</p>
+{% else %}
+<ul class="threads">
+{% for r in rows %}
+  <li class="thread">
+    {% if r.thread_id %}
+    <a href="{{ url_for('get_thread', thread_id=r.thread_id) }}">
+    {% else %}
+    <a href="{{ url_for('get_message', message_id=r.message_id) }}">
+    {% endif %}
+      <div class="subject">{{ r.subject or '(uten emne)' }}</div>
+      <div class="date">{{ r.date | short_date }}</div>
+      <div class="meta">
+        <span class="from">{{ r.from_addr }}</span>
+      </div>
+      {% if r.summary_status %}
+        {% with status=r.summary_status, short=r.summary, error=r.summary_error|default(none), msg_id_quoted=r.message_id|urlencode, action=r.summary_action_required %}
+          {% include "_sum.html" %}
+        {% endwith %}
+      {% endif %}
+    </a>
+  </li>
+{% endfor %}
+</ul>
+{% endif %}
+{% endblock %}

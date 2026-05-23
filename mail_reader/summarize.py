@@ -221,6 +221,9 @@ class SummaryState(TypedDict):
     status: str
     short: str | None
     error: str | None
+    # Only the tier-2 structured pass sets this; tier-1 / pending / failed
+    # rows default to False. See migration 007.
+    action_required: bool
 
 
 # ----------------- Ollama -----------------
@@ -311,7 +314,7 @@ def read_state(conn: psycopg.Connection, notmuch_msg_id: str) -> SummaryState | 
         # 1. best done at current prompt
         cur.execute(
             """
-            SELECT short, quality_tier
+            SELECT short, quality_tier, action_required
             FROM summaries
             WHERE message_id = %s
               AND prompt_version = %s
@@ -338,12 +341,17 @@ def read_state(conn: psycopg.Connection, notmuch_msg_id: str) -> SummaryState | 
         max_inflight_tier = inflight_max[0] if inflight_max else None
 
         if done is not None:
-            short, done_tier = done
+            short, done_tier, action_required = done
             if max_inflight_tier is not None and max_inflight_tier > done_tier:
                 status = "done_draft"
             else:
                 status = "done"
-            return {"status": status, "short": short, "error": None}
+            return {
+                "status": status,
+                "short": short,
+                "error": None,
+                "action_required": bool(action_required),
+            }
 
         if max_inflight_tier is not None:
             # Pending text not done yet — return the most-recent pending
@@ -365,12 +373,15 @@ def read_state(conn: psycopg.Connection, notmuch_msg_id: str) -> SummaryState | 
                 "status": in_row[0] if in_row else "pending",
                 "short": "",
                 "error": None,
+                "action_required": False,
             }
 
-        # 3. stale: latest done at an older prompt version
+        # 3. stale: latest done at an older prompt version. The
+        # action_required column was added in p3; pre-p3 rows have the
+        # column-default False, which is the right thing to render.
         cur.execute(
             """
-            SELECT short
+            SELECT short, action_required
             FROM summaries
             WHERE message_id = %s
               AND status = 'done'
@@ -382,7 +393,12 @@ def read_state(conn: psycopg.Connection, notmuch_msg_id: str) -> SummaryState | 
         )
         stale = cur.fetchone()
         if stale is not None:
-            return {"status": "done_stale", "short": stale[0], "error": None}
+            return {
+                "status": "done_stale",
+                "short": stale[0],
+                "error": None,
+                "action_required": bool(stale[1]),
+            }
 
         # 4. failed at current
         cur.execute(
@@ -399,7 +415,12 @@ def read_state(conn: psycopg.Connection, notmuch_msg_id: str) -> SummaryState | 
         )
         failed = cur.fetchone()
         if failed is not None:
-            return {"status": "failed", "short": failed[0], "error": failed[1]}
+            return {
+                "status": "failed",
+                "short": failed[0],
+                "error": failed[1],
+                "action_required": False,
+            }
 
     return None
 

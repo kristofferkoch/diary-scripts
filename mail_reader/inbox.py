@@ -30,6 +30,7 @@ class ThreadSummary(TypedDict, total=False):
     summary: str | None
     summary_error: str | None
     summary_mid_quoted: str | None
+    summary_action_required: bool
 
 
 def list_inbox(limit: int = 50, query: str = "tag:inbox") -> list[ThreadSummary]:

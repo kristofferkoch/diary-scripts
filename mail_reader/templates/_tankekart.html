@@ -22,7 +22,7 @@
               <span class="date">{{ r.date | short_date }}</span>
             </div>
             <div class="subject">{{ r.subject or '(uten emne)' }}</div>
-            {% with status=r.summary_status, short=r.summary, error=r.summary_error, msg_id_quoted=sub_quoted %}
+            {% with status=r.summary_status, short=r.summary, error=r.summary_error, msg_id_quoted=sub_quoted, action=r.summary_action_required %}
               {% include "_sum.html" %}
             {% endwith %}
           </div>

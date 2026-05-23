@@ -39,6 +39,7 @@ class Related(TypedDict):
     summary: str | None      # final/partial text; set by server.py
     summary_status: str      # 'done' | 'pending' | 'streaming' | 'failed'
     summary_error: str | None
+    summary_action_required: bool
 
 
 class Branch(TypedDict):
@@ -82,6 +83,7 @@ def _leaf_row(mid: str, date, from_addr: str | None,
         "summary": None,
         "summary_status": "pending",
         "summary_error": None,
+        "summary_action_required": False,
     }
 
 
