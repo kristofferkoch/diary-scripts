@@ -75,11 +75,13 @@
   </section>
 </article>
 
-<section class="tankekart"
-         hx-get="{{ url_for('get_tankekart', message_id=msg_id_quoted) }}"
-         hx-trigger="load"
-         hx-swap="innerHTML">
+<section class="tankekart">
   <h2>Tankekart</h2>
-  <p class="loading">Laster relaterte e-poster</p>
+  <div class="tankekart-body"
+       hx-get="{{ url_for('get_tankekart', message_id=msg_id_quoted) }}?mode=chunks"
+       hx-trigger="load"
+       hx-swap="innerHTML">
+    <p class="loading">Laster relaterte e-poster</p>
+  </div>
 </section>
 {% endblock %}

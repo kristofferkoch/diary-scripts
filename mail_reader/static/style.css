@@ -613,8 +613,95 @@ article.message .subject {
 
 .tankekart { margin-top: var(--s-6); }
 
-/* Branches — each chunk of the open mail becomes its own section. */
-.branches { display: grid; gap: var(--s-6); }
+/* Mode switcher — pill-tab strip at the top of the tankekart. The
+   active tab is rendered server-side so it stays in sync after every
+   HTMX swap (no client-side state). */
+.tankekart-modes {
+  display: flex;
+  gap: var(--s-1);
+  margin: 0 0 var(--s-4);
+  padding: var(--s-1);
+  background: var(--tag-bg);
+  border-radius: var(--radius);
+  width: fit-content;
+}
+.tankekart-modes .mode {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 0.85rem;
+  font-weight: 500;
+  padding: var(--s-2) var(--s-4);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.tankekart-modes .mode:hover { color: var(--ink); }
+.tankekart-modes .mode.active {
+  background: var(--bg-elev);
+  color: var(--ink-strong);
+  box-shadow: var(--shadow-sm);
+}
+.tankekart-body { min-height: 80px; }
+
+/* Branches — each is a <details>; the label is the summary so the
+   theme/chunk keywords stack as a glanceable list and cards reveal
+   only when the user descends into one. */
+.branches { display: grid; gap: var(--s-2); }
+.branch { padding: 0; }
+.branch > summary.branch-label {
+  list-style: none;
+  cursor: pointer;
+  margin: 0;
+  position: relative;
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  /* Existing .branch-label rule supplies the type + accent border-left;
+     these properties only re-shape the summary-specific bits. */
+  padding-left: var(--s-5);
+  user-select: none;
+}
+.branch > summary.branch-label::-webkit-details-marker { display: none; }
+.branch > summary.branch-label::before {
+  content: "›";
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-55%) rotate(0);
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 1rem;
+  line-height: 1;
+  transition: transform 140ms ease;
+}
+.branch[open] > summary.branch-label::before {
+  transform: translateY(-55%) rotate(90deg);
+}
+.branch[open] > .cards {
+  margin-top: var(--s-3);
+  margin-bottom: var(--s-3);
+}
+.branch-count {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-style: normal;
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--faint);
+  padding-left: var(--s-2);
+}
+/* In themes/emergent modes the branch label IS the named direction
+   (a theme), not a text fragment. Promote it visually — italic
+   serif works for chunk fragments but reads as decorative here. */
+.branches[data-mode="themes"] .branch-label,
+.branches[data-mode="emergent"] .branch-label {
+  font-family: var(--font-sans);
+  font-style: normal;
+  font-weight: 600;
+  color: var(--ink-strong);
+}
 .branch { display: grid; gap: var(--s-3); }
 .branch-label {
   font-family: var(--font-serif);

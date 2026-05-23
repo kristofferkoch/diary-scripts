@@ -16,6 +16,7 @@ import re
 import urllib.parse
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import cast
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -169,15 +170,18 @@ def post_agenda_dismiss(thread_id: str, kind: str, occurs_at: str):
 
 
 @app.get("/api/tankekart/{message_id:path}", response_class=HTMLResponse)
-def get_tankekart(request: Request, message_id: str):
-    """Render branches. For each leaf, attach summary state. If no row
-    yet, schedule **all** configured passes (draft + final). On stale
-    reads, schedule a regen for the current prompt version. Then bump
-    priority for every leaf so currently-viewed mails rise to the top
-    of the worker queue."""
+def get_tankekart(request: Request, message_id: str, mode: str = "chunks"):
+    """Render branches in the requested mode. For each leaf, attach
+    summary state. If no row yet, schedule **all** configured passes
+    (draft + final). On stale reads, schedule a regen for the current
+    prompt version. Then bump priority for every leaf so currently-
+    viewed mails rise to the top of the worker queue."""
+    if mode not in ("chunks", "themes", "emergent"):
+        mode = "chunks"
+    valid_mode = cast(related_mod.Mode, mode)
     msg_id = urllib.parse.unquote(message_id)
     with db.connect() as conn:
-        branches = related_mod.tankekart(conn, msg_id)
+        branches = related_mod.tankekart(conn, msg_id, mode=valid_mode)
         all_leaf_mids: list[str] = []
         for branch in branches:
             for leaf in branch["leaves"]:
@@ -204,7 +208,12 @@ def get_tankekart(request: Request, message_id: str):
         # Bump priority for everything visible in this view.
         summarize_mod.bump_priority(conn, all_leaf_mids)
     return TEMPLATES.TemplateResponse(
-        request, "_tankekart.html", {"branches": branches},
+        request, "_tankekart.html",
+        {
+            "branches": branches,
+            "mode": mode,
+            "msg_id_quoted": urllib.parse.quote(msg_id, safe=""),
+        },
     )
 
 

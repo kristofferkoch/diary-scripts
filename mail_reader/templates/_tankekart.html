@@ -1,21 +1,45 @@
-<h2>Tankekart</h2>
+{# Tankekart partial. The segmented control at the top is rendered
+   server-side so the active state stays in sync with the requested
+   mode after every swap. Each branch is a `<details>` — the labels
+   stack as a scannable keyword list; expanding one reveals its cards.
+   Two levels: mode (tabs) → branch (collapsed → expanded). #}
+<div class="tankekart-modes" role="tablist" aria-label="Tankekart-visning">
+  {% for m, label in [('chunks', 'Innhold'), ('themes', 'Tema'), ('emergent', 'Funn')] %}
+  <button type="button"
+          role="tab"
+          aria-selected="{{ 'true' if m == mode else 'false' }}"
+          class="mode{% if m == mode %} active{% endif %}"
+          hx-get="{{ url_for('get_tankekart', message_id=msg_id_quoted) }}?mode={{ m }}"
+          hx-target="closest .tankekart-body"
+          hx-swap="innerHTML">{{ label }}</button>
+  {% endfor %}
+</div>
 {% if not branches %}
-<p class="empty">Ingen relaterte funn.</p>
+<p class="empty">
+  {% if mode == 'themes' %}Ingen tema funnet enda for denne mailen.
+  {%- elif mode == 'emergent' %}Ingen felles tema i naboskapet.
+  {%- else %}Ingen relaterte funn.{% endif %}
+</p>
 {% else %}
-<div class="branches">
+<div class="branches" data-mode="{{ mode }}">
 {% for b in branches %}
-  <section class="branch">
-    <h3 class="branch-label">{{ b.label }}</h3>
+  <details class="branch">
+    <summary class="branch-label">
+      {{ b.label }}
+      <span class="branch-count">{{ b.leaves|length }}</span>
+    </summary>
     <ul class="cards">
     {% for r in b.leaves %}
       {% set pct = (r.similarity * 100) | round | int %}
       {% set sub_quoted = r.message_id | urlencode %}
       <li class="card">
         <a href="{{ url_for('get_message', message_id=r.message_id) }}">
+          {% if mode == 'chunks' or mode == 'emergent' %}
           <div class="sim" aria-label="{{ pct }}% likhet">
             <span class="sim-pct">{{ pct }}%</span>
             <span class="sim-bar" style="--sim: {{ pct }}%"></span>
           </div>
+          {% endif %}
           <div class="card-body">
             <div class="card-meta">
               <span class="from">{{ r.from_addr }}</span>
@@ -30,7 +54,7 @@
       </li>
     {% endfor %}
     </ul>
-  </section>
+  </details>
 {% endfor %}
 </div>
 {% endif %}

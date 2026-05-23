@@ -156,3 +156,69 @@ def test_tankekart_unknown_message_uses_live_embed_or_returns_empty(conn):
         conn, "this-message-does-not-exist@example.invalid", n_per_branch=3,
     )
     assert branches == []
+
+
+def _pick_themed_message_id(conn: psycopg.Connection) -> str | None:
+    """Pick a mail with ≥1 tier-2 theme at current prompt_version."""
+    from mail_reader import summarize
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT m.message_id
+            FROM messages m
+            JOIN summaries s ON s.message_id = m.id
+                            AND s.prompt_version = %s
+                            AND s.status = 'done'
+            JOIN summary_themes st ON st.summary_id = s.id
+            GROUP BY m.id, m.message_id
+            HAVING COUNT(DISTINCT st.theme_id) >= 1
+            ORDER BY m.id DESC
+            LIMIT 1
+            """,
+            (summarize.PROMPT_VERSION,),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
+def test_tankekart_themes_mode_returns_branches(conn):
+    """themes mode: for a mail with at least one tier-2 theme, branches
+    should come back. Each branch's label is the theme text."""
+    mid = _pick_themed_message_id(conn)
+    if mid is None:
+        pytest.skip("no message with tier-2 themes at current prompt_version")
+    branches = tankekart(conn, mid, n_per_branch=3, mode="themes")
+    assert isinstance(branches, list)
+    # Every branch label is a non-empty string; every leaf has a message_id.
+    for b in branches:
+        assert isinstance(b["label"], str) and b["label"]
+        for leaf in b["leaves"]:
+            assert leaf["message_id"]
+
+
+def test_tankekart_emergent_mode_returns_branches(conn):
+    """emergent mode: cluster neighbours' themes. For any embedded mail,
+    if there are themed neighbours, we should get branches back."""
+    mid = _pick_themed_message_id(conn)
+    if mid is None:
+        pytest.skip("no message with tier-2 themes at current prompt_version")
+    branches = tankekart(conn, mid, n_per_branch=3, mode="emergent")
+    assert isinstance(branches, list)
+    for b in branches:
+        assert isinstance(b["label"], str) and b["label"]
+        for leaf in b["leaves"]:
+            assert leaf["message_id"]
+            # emergent leaves preserve real semantic distances from the
+            # chunks query, so similarity should be in [0, 1].
+            assert 0.0 <= leaf["similarity"] <= 1.0
+
+
+def test_tankekart_themes_mode_for_unindexed_returns_empty(conn):
+    """themes/emergent modes don't have a live-embed fallback. An
+    unknown message returns [] regardless of mode."""
+    assert tankekart(
+        conn, "no-such-msg@example.invalid", n_per_branch=3, mode="themes",
+    ) == []
+    assert tankekart(
+        conn, "no-such-msg@example.invalid", n_per_branch=3, mode="emergent",
+    ) == []
