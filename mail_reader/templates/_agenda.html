@@ -1,7 +1,9 @@
 {# Horizontal agenda strip — upcoming deadlines / events / valid_until.
    Rendered above the threads list on the inbox page when `agenda` is
-   non-empty. Each card links to its source thread; a glance + tap is
-   enough, no body text needed in the card. #}
+   non-empty. Each card links to its source thread; the trailing × is a
+   dismiss button that POSTs to /api/agenda/dismiss and removes the card
+   from the strip. The dismissal silences the (thread, kind, date) tuple
+   permanently — same key the agenda query dedupes on. #}
 {% if agenda %}
 <section class="agenda" aria-label="Agenda – neste 14 dager">
   <h2 class="agenda-head">
@@ -10,18 +12,26 @@
   </h2>
   <div class="agenda-strip" role="list">
     {% for item in agenda %}
-    <a class="agenda-card agenda-{{ item.kind }}"
-       role="listitem"
-       href="{{ url_for('get_thread', thread_id=item.thread_id) }}">
-      <div class="agenda-when">{{ item.occurs_at | relative_day }}</div>
-      <div class="agenda-kind">
-        {% if item.kind == 'deadline' %}frist
-        {%- elif item.kind == 'event' %}hendelse
-        {%- elif item.kind == 'valid_until' %}gyldig til
-        {%- else %}{{ item.kind }}{% endif %}
-      </div>
-      <div class="agenda-note">{{ item.note or item.subject or '' }}</div>
-    </a>
+    <div class="agenda-card agenda-{{ item.kind }}" role="listitem">
+      <a class="agenda-link"
+         href="{{ url_for('get_thread', thread_id=item.thread_id) }}">
+        <div class="agenda-when">{{ item.occurs_at | relative_day }}</div>
+        <div class="agenda-kind">
+          {% if item.kind == 'deadline' %}frist
+          {%- elif item.kind == 'event' %}hendelse
+          {%- elif item.kind == 'valid_until' %}gyldig til
+          {%- else %}{{ item.kind }}{% endif %}
+        </div>
+        <div class="agenda-note">{{ item.note or item.subject or '' }}</div>
+      </a>
+      <button class="agenda-dismiss"
+              type="button"
+              title="Marker som håndtert"
+              aria-label="Marker som håndtert"
+              hx-post="{{ url_for('post_agenda_dismiss') }}?thread_id={{ item.thread_id|urlencode }}&kind={{ item.kind|urlencode }}&occurs_at={{ item.occurs_at }}"
+              hx-target="closest .agenda-card"
+              hx-swap="outerHTML swap:140ms">×</button>
+    </div>
     {% endfor %}
   </div>
 </section>

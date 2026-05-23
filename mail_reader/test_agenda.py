@@ -334,3 +334,61 @@ def test_sorts_by_date_then_kind(conn, isolated_prompt, fixture_thread):
     relevant = [it["note"] for it in items
                 if it["note"] in ("A", "B", "first")]
     assert relevant == ["first", "A", "B"]
+
+
+def test_dismiss_suppresses_item(conn, isolated_prompt, fixture_thread):
+    """A dismissed (thread_id, kind, occurs_at) tuple disappears from
+    `list_upcoming`. Cleanup at the end so test reruns are idempotent."""
+    thread_id, mrid, _ = fixture_thread
+    sid = _insert_summary(conn, mrid)
+    when = datetime.date.today() + datetime.timedelta(days=4)
+    _insert_temporal(conn, sid, "deadline", when, "to be dismissed")
+    _insert_temporal(conn, sid, "event", when, "keep me")
+    try:
+        before = agenda.list_upcoming(conn, days=14)
+        assert any(it["note"] == "to be dismissed" for it in before)
+
+        agenda.dismiss(conn, ThreadId(thread_id), "deadline", when.isoformat())
+
+        after = agenda.list_upcoming(conn, days=14)
+        assert not any(it["note"] == "to be dismissed" for it in after), (
+            "dismissed item should no longer appear"
+        )
+        # Other kinds on the same (thread, date) stay — dismissal is per-kind.
+        assert any(it["note"] == "keep me" for it in after)
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM agenda_dismissed
+                WHERE thread_id = %s AND occurs_at = %s
+                """,
+                (ThreadId(thread_id).db_form, when),
+            )
+            conn.commit()
+
+
+def test_dismiss_is_idempotent(conn, isolated_prompt, fixture_thread):
+    """Calling dismiss twice for the same key is a no-op the second time
+    — first call returns True (inserted), second returns False (already
+    there)."""
+    thread_id, mrid, _ = fixture_thread
+    sid = _insert_summary(conn, mrid)
+    when = datetime.date.today() + datetime.timedelta(days=6)
+    _insert_temporal(conn, sid, "deadline", when, "double-dismiss")
+    tid = ThreadId(thread_id)
+    try:
+        first = agenda.dismiss(conn, tid, "deadline", when.isoformat())
+        second = agenda.dismiss(conn, tid, "deadline", when.isoformat())
+        assert first is True
+        assert second is False
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM agenda_dismissed
+                WHERE thread_id = %s AND occurs_at = %s
+                """,
+                (tid.db_form, when),
+            )
+            conn.commit()

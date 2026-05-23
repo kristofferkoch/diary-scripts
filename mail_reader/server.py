@@ -12,6 +12,7 @@ INSERTs a pending row — the worker queue picks it up.
 from __future__ import annotations
 
 import os
+import re
 import urllib.parse
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -27,6 +28,10 @@ from . import summarize as summarize_mod
 from . import workers as workers_mod
 from .date_format import relative_day, short_date
 from .thread_id import ThreadId
+
+
+_AGENDA_KINDS = frozenset({"deadline", "event", "valid_until", "mentioned"})
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 HERE = Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=str(HERE / "templates"))
@@ -120,6 +125,23 @@ def _render_message(request: Request, msg_id: str, thread_id: ThreadId | None):
             "thread_id": thread_id,
         },
     )
+
+
+@app.post("/api/agenda/dismiss", response_class=HTMLResponse)
+def post_agenda_dismiss(thread_id: str, kind: str, occurs_at: str):
+    """Suppress an agenda card. Params come in as the query string (HTMX
+    encodes hx-vals into the POST URL when there's no body) so we don't
+    need python-multipart. Returns an empty fragment — paired with
+    `hx-swap="outerHTML"` on the card, this removes it from the strip."""
+    if kind not in _AGENDA_KINDS:
+        raise HTTPException(400, "bad kind")
+    if not _ISO_DATE.match(occurs_at):
+        raise HTTPException(400, "bad occurs_at")
+    if not thread_id:
+        raise HTTPException(400, "bad thread_id")
+    with db.connect() as conn:
+        agenda_mod.dismiss(conn, ThreadId(thread_id), kind, occurs_at)
+    return HTMLResponse("")
 
 
 @app.get("/api/tankekart/{message_id:path}", response_class=HTMLResponse)
