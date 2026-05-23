@@ -8,10 +8,10 @@ Examples:
     scripts/mailshow.py --limit=5 'tag:inbox and date:today..'
     scripts/mailshow.py --headers-only 'from:gonordic'
     scripts/mailshow.py --max-chars=8000 thread:0000000000000018
+    scripts/mailshow.py --attachment-text id:abcdef@example.com
+    scripts/mailshow.py --attachments=/tmp/foo id:abcdef@example.com
 
 Notes:
-  - For attachments use `notmuch show --format=raw id:<id> | munpack -C <outdir>`,
-    not this script. Bodies only.
   - Mail is READ-ONLY (see TOOLS.md). This script never sends or modifies mail.
 """
 
@@ -23,6 +23,16 @@ import re
 import subprocess
 import sys
 from email.policy import default as email_default
+from pathlib import Path
+
+# When invoked as `python scripts/mailshow.py`, sys.path[0] is `scripts/` and
+# `from scripts.embed_mail …` fails. Inject the project root so the same import
+# works both as a script and as a `scripts.mailshow` module (e.g. in pytest).
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from scripts.embed_mail import iter_attachments  # noqa: E402
 
 
 def notmuch_search_ids(query: str, limit: int | None) -> list[str]:
@@ -68,7 +78,71 @@ def html_to_text(html: str) -> str:
     return text
 
 
-def render_message(msg_id: str, headers_only: bool, max_chars: int) -> str:
+_UNSAFE_FN = re.compile(r"[/\x00]")
+
+
+def safe_filename(fn: str | None, fallback_idx: int) -> str:
+    """Strip path separators and leading dots; fall back if empty.
+
+    >>> safe_filename("foo.pdf", 0)
+    'foo.pdf'
+    >>> safe_filename("../etc/passwd", 0)
+    '_etc_passwd'
+    >>> safe_filename(".hidden", 0)
+    'hidden'
+    >>> safe_filename("..", 4)
+    'unnamed_4'
+    >>> safe_filename(None, 3)
+    'unnamed_3'
+    >>> safe_filename("", 1)
+    'unnamed_1'
+    """
+    if not fn:
+        return f"unnamed_{fallback_idx}"
+    cleaned = _UNSAFE_FN.sub("_", fn).lstrip(".")
+    return cleaned or f"unnamed_{fallback_idx}"
+
+
+def save_attachments(raw: bytes, outdir: Path) -> list[Path]:
+    """Write each attachment to outdir, returning the list of paths written.
+
+    Filename collisions get a `.N` suffix. Creates outdir if missing.
+    """
+    outdir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for idx, (fn, _mime, data, _text) in enumerate(iter_attachments(raw)):
+        name = safe_filename(fn, idx)
+        dest = outdir / name
+        n = 1
+        while dest.exists():
+            dest = outdir / f"{name}.{n}"
+            n += 1
+        dest.write_bytes(data)
+        written.append(dest)
+    return written
+
+
+def render_attachment_text(raw: bytes, max_chars: int) -> list[str]:
+    """Per-attachment header + extracted text block."""
+    blocks: list[str] = []
+    for fn, mime, data, text in iter_attachments(raw):
+        header = f"----- attachment: {fn} [{mime}] ({len(data)} bytes) -----"
+        if text:
+            if max_chars and len(text) > max_chars:
+                text = text[:max_chars] + f"\n…[attachment truncated at {max_chars} chars]"
+            blocks.append(header + "\n" + text.rstrip())
+        else:
+            blocks.append(header + "\n(no text extractable — binary or unsupported MIME)")
+    return blocks
+
+
+def render_message(
+    msg_id: str,
+    headers_only: bool,
+    max_chars: int,
+    attachment_text: bool = False,
+    attachments_dir: Path | None = None,
+) -> str:
     raw = fetch_raw(msg_id)
     msg = email.message_from_bytes(raw, policy=email_default)
 
@@ -90,23 +164,30 @@ def render_message(msg_id: str, headers_only: bool, max_chars: int) -> str:
     if attachments:
         lines.append("Attachments: " + "; ".join(attachments))
 
-    if headers_only:
-        return "\n".join(lines)
+    if attachments_dir is not None:
+        for path in save_attachments(raw, attachments_dir):
+            lines.append(f"Saved: {path}")
 
-    body = msg.get_body(preferencelist=("plain", "html"))
-    if body is None:
-        lines.append("\n(no readable body part)")
-        return "\n".join(lines)
+    if not headers_only:
+        body = msg.get_body(preferencelist=("plain", "html"))
+        if body is None:
+            lines.append("\n(no readable body part)")
+        else:
+            content = body.get_content()
+            if body.get_content_type() == "text/html":
+                content = html_to_text(content)
 
-    content = body.get_content()
-    if body.get_content_type() == "text/html":
-        content = html_to_text(content)
+            if max_chars and len(content) > max_chars:
+                content = content[:max_chars] + f"\n…[truncated at {max_chars} chars]"
 
-    if max_chars and len(content) > max_chars:
-        content = content[:max_chars] + f"\n…[truncated at {max_chars} chars]"
+            lines.append("")
+            lines.append(content.rstrip())
 
-    lines.append("")
-    lines.append(content.rstrip())
+    if attachment_text:
+        for block in render_attachment_text(raw, max_chars):
+            lines.append("")
+            lines.append(block)
+
     return "\n".join(lines)
 
 
@@ -116,6 +197,10 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--limit", type=int, default=20, help="Max messages to render for non-id queries (default: 20).")
     ap.add_argument("--max-chars", type=int, default=4000, help="Truncate each body at N chars (default: 4000, 0 = no truncation).")
     ap.add_argument("--headers-only", action="store_true", help="Print headers + attachment list, skip body.")
+    ap.add_argument("--attachment-text", action="store_true",
+                    help="Render extracted attachment text (PDF/DOCX/ODT/text) inline after body.")
+    ap.add_argument("--attachments", type=Path, metavar="DIR", default=None,
+                    help="Save raw attachment bytes to DIR (created if missing).")
     args = ap.parse_args(argv)
 
     q = args.query.strip()
@@ -129,7 +214,13 @@ def main(argv: list[str]) -> int:
 
     for mid in msg_ids:
         try:
-            print(render_message(mid, args.headers_only, args.max_chars))
+            print(render_message(
+                mid,
+                args.headers_only,
+                args.max_chars,
+                attachment_text=args.attachment_text,
+                attachments_dir=args.attachments,
+            ))
             print()
         except subprocess.CalledProcessError as e:
             print(f"!! failed to read id:{mid}: {e}", file=sys.stderr)

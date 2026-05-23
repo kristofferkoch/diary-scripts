@@ -194,13 +194,25 @@ mbsync run**. Other related gotchas:
   no re-index needed. The `post-new` hook then reconciles tags.
 - Lesson learned 2026-05-15 archiving the Filter newsletters.
 
-### Extracting attachments
+### Extracting attachments — `mailshow.py --attachment-text` / `--attachments`
 
-For attachments (e.g. ukeplan PDFs, .ics, .odt protokoller) use:
+`mailshow.py` handles attachments via two independent flags (reuses
+`embed_mail.iter_attachments`, so PDF/DOCX/ODT/text extraction matches what
+the embedder sees):
 
 ```bash
-notmuch show --format=raw id:<message-id> | munpack -C <outdir>
+# inline extracted text (PDF/DOCX/ODT/text) after the body — combine freely
+# with --headers-only when the body is junk and you only want the PDF
+uv run scripts/mailshow.py --headers-only --attachment-text id:<message-id>
+
+# save raw bytes to disk (filenames sanitised; collisions get .1, .2 …)
+uv run scripts/mailshow.py --attachments=/tmp/out id:<message-id>
 ```
+
+`--max-chars` truncates each attachment's extracted text the same way it
+truncates the body. Binary / unsupported MIME types print a marker line
+instead of text. `mpack` (`munpack`) is **not** required — and not in
+Fedora 44 anyway.
 
 Always pin to the exact `id:` (not a thread or search) to avoid concatenated
 streams. Lesson from 2026-04-27 (`MEMORY.md`).
