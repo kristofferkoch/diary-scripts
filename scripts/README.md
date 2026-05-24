@@ -158,8 +158,9 @@ Astral's `ty` typechecker. Both should pass clean before commit.
 ### Auto-archiving the inbox — `archive_inbox.py`
 
 For "archive after N days" workflows, use `scripts/archive_inbox.py`. Rules
-live in `scripts/archive_inbox_rules.json`. Systemd timer `archive-inbox.timer`
-runs it daily at ~03:30.
+live in `scripts/archive_inbox_rules.json`. **Not currently scheduled** — run
+manually (`uv run scripts/archive_inbox.py`) or wire up a user timer if you
+want it daily; only `mail-sync.timer` is installed today.
 
 ### notmuch post-new hook
 
