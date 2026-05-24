@@ -229,6 +229,53 @@ streams. Lesson from 2026-04-27 (`MEMORY.md`).
 
 ---
 
+## Finance — `finance_ingest.py`
+
+Summarise a Bulder Bank CSV export and cross-reference it with the embedded
+mail archive.
+
+Bulder is mobile-only; there's no API. The flow is: export from the iOS app
+share-sheet → mail to `user@example.com` → ingest. The CSV is named
+`eksporterte_transaksjoner.csv`, semicolon-separated with Norwegian comma
+decimals.
+
+```bash
+# From a CSV on disk
+uv run scripts/finance_ingest.py /tmp/bulder/eksporterte_transaksjoner.csv
+
+# Auto-extract latest "Bulder bank eksport" mail and summarise
+uv run scripts/finance_ingest.py --from-mail
+
+# Same, plus cross-reference vs embedded mail and enqueue matches for tier-2
+PG_DSN=dbname=mailvec uv run scripts/finance_ingest.py --from-mail --enrich
+```
+
+Output (markdown tables on stdout): per-month inn/ut, per-account outflows,
+top-25 merchants by `Tekst`, recurring (≥2 months), large one-offs (≥20k NOK).
+
+**Bulder's `Hovedkategori` / `Underkategori` columns are mostly garbage** — the
+summary leans on `Tekst` (merchant) and `Dato` instead. Don't trust the auto-
+categorization.
+
+**`--enrich` does two things:**
+1. For each "interesting" transaction (large / unlabelled / Ukategorisert),
+   finds matching mail by (a) amount-match against extracted money entities
+   in postgres, (b) notmuch search on date±3d + merchant keyword.
+2. For every matched mail, calls
+   `mail_reader.summarize.claim_for_generation(tier=2)` — enqueuing it for the
+   qwen3.6 structured-extraction pipeline. Workers in `mail-reader.service`
+   process the queue; results show up in the webapp at `/mail/`.
+
+The matches displayed in the output are deliberately broad (any mail in the
+date window with a merchant-keyword hit) — the value isn't precise correlation,
+it's that the bank ledger marks those mails as worth deeper processing.
+
+Cadence: monthly, see `CALENDAR.md`. Always reuse the existing pipeline:
+`mail_reader.db.connect()`, `mail_reader.summarize.claim_for_generation`,
+`scripts.embed_mail.embed_batch` — don't reimplement DSN / OLLAMA / embedding.
+
+---
+
 ## mail_reader webapp
 
 Lives under `mail_reader/` (not `scripts/`). FastAPI + Jinja2 + HTMX behind
