@@ -44,6 +44,10 @@ uv run scripts/mailshow.py --limit=5 'tag:inbox and date:today..'
 uv run scripts/mailshow.py thread:00000000000349df
 uv run scripts/mailshow.py --headers-only --limit=20 'from:gonordic'
 uv run scripts/mailshow.py --max-chars=8000 id:<message-id>
+
+# Process-new-mail entrypoint: starts from memory/mail-state.json:last_successful_run.
+uv run scripts/mailshow.py --since-cursor --headers-only
+uv run scripts/mailshow.py --since-cursor 'from:astrid'   # narrow within the cursor window
 ```
 
 Don't write fresh inline `python3 -c "..."` blocks for body extraction — extend this

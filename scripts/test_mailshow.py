@@ -85,3 +85,33 @@ def test_save_attachments_sanitises_path_traversal(tmp_path: Path):
     # `/` becomes `_`, leading dots are stripped → nothing escapes outdir
     assert written == [tmp_path / "_escape.txt"]
     assert not (tmp_path.parent / "escape.txt").exists()
+
+
+def test_load_cursor_parses_zulu(tmp_path: Path):
+    state = tmp_path / "mail-state.json"
+    state.write_text('{"last_successful_run": "2026-05-17T17:00:00Z"}')
+    dt = mailshow.load_cursor(state)
+    assert dt.isoformat() == "2026-05-17T17:00:00+00:00"
+
+
+def test_load_cursor_parses_offset(tmp_path: Path):
+    state = tmp_path / "mail-state.json"
+    state.write_text('{"last_successful_run": "2026-05-17T19:00:00+02:00"}')
+    dt = mailshow.load_cursor(state)
+    # Normalized to UTC.
+    assert dt.isoformat() == "2026-05-17T17:00:00+00:00"
+
+
+def test_cursor_query_without_extra():
+    from datetime import datetime, timezone
+    cursor = datetime(2026, 5, 17, 17, 0, tzinfo=timezone.utc)
+    q = mailshow.cursor_query(cursor, None)
+    assert q == f"tag:inbox and date:@{int(cursor.timestamp())}.."
+
+
+def test_cursor_query_with_extra():
+    from datetime import datetime, timezone
+    cursor = datetime(2026, 5, 17, 17, 0, tzinfo=timezone.utc)
+    q = mailshow.cursor_query(cursor, "from:astrid")
+    ts = int(cursor.timestamp())
+    assert q == f"(tag:inbox and date:@{ts}..) and (from:astrid)"

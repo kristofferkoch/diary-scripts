@@ -10,6 +10,8 @@ Examples:
     scripts/mailshow.py --max-chars=8000 thread:0000000000000018
     scripts/mailshow.py --attachment-text id:abcdef@example.com
     scripts/mailshow.py --attachments=/tmp/foo id:abcdef@example.com
+    scripts/mailshow.py --since-cursor --headers-only   # everything since memory/mail-state.json
+    scripts/mailshow.py --since-cursor 'from:astrid'     # narrow the since-cursor sweep
 
 Notes:
   - Mail is READ-ONLY (see TOOLS.md). This script never sends or modifies mail.
@@ -19,11 +21,36 @@ from __future__ import annotations
 
 import argparse
 import email
+import json
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from email.policy import default as email_default
 from pathlib import Path
+
+MAIL_STATE_PATH = Path(__file__).resolve().parent.parent / "memory" / "mail-state.json"
+
+
+def load_cursor(state_path: Path = MAIL_STATE_PATH) -> datetime:
+    """Read `last_successful_run` from the mail-state JSON and return as a UTC datetime."""
+    data = json.loads(state_path.read_text())
+    raw = data["last_successful_run"]
+    # fromisoformat in older Pythons rejects the trailing "Z"; normalize it.
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    dt = datetime.fromisoformat(raw)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def cursor_query(cursor: datetime, extra: str | None) -> str:
+    """Build a notmuch query for inbox mail since `cursor`, optionally AND-ed with `extra`."""
+    base = f"tag:inbox and date:@{int(cursor.timestamp())}.."
+    if extra:
+        return f"({base}) and ({extra})"
+    return base
 
 # When invoked as `python scripts/mailshow.py`, sys.path[0] is `scripts/` and
 # `from scripts.embed_mail …` fails. Inject the project root so the same import
@@ -193,7 +220,13 @@ def render_message(
 
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("query", help="A notmuch query (id:..., thread:..., or any search expression).")
+    ap.add_argument("query", nargs="?",
+                    help="A notmuch query (id:..., thread:..., or any search expression). "
+                         "Optional when --since-cursor is given; if both are given, they are AND-ed.")
+    ap.add_argument("--since-cursor", action="store_true",
+                    help="Start from memory/mail-state.json's last_successful_run "
+                         "(builds `tag:inbox and date:@<unix>..`). The cursor is hand-maintained "
+                         "— see CLAUDE.md 'How to process new mail'.")
     ap.add_argument("--limit", type=int, default=20, help="Max messages to render for non-id queries (default: 20).")
     ap.add_argument("--max-chars", type=int, default=4000, help="Truncate each body at N chars (default: 4000, 0 = no truncation).")
     ap.add_argument("--headers-only", action="store_true", help="Print headers + attachment list, skip body.")
@@ -203,7 +236,14 @@ def main(argv: list[str]) -> int:
                     help="Save raw attachment bytes to DIR (created if missing).")
     args = ap.parse_args(argv)
 
-    q = args.query.strip()
+    if args.since_cursor:
+        cursor = load_cursor()
+        q = cursor_query(cursor, args.query.strip() if args.query else None)
+        print(f"(cursor: {cursor.isoformat()} → {q})", file=sys.stderr)
+    elif args.query:
+        q = args.query.strip()
+    else:
+        ap.error("query is required unless --since-cursor is given")
     if q.startswith("id:"):
         msg_ids = [q[3:]]
     else:
