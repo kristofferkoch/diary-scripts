@@ -106,12 +106,13 @@ def test_cursor_query_without_extra():
     from datetime import datetime, timezone
     cursor = datetime(2026, 5, 17, 17, 0, tzinfo=timezone.utc)
     q = mailshow.cursor_query(cursor, None)
-    assert q == f"tag:inbox and date:@{int(cursor.timestamp())}.."
+    # +1 to skip the cursor mail itself (notmuch date:@N.. is inclusive).
+    assert q == f"tag:inbox and date:@{int(cursor.timestamp()) + 1}.."
 
 
 def test_cursor_query_with_extra():
     from datetime import datetime, timezone
     cursor = datetime(2026, 5, 17, 17, 0, tzinfo=timezone.utc)
     q = mailshow.cursor_query(cursor, "from:astrid")
-    ts = int(cursor.timestamp())
+    ts = int(cursor.timestamp()) + 1
     assert q == f"(tag:inbox and date:@{ts}..) and (from:astrid)"

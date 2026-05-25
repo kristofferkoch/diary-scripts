@@ -46,8 +46,13 @@ def load_cursor(state_path: Path = MAIL_STATE_PATH) -> datetime:
 
 
 def cursor_query(cursor: datetime, extra: str | None) -> str:
-    """Build a notmuch query for inbox mail since `cursor`, optionally AND-ed with `extra`."""
-    base = f"tag:inbox and date:@{int(cursor.timestamp())}.."
+    """Build a notmuch query for inbox mail strictly newer than `cursor`, optionally AND-ed with `extra`.
+
+    notmuch's `date:@N..` is inclusive at the lower bound, so we add 1 second to
+    skip the cursor message itself (the cursor records the Date of the last
+    successfully processed mail; that mail is, by definition, done).
+    """
+    base = f"tag:inbox and date:@{int(cursor.timestamp()) + 1}.."
     if extra:
         return f"({base}) and ({extra})"
     return base
