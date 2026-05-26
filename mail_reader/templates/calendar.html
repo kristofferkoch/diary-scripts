@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}{% if view == 'past' %}Kalender — tidligere{% else %}Kalender{% endif %}{% endblock %}
+{% block content %}
+
+<div class="cal-head">
+  <h1>
+    {% if view == 'past' %}Tidligere events{% else %}Kalender{% endif %}
+  </h1>
+  <nav class="cal-nav">
+    {% if view == 'past' %}
+    <a href="{{ url_for('get_calendar') }}">← Kommende</a>
+    {% else %}
+    <a href="{{ past_url }}">Tidligere →</a>
+    {% endif %}
+  </nav>
+</div>
+
+{% if view == 'upcoming' %}
+<section class="cal-week" aria-label="Neste 14 dager">
+  <h2 class="cal-section-head">Neste 14 dager</h2>
+  {% if not days %}
+  <p class="empty">Ingen events i neste 14 dager.</p>
+  {% else %}
+  <ol class="cal-days">
+    {% for day, events in days %}
+    <li class="cal-day{% if day == today %} cal-day-today{% endif %}">
+      <div class="cal-day-head">
+        <span class="cal-day-when">{{ day | relative_day }}</span>
+        <span class="cal-day-date">{{ day.strftime('%d.%m') }}</span>
+      </div>
+      <ul class="cal-events">
+        {% for ev in events %}
+        <li class="cal-event{% if ev.is_all_day %} cal-event-allday{% endif %}">
+          <span class="cal-event-time">
+            {% if ev.is_all_day %}hele dagen
+            {%- else -%}
+              {{ ev.start_time.strftime('%H:%M') }}
+              {%- if ev.end_time %}–{{ ev.end_time.strftime('%H:%M') }}{% endif -%}
+            {% endif %}
+            {% if ev.is_range %}
+            <span class="cal-event-rangehint">→ {{ ev.end_date.strftime('%d.%m') }}</span>
+            {% endif %}
+          </span>
+          <span class="cal-event-title">{{ ev.title }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+    </li>
+    {% endfor %}
+  </ol>
+  {% endif %}
+</section>
+{% endif %}
+
+<section class="cal-source" aria-label="{{ source_name }}">
+  <h2 class="cal-section-head">
+    {{ source_name }}
+    <span class="hint">full kilde</span>
+  </h2>
+  <div class="cal-markdown">
+    {{ rendered_md | safe }}
+  </div>
+</section>
+
+{% endblock %}

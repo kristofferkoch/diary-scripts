@@ -21,6 +21,18 @@
       </span>
       <span>Post</span>
     </a>
+    <a href="{{ url_for('get_calendar') }}" class="navlink" aria-label="Kalender">
+      <span class="mark" aria-hidden="true">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+             stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="3.5" width="12" height="10.5" rx="1.5"/>
+          <path d="M2 6.5 H14"/>
+          <path d="M5 2 V5"/>
+          <path d="M11 2 V5"/>
+        </svg>
+      </span>
+      <span>Kalender</span>
+    </a>
     <span class="queue-slot"
           hx-get="{{ url_for('get_queue_indicator') }}"
           hx-trigger="load, every 5s"

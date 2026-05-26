@@ -24,12 +24,18 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from . import agenda as agenda_mod
+from . import calendar_md as calendar_mod
 from . import db, inbox as inbox_mod, message as message_mod, related as related_mod
 from . import entities as entities_mod
 from . import summarize as summarize_mod
 from . import workers as workers_mod
 from .date_format import relative_day, short_date
 from .thread_id import ThreadId
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+CALENDAR_MD = REPO_ROOT / "CALENDAR.md"
+CALENDAR_PAST_MD = REPO_ROOT / "CALENDAR-PAST.md"
 
 
 _AGENDA_KINDS = frozenset({"deadline", "event", "valid_until", "mentioned"})
@@ -213,6 +219,50 @@ def get_tankekart(request: Request, message_id: str, mode: str = "chunks"):
             "branches": branches,
             "mode": mode,
             "msg_id_quoted": urllib.parse.quote(msg_id, safe=""),
+        },
+    )
+
+
+@app.get("/cal/", response_class=HTMLResponse)
+def get_calendar(request: Request):
+    """Markdown-driven calendar.
+
+    Top: focused list of events in the next 14 days (parsed from
+    `CALENDAR.md` per the parser-kontrakt in CALENDAR-RULES.md).
+    Bottom: the full CALENDAR.md rendered as HTML, so prose sections
+    (Pågående, Recurring, "ikke avklart" play-dates) stay visible
+    even though they don't match the strict parser."""
+    import datetime as _dt
+    events = calendar_mod.parse_calendar(CALENDAR_MD)
+    today = _dt.date.today()
+    days = calendar_mod.upcoming_by_day(events, today=today, horizon_days=14)
+    rendered = calendar_mod.render_markdown(CALENDAR_MD)
+    return TEMPLATES.TemplateResponse(
+        request, "calendar.html",
+        {
+            "view": "upcoming",
+            "days": days,
+            "today": today,
+            "rendered_md": rendered,
+            "source_name": "CALENDAR.md",
+            "past_url": request.url_for("get_calendar_past"),
+        },
+    )
+
+
+@app.get("/cal/past/", response_class=HTMLResponse)
+def get_calendar_past(request: Request):
+    """Archived calendar — just the rendered markdown; no week view."""
+    rendered = calendar_mod.render_markdown(CALENDAR_PAST_MD)
+    return TEMPLATES.TemplateResponse(
+        request, "calendar.html",
+        {
+            "view": "past",
+            "days": [],
+            "today": None,
+            "rendered_md": rendered,
+            "source_name": "CALENDAR-PAST.md",
+            "past_url": None,
         },
     )
 

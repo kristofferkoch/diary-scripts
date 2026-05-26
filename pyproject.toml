@@ -11,6 +11,7 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "jinja2>=3.1",
     "nh3>=0.2",
+    "markdown>=3.6",
     # spond_sync (Olen/Spond, unofficial)
     "spond>=1.2",
 ]

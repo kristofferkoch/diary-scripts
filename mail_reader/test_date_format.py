@@ -40,10 +40,12 @@ def test_relative_day_today():
     assert relative_day(today, today=today) == "i dag"
 
 
-def test_relative_day_tomorrow_and_overmorrow():
+def test_relative_day_tomorrow_and_day_after():
+    """Tomorrow is special-cased; day-after-tomorrow uses the full weekday
+    name. The earlier 'i overmorgen' wrapped ugly in narrow slots."""
     today = date(2026, 5, 22)  # Friday
     assert relative_day(date(2026, 5, 23), today=today) == "i morgen"
-    assert relative_day(date(2026, 5, 24), today=today) == "i overmorgen"
+    assert relative_day(date(2026, 5, 24), today=today) == "søndag"
 
 
 def test_relative_day_within_week_returns_weekday():

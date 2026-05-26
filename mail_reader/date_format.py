@@ -30,6 +30,7 @@ def short_date(dt: datetime | None, *, today: datetime | None = None) -> str:
 
 
 _NO_WEEKDAYS = ["man", "tir", "ons", "tor", "fre", "lør", "søn"]
+_NO_WEEKDAYS_FULL = ["mandag", "tirsdag", "onsdag", "torsdag", "fredag", "lørdag", "søndag"]
 
 
 def relative_day(d: date, *, today: date | None = None) -> str:
@@ -37,9 +38,10 @@ def relative_day(d: date, *, today: date | None = None) -> str:
 
     - today              → "i dag"
     - tomorrow           → "i morgen"
-    - day after          → "i overmorgen"
-    - within 7 days      → weekday name ("tor")
-    - within 14-ish days → weekday + day-of-month ("tor 30")
+    - day after          → full weekday ("torsdag") — kept short to
+                           avoid wrapping in narrow agenda/calendar slots
+    - within 7 days      → 3-letter weekday ("tor")
+    - within 14-ish days → 3-letter weekday + day-of-month ("tor 30")
     - further out        → "5. jun" (short_date style)
     """
     ref = today if today is not None else date.today()
@@ -49,7 +51,7 @@ def relative_day(d: date, *, today: date | None = None) -> str:
     if delta == 1:
         return "i morgen"
     if delta == 2:
-        return "i overmorgen"
+        return _NO_WEEKDAYS_FULL[d.weekday()]
     if 0 < delta < 7:
         return _NO_WEEKDAYS[d.weekday()]
     if 0 < delta < 14:
