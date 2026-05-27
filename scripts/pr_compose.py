@@ -1,16 +1,31 @@
 #!/usr/bin/env python3
-"""pr_compose.py — per-mail PR composer (classifier-only first cut).
+"""pr_compose.py — per-mail PR composer.
 
-For each candidate mail (notmuch query or --since-cursor), runs a cheap
-triage filter and the local MLX classifier on gpu-host:8080. Decisions
-go to stdout. No notmuch tag changes, no git, no PR creation in this cut
-— the next step is to add the writer tier + git harness.
+Two phases, both invoked in a single run:
 
-Usage:
+  1. CLASSIFY new candidate mail (notmuch query or --since-cursor). Triage
+     filter + MLX classifier on gpu-host:8080. Tags significant threads
+     with `pr::significant`, non-significant with `pr::skip`, all with
+     `pr::triaged` (so future runs skip them). Dry-run unless --apply.
+
+  2. FILE PRs for pr::significant threads not yet pr::filed. Re-calls the
+     model in writer mode, produces a memory-section draft, creates a
+     feature branch via `git worktree`, commits as exampleuser-bot,
+     pushes via embedded-PAT URL, opens a PR via `gh pr create`. Dry-run
+     unless --apply.
+
+Common invocations:
+    # Just see what would happen on recent mail:
     uv run scripts/pr_compose.py --since-cursor
-    uv run scripts/pr_compose.py --limit 20 'tag:inbox and date:1w..'
-    uv run scripts/pr_compose.py id:<message-id>
-    uv run scripts/pr_compose.py --verbose --limit 10 'from:astrid'
+
+    # Classify and tag (no PRs):
+    uv run scripts/pr_compose.py --apply --since-cursor
+
+    # Full pipeline — classify, tag, file PRs:
+    uv run scripts/pr_compose.py --apply --file-prs --since-cursor
+
+    # File PRs only (skip classify), capped at 2:
+    uv run scripts/pr_compose.py --file-prs --apply --limit-prs 2 'id:none'
 
 Env overrides:
     MLX_BASE          (default http://gpu-host:8080)
@@ -23,9 +38,15 @@ import argparse
 import email
 import json
 import os
+import random
+import re
+import string
 import subprocess
 import sys
+import tempfile
+import unicodedata
 from dataclasses import dataclass
+from datetime import date
 from email.policy import default as email_default
 from pathlib import Path
 
@@ -74,6 +95,11 @@ SKIP_SENDER_SUBSTRINGS = (
     "notifications@github.com",  # PR / issue / discussion notifications
     "noreply@github.com",        # account / security / repo-invite notifications
 )
+
+DIARY_REPO = "exampleuser/diary"
+BOT_NAME = "exampleuser-bot"
+BOT_EMAIL = "bot@example.com"
+BOT_PASS_ENTRY = "github/mailbot-pat"
 
 CLASSIFIER_SYSTEM = """\
 Du klassifiserer e-poster fra Examples inboks. Svar BARE med JSON på \
@@ -262,6 +288,298 @@ def classify(row: MailRow, client: httpx.Client) -> tuple[bool, str]:
     return bool(parsed["significant"]), str(parsed.get("reason", ""))[:200]
 
 
+# ---------- Writer
+
+WRITER_SYSTEM = """\
+Du foreslår en seksjon til Examples daglige minne-notat
+(`memory/YYYY-MM-DD.md`) basert på en epost han har mottatt. Svar BARE
+med JSON på formen:
+
+{
+  "pr_title": "Kort norsk PR-tittel (max 70 tegn)",
+  "branch_keyword": "kort-kebab-case-ascii-slug",
+  "memory_heading": "Norsk overskrift uten '## '-prefiks",
+  "memory_body": "Markdown-innhold for seksjonen, 2-6 setninger på norsk"
+}
+
+Krav:
+- `pr_title`: handlingsfokusert. Eksempler:
+  - "Streik-varsel fra Eksempeldalen barnehage"
+  - "Tilbud fra Eksempel Elektriske — oppussings-strøm"
+- `branch_keyword`: kun a-z, 0-9, bindestrek. 2-5 ord. Eksempler:
+  "streik-eksempeldalen", "eksempel-elektriske-tilbud".
+- `memory_heading`: blir `## <heading>` i daglig-notatet.
+- `memory_body`: viktigste fakta og handlingspunkter — datoer, frister,
+  beløp, kontaktpersoner. Skriv slik at Example hugser kontekst
+  senere. Bruk markdown der det passer (kulepunkter for handlinger).
+"""
+
+_SLUG_FOLDS = str.maketrans({
+    "æ": "ae", "ø": "o", "å": "a",
+    "Æ": "ae", "Ø": "o", "Å": "a",
+})
+
+
+def _slugify(s: str) -> str:
+    """ASCII kebab-case slug for branch names. Norwegian chars folded to their
+    conventional Latin form (æ→ae, ø→o, å→a); other diacritics stripped via
+    NFKD (é→e, ñ→n, …) so foreign names slug cleanly too."""
+    s = s.lower().translate(_SLUG_FOLDS)
+    s = "".join(
+        c for c in unicodedata.normalize("NFKD", s)
+        if not unicodedata.combining(c)
+    )
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    return s.strip("-")[:50]
+
+
+def _validate_writer_output(d: dict) -> dict[str, str]:
+    required = ("pr_title", "branch_keyword", "memory_heading", "memory_body")
+    for k in required:
+        if k not in d or not isinstance(d[k], str):
+            raise ValueError(f"writer output missing/invalid {k!r}: {d!r}")
+    out = {k: d[k] for k in required}
+    out["branch_keyword"] = _slugify(out["branch_keyword"]) or "mail"
+    out["pr_title"] = out["pr_title"][:70].strip()
+    out["memory_heading"] = out["memory_heading"].lstrip("# ").strip()
+    out["memory_body"] = out["memory_body"].rstrip() + "\n"
+    return out
+
+
+def compose_pr(row: MailRow, client: httpx.Client) -> dict[str, str]:
+    """Call MLX writer for one mail. Returns validated writer dict."""
+    body = row.body[:BODY_MAX_CHARS]
+    user_content = f"Subject: {row.subject}\nFrom: {row.sender}\n\n{body}"
+    payload = {
+        "model": MODEL,
+        "messages": [
+            {"role": "system", "content": WRITER_SYSTEM},
+            {"role": "user", "content": user_content},
+        ],
+        "temperature": 0.2,  # light non-determinism for prose
+        "max_tokens": 600,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    r = client.post(f"{MLX_BASE}/v1/chat/completions", json=payload, timeout=120)
+    r.raise_for_status()
+    content = r.json()["choices"][0]["message"]["content"]
+    return _validate_writer_output(json.loads(_strip_code_fence(content)))
+
+
+def make_branch_name(keyword: str, today: date | None = None,
+                     rng: random.Random | None = None) -> str:
+    """Construct `mail/<YYYY-MM-DD>-<keyword>-<rand4>` for the feature branch."""
+    today = today or date.today()
+    rng = rng or random.Random()
+    suffix = "".join(rng.choices(string.ascii_lowercase + string.digits, k=4))
+    return f"mail/{today.isoformat()}-{keyword}-{suffix}"
+
+
+def _render_pr_body(row: MailRow, thread_id: str) -> str:
+    body_clip = row.body[:4000]
+    truncated_note = " (truncated; full mail via `notmuch show`)" if len(row.body) > 4000 else ""
+    return (
+        f"**Source mail:** `thread:{thread_id}`  \n"
+        f"**Subject:** {row.subject}  \n"
+        f"**From:** {row.sender}\n"
+        f"\n"
+        f"---\n"
+        f"\n"
+        f"Auto-generated by `scripts/pr_compose.py` from a notmuch-classified "
+        f"significant mail. Review the proposed memory section, edit if needed, "
+        f"and merge. To rollback: "
+        f"`notmuch tag -pr::filed -pr::significant +pr::skip thread:{thread_id}` "
+        f"then close the PR.\n"
+        f"\n"
+        f"<details>\n"
+        f"<summary>Rendered mail body (first 4000 chars{truncated_note})</summary>\n"
+        f"\n"
+        f"~~~\n"
+        f"{body_clip}\n"
+        f"~~~\n"
+        f"\n"
+        f"</details>\n"
+    )
+
+
+# ---------- Git / PR harness
+
+def _bot_pat() -> str:
+    """Read the bot's PAT from `pass`. Returns the first line only."""
+    out = subprocess.run(
+        ["pass", "show", BOT_PASS_ENTRY],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    return out.split("\n", 1)[0].strip()
+
+
+def _latest_msg_in_thread(thread_id: str) -> str | None:
+    """notmuch newest-first; return the newest message id in the thread."""
+    out = subprocess.run(
+        ["notmuch", "search", "--sort=newest-first",
+         "--output=messages", f"thread:{thread_id}"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("id:"):
+            return line.removeprefix("id:")
+    return None
+
+
+def file_pr_for_message(
+    row: MailRow, thread_id: str, writer: dict[str, str],
+    *, apply: bool, today: date | None = None,
+    repo_root: Path | None = None,
+) -> str | None:
+    """File one PR. Returns PR URL on apply, None in dry-run.
+
+    Side effects on apply: creates a feature branch via `git worktree`, writes
+    the proposed memory section, commits as the bot, pushes via embedded-PAT
+    URL, opens a PR via `gh pr create`. Worktree is removed in `finally`."""
+    today = today or date.today()
+    repo_root = repo_root or Path(__file__).resolve().parent.parent
+    branch = make_branch_name(writer["branch_keyword"], today)
+
+    print(
+        f"  → branch: {branch}\n"
+        f"     title:  {writer['pr_title']}\n"
+        f"     edit:   memory/{today.isoformat()}.md  +## {writer['memory_heading']}\n"
+        f"     body:   {writer['memory_body'].strip()[:300]}",
+        file=sys.stderr,
+    )
+
+    if not apply:
+        return None
+
+    pat = _bot_pat()
+    worktree_path = Path(tempfile.mkdtemp(prefix="prcomp-"))
+    try:
+        subprocess.run(
+            ["git", "-C", str(repo_root), "worktree", "add", "-b", branch,
+             str(worktree_path), "master"],
+            check=True, capture_output=True, text=True,
+        )
+
+        memory_rel = Path("memory") / f"{today.isoformat()}.md"
+        memory_path = worktree_path / memory_rel
+        memory_path.parent.mkdir(parents=True, exist_ok=True)
+        existing = memory_path.read_text() if memory_path.exists() else f"# {today.isoformat()}\n"
+        new_content = (
+            existing.rstrip()
+            + f"\n\n## {writer['memory_heading']}\n\n{writer['memory_body']}"
+        )
+        memory_path.write_text(new_content)
+
+        subprocess.run(
+            ["git", "-C", str(worktree_path), "add", str(memory_rel)],
+            check=True,
+        )
+        commit_msg = (
+            f"MEM: {writer['pr_title']}\n\n"
+            f"Auto-generert av scripts/pr_compose.py fra epost:\n"
+            f"  thread:{thread_id}\n"
+            f"  from:    {row.sender}\n"
+            f"  subject: {row.subject}\n\n"
+            f"Co-Authored-By: {BOT_NAME} <{BOT_EMAIL}>\n"
+        )
+        subprocess.run(
+            ["git", "-C", str(worktree_path),
+             "-c", f"user.name={BOT_NAME}",
+             "-c", f"user.email={BOT_EMAIL}",
+             "commit", "-m", commit_msg],
+            check=True,
+        )
+
+        push_url = f"https://{BOT_NAME}:{pat}@github.com/{DIARY_REPO}.git"
+        subprocess.run(
+            ["git", "-C", str(worktree_path), "push",
+             push_url, f"HEAD:refs/heads/{branch}"],
+            check=True, capture_output=True, text=True,
+        )
+
+        env = {**os.environ, "GH_TOKEN": pat}
+        result = subprocess.run(
+            ["gh", "pr", "create",
+             "--repo", DIARY_REPO,
+             "--base", "master",
+             "--head", branch,
+             "--title", f"MEM: {writer['pr_title']}",
+             "--body", _render_pr_body(row, thread_id)],
+            env=env, capture_output=True, text=True, check=True,
+        )
+        return result.stdout.strip()
+    finally:
+        subprocess.run(
+            ["git", "-C", str(repo_root), "worktree", "remove",
+             "--force", str(worktree_path)],
+            check=False, capture_output=True,
+        )
+
+
+def file_prs_for_significant_threads(args: argparse.Namespace,
+                                      client: httpx.Client) -> tuple[int, int]:
+    """Find pr::significant threads without pr::filed; write + open PRs.
+
+    Returns (n_filed, n_error)."""
+    query = "tag:pr::significant and not tag:pr::filed"
+    out = subprocess.run(
+        ["notmuch", "search", "--output=threads", query],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    thread_ids = [
+        line.strip().removeprefix("thread:")
+        for line in out.splitlines()
+        if line.strip().startswith("thread:")
+    ]
+
+    if not thread_ids:
+        print("# no significant threads to file", file=sys.stderr)
+        return 0, 0
+
+    if args.limit_prs and len(thread_ids) > args.limit_prs:
+        print(f"# {len(thread_ids)} sig thread(s); capped at {args.limit_prs}",
+              file=sys.stderr)
+        thread_ids = thread_ids[:args.limit_prs]
+
+    mode = "APPLY" if args.apply else "dry-run"
+    print(f"\n# [{mode}] filing PRs for {len(thread_ids)} thread(s)",
+          file=sys.stderr)
+
+    n_filed = n_error = 0
+    for i, tid in enumerate(thread_ids, 1):
+        msg_id = _latest_msg_in_thread(tid)
+        if not msg_id:
+            print(f"!! thread:{tid} has no resolvable message", file=sys.stderr)
+            n_error += 1
+            continue
+        row = load_mail(msg_id)
+        if row is None:
+            n_error += 1
+            continue
+        print(f"\n[{i}/{len(thread_ids)}] thread:{tid}  {row.sender[:40]}  {row.subject[:60]}",
+              file=sys.stderr)
+        try:
+            writer = compose_pr(row, client)
+        except Exception as e:
+            print(f"!! writer failed: {e}", file=sys.stderr)
+            n_error += 1
+            continue
+        try:
+            pr_url = file_pr_for_message(row, tid, writer, apply=args.apply)
+        except subprocess.CalledProcessError as e:
+            stderr = e.stderr if isinstance(e.stderr, str) else ""
+            print(f"!! git/gh failed: {e}\n    {stderr[:300]}", file=sys.stderr)
+            n_error += 1
+            continue
+        if args.apply and pr_url:
+            apply_tags(f"thread:{tid}", ["+pr::filed"])
+            print(f"  ✓ {pr_url}")
+            n_filed += 1
+
+    return n_filed, n_error
+
+
 # ---------- Main
 
 def resolve_query(args: argparse.Namespace) -> tuple[str, int | None]:
@@ -307,8 +625,13 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--verbose", "-v", action="store_true",
                     help="Print first 200 chars of body for each classified mail")
     ap.add_argument("--apply", action="store_true",
-                    help="Persist decisions as notmuch tags (pr::triaged + "
-                         "pr::significant|pr::skip). Default is dry-run.")
+                    help="Persist decisions and (with --file-prs) actually "
+                         "open PRs. Default is dry-run everywhere.")
+    ap.add_argument("--file-prs", action="store_true",
+                    help="After classifying, file PRs for pr::significant "
+                         "threads not yet pr::filed.")
+    ap.add_argument("--limit-prs", type=int, default=None,
+                    help="Cap number of PRs filed per run (safety)")
     ap.add_argument("query", nargs="*",
                     help="notmuch query (default: tag:inbox and date:1w..)")
     args = ap.parse_args(argv)
@@ -316,10 +639,14 @@ def main(argv: list[str]) -> int:
     query, limit = resolve_query(args)
     ids = notmuch_search_ids(query, limit)
     if not ids:
-        print(f"# no mail matched: {query}", file=sys.stderr)
-        return 0
-
-    kept_ids, dupes = dedupe_by_thread(ids)
+        print(f"# no classifier candidates (query: {query})", file=sys.stderr)
+        if not args.file_prs:
+            return 0
+        # Fall through to file-prs phase — there may still be already-tagged
+        # significant threads to process even though no new mail to classify.
+        kept_ids, dupes = [], {}
+    else:
+        kept_ids, dupes = dedupe_by_thread(ids)
     n_thread_dup = sum(len(v) for v in dupes.values())
     mode = "APPLY" if args.apply else "dry-run"
     print(
@@ -377,12 +704,22 @@ def main(argv: list[str]) -> int:
                 apply_tags(target, ["+pr::triaged", decision])
 
     print(
-        f"\n# done: {len(ids)} candidate(s) "
+        f"\n# classify done: {len(ids)} candidate(s) "
         f"({n_thread_dup} thread-dup, {n_skip_triage} triage-skip, "
         f"{n_classified} classified, {n_sig} sig, {n_error} error(s))"
         + ("  [TAGS APPLIED]" if args.apply else "  [dry-run, no tags written]"),
         file=sys.stderr,
     )
+
+    if args.file_prs:
+        with httpx.Client() as client:
+            n_filed, n_pr_err = file_prs_for_significant_threads(args, client)
+        print(
+            f"\n# file-prs done: {n_filed} PR(s) "
+            + ("filed" if args.apply else "(dry-run)")
+            + f", {n_pr_err} error(s)",
+            file=sys.stderr,
+        )
     return 0
 
 

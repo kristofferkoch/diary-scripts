@@ -309,3 +309,156 @@ def test_format_line_omits_reason_when_blank() -> None:
     row = _row(subject="s", sender="y@z")
     line = format_line(1, 10, "SIG   ", row, reason="")
     assert "reason:" not in line
+
+
+# ---------- writer: _slugify ----------
+
+@pytest.mark.parametrize("raw, expected", [
+    ("Eksempel Elektriske AS", "eksempel-elektriske-as"),
+    ("Eksempeldalen barnehage", "eksempeldalen-barnehage"),
+    ("Tre øl & én ås", "tre-ol-en-as"),
+    ("ALREADY-kebab", "already-kebab"),
+    ("  spaces  here  ", "spaces-here"),
+    ("___underscores", "underscores"),
+    ("123 only", "123-only"),
+    ("", ""),
+    ("---", ""),
+    ("a" * 100, "a" * 50),  # capped at 50
+])
+def test_slugify(raw: str, expected: str) -> None:
+    from scripts.pr_compose import _slugify
+    assert _slugify(raw) == expected
+
+
+# ---------- writer: _validate_writer_output ----------
+
+def _writer_dict(**overrides):
+    base = {
+        "pr_title": "Tilbud fra Eksempel Elektriske",
+        "branch_keyword": "eksempel-elektriske-tilbud",
+        "memory_heading": "Eksempel Elektriske — tilbudsbrev",
+        "memory_body": "Tilbudet er på 95 000 NOK. Frist 15. juni.",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_validate_writer_output_passes_clean_dict() -> None:
+    from scripts.pr_compose import _validate_writer_output
+    out = _validate_writer_output(_writer_dict())
+    assert out["pr_title"].startswith("Tilbud")
+    assert out["branch_keyword"] == "eksempel-elektriske-tilbud"
+    assert out["memory_heading"] == "Eksempel Elektriske — tilbudsbrev"
+    assert out["memory_body"].endswith("\n")  # body normalised with trailing newline
+
+
+def test_validate_writer_output_strips_hash_prefix_from_heading() -> None:
+    from scripts.pr_compose import _validate_writer_output
+    out = _validate_writer_output(_writer_dict(memory_heading="## Streik"))
+    assert out["memory_heading"] == "Streik"
+
+
+def test_validate_writer_output_slugifies_branch_keyword() -> None:
+    from scripts.pr_compose import _validate_writer_output
+    out = _validate_writer_output(_writer_dict(branch_keyword="Stort Kjøp Mac Studio"))
+    assert out["branch_keyword"] == "stort-kjop-mac-studio"
+
+
+def test_validate_writer_output_falls_back_when_slug_empty() -> None:
+    from scripts.pr_compose import _validate_writer_output
+    out = _validate_writer_output(_writer_dict(branch_keyword="!!!"))
+    assert out["branch_keyword"] == "mail"
+
+
+def test_validate_writer_output_truncates_long_title() -> None:
+    from scripts.pr_compose import _validate_writer_output
+    out = _validate_writer_output(_writer_dict(pr_title="x" * 200))
+    assert len(out["pr_title"]) == 70
+
+
+def test_validate_writer_output_rejects_missing_key() -> None:
+    from scripts.pr_compose import _validate_writer_output
+    bad = _writer_dict()
+    del bad["pr_title"]
+    with pytest.raises(ValueError, match="pr_title"):
+        _validate_writer_output(bad)
+
+
+def test_validate_writer_output_rejects_non_string() -> None:
+    from scripts.pr_compose import _validate_writer_output
+    with pytest.raises(ValueError, match="memory_body"):
+        _validate_writer_output(_writer_dict(memory_body=42))
+
+
+# ---------- writer: make_branch_name ----------
+
+def test_make_branch_name_format() -> None:
+    from datetime import date as _date
+    import random as _random
+    from scripts.pr_compose import make_branch_name
+    name = make_branch_name("eksempel-elektriske", _date(2026, 5, 27),
+                            rng=_random.Random(0))
+    assert name.startswith("mail/2026-05-27-eksempel-elektriske-")
+    suffix = name.rsplit("-", 1)[-1]
+    assert len(suffix) == 4
+    assert all(c in "abcdefghijklmnopqrstuvwxyz0123456789" for c in suffix)
+
+
+def test_make_branch_name_random_suffix_varies() -> None:
+    """Two calls should (overwhelmingly likely) produce different suffixes."""
+    from scripts.pr_compose import make_branch_name
+    n1 = make_branch_name("x")
+    n2 = make_branch_name("x")
+    assert n1.rsplit("-", 1)[-1] != n2.rsplit("-", 1)[-1]
+
+
+# ---------- writer: compose_pr (stubbed transport) ----------
+
+def test_compose_pr_parses_and_normalises() -> None:
+    from scripts.pr_compose import compose_pr
+    canned = (
+        '{"pr_title": "Streik-varsel Eksempeldalen", '
+        '"branch_keyword": "Streik Eksempeldalen", '
+        '"memory_heading": "Streik-varsel", '
+        '"memory_body": "Barnehagen varsler mulig streik fra 5. juni."}'
+    )
+    client = _StubClient(canned)
+    out = compose_pr(_row(body="Streikevarsel innhold"), client)
+    assert out["branch_keyword"] == "streik-eksempeldalen"  # slugified + folded
+    assert out["pr_title"] == "Streik-varsel Eksempeldalen"
+
+
+def test_compose_pr_disables_thinking() -> None:
+    """Same regression guard as the classifier — the writer must also turn
+    thinking off, or it burns 600+ tokens on traces before emitting JSON."""
+    from scripts.pr_compose import compose_pr
+    client = _StubClient(
+        '{"pr_title": "x", "branch_keyword": "x", '
+        '"memory_heading": "x", "memory_body": "x"}'
+    )
+    compose_pr(_row(body="x"), client)
+    assert client.last_payload is not None
+    assert client.last_payload["chat_template_kwargs"]["enable_thinking"] is False
+
+
+# ---------- _render_pr_body ----------
+
+def test_render_pr_body_includes_thread_subject_and_body() -> None:
+    from scripts.pr_compose import _render_pr_body
+    row = _row(subject="Tilbud 20260510-1", sender="thor@eksempel.no",
+               body="Hei,\n\nTilbudet er på 95 000 NOK.\n")
+    body = _render_pr_body(row, "deadbeef")
+    assert "thread:deadbeef" in body
+    assert "Tilbud 20260510-1" in body
+    assert "thor@eksempel.no" in body
+    assert "95 000 NOK" in body
+    assert "~~~" in body  # fenced block uses tildes to survive backtick-containing mail
+    # rollback hint must reference thread for the future-me
+    assert "tag -pr::filed" in body
+
+
+def test_render_pr_body_marks_truncated_when_body_long() -> None:
+    from scripts.pr_compose import _render_pr_body
+    row = _row(subject="x", sender="y@z", body="a" * 5000)
+    body = _render_pr_body(row, "t")
+    assert "truncated" in body
