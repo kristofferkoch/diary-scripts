@@ -365,6 +365,22 @@ ul.threads li.thread a:focus-visible {
   line-height: 1.6;
 }
 
+/* Bot-managed lifecycle tags (pr::triaged, pr::significant, pr::skip, pr::filed).
+   These are noise to the human reader — kept visible for debugging but
+   de-emphasised so they don't compete with content-meaningful tags
+   (digest::keep, attachment, …). Outline instead of filled, smaller,
+   mixed-case. */
+.tag.tag-meta {
+  font-size: 0.55rem;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--tag-bg);
+  padding: 1px 5px;
+}
+
 .empty {
   padding: var(--s-7) 0;
   text-align: center;

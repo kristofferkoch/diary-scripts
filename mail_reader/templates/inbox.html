@@ -20,7 +20,7 @@
         <span class="from">{{ t.authors }}</span>
         {% if extra_tags %}
         <span class="tags">
-          {% for tag in extra_tags %}<span class="tag">{{ tag }}</span>{% endfor %}
+          {% for tag in extra_tags %}<span class="tag{% if tag.startswith('pr::') %} tag-meta{% endif %}">{{ tag }}</span>{% endfor %}
         </span>
         {% endif %}
       </div>
