@@ -80,6 +80,21 @@ uv run scripts/search_mail.py --weight 0.5 --minus dogs "animals"
 Each hit prints distance, date, sender, subject, `id:<message-id>`, and a
 240-char snippet. Pipe an `id:` into `scripts/mailshow.py` for the full body.
 
+**Caveat — snippets can stitch chunks across attachments.** A single mail
+with multiple attachments produces chunks from each attachment under the
+same `message_id`. Adjacent chunks in the result list look like one quote
+but can come from unrelated documents (e.g. the homeowner's own søknad
+plus a neighbouring property's søknad attached for context). When an
+embedding hit is the *only* source for a durable claim (FDV, `CONTEXT.md`,
+biographical fact), open the full attachment text — `mailshow.py
+--attachment-text id:…` — and verify in context before writing it as
+fact. Especially risky: multi-attachment mails, neighbouring-property
+references, søknader/byggesaker (often sent as bundles). Lesson from
+2026-05-26 — embedded snippet attributed Brødrene Bisgaard A/S to
+Eksempelveien 3B; the actual byggemelding showed Mesterhus Oslo og
+Akershus A/L. Bisgaard was tied to a neighbouring søknad in the same
+mail bundle.
+
 **Backend:** Postgres `mailvec` (pg18) + `pgvector` HNSW index, embeddings
 from Ollama `bge-m3:latest` (1024d, multilingual NO/EN) served by
 `gpu-host:11434` (Mac Studio M3 Ultra, 256 GB — GPU-accelerated, much
