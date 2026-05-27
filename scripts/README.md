@@ -280,6 +280,31 @@ Cadence: monthly, see `CALENDAR.md`. Always reuse the existing pipeline:
 
 ---
 
+## Calendar — `retire_calendar.py`
+
+Part of the daily **sjekk-flow** (mail + spond + retire). Cuts expired one-off
+events out of `CALENDAR.md` and inserts them into `CALENDAR-PAST.md`. See
+`CLAUDE.md` → "Sjekk-flow: retire past calendar entries" for the full procedure.
+
+```bash
+uv run scripts/retire_calendar.py --dry-run            # preview
+uv run scripts/retire_calendar.py                      # apply, today = date.today()
+uv run scripts/retire_calendar.py --today 2026-06-01   # simulate a later date
+```
+
+- Operates only inside `## One-off events by month`. Recurring weekly/monthly/
+  quarterly sections are skipped.
+- Decision is on **end-date** for date spans (so `2026-06-29 – 2026-07-03`
+  retires under July when 2026-07-04+ arrives).
+- Drops `### Month Year` subheadings that end up empty in `CALENDAR.md`.
+- New month sections in `CALENDAR-PAST.md` are inserted chronologically.
+- Idempotent: when nothing is expired, both files are left byte-identical
+  (no spurious whitespace churn).
+- The `[[memory/YYYY-MM-DD.md]]`-tail enrichments on moved lines are a manual
+  judgment call; the script intentionally does not touch the line body.
+
+Tests: `uv run pytest scripts/test_retire_calendar.py`.
+
 ## mail_reader webapp
 
 Lives under `mail_reader/` (not `scripts/`). FastAPI + Jinja2 + HTMX behind
