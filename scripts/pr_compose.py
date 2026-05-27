@@ -119,6 +119,53 @@ def get_tags(msg_id: str) -> list[str]:
     return [t.strip() for t in out.splitlines() if t.strip()]
 
 
+_thread_cache: dict[str, str | None] = {}
+
+
+def thread_of(msg_id: str) -> str | None:
+    """notmuch thread id for a message (without the 'thread:' prefix), or None
+    if the message isn't indexed. Cached per run."""
+    if msg_id in _thread_cache:
+        return _thread_cache[msg_id]
+    out = subprocess.run(
+        ["notmuch", "search", "--output=threads", f"id:{msg_id}"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    if not out:
+        _thread_cache[msg_id] = None
+        return None
+    first = out.splitlines()[0]
+    tid = first.removeprefix("thread:") if first.startswith("thread:") else first
+    _thread_cache[msg_id] = tid
+    return tid
+
+
+def apply_tags(target: str, tags: list[str]) -> None:
+    """Apply +/- tag list to a notmuch query target (e.g. 'id:foo', 'thread:bar')."""
+    if not tags:
+        return
+    subprocess.run(["notmuch", "tag"] + tags + ["--", target], check=True)
+
+
+def dedupe_by_thread(ids: list[str]) -> tuple[list[str], dict[str, list[str]]]:
+    """Group `ids` by thread; keep only the first message encountered per
+    thread (notmuch default sort is newest-first, so "first encountered" is
+    the latest message — the one with the most context). Returns
+    (kept_ids, {thread_id: [duplicate_msg_ids_dropped]})."""
+    seen: set[str] = set()
+    kept: list[str] = []
+    dupes: dict[str, list[str]] = {}
+    for msg_id in ids:
+        tid = thread_of(msg_id)
+        if tid and tid in seen:
+            dupes.setdefault(tid, []).append(msg_id)
+        else:
+            if tid:
+                seen.add(tid)
+            kept.append(msg_id)
+    return kept, dupes
+
+
 def extract_body(msg: email.message.EmailMessage) -> str:
     """Best-effort plain-text body. Prefer text/plain; fall back to text/html → text.
     Skips attachments and multipart parents."""
@@ -218,14 +265,29 @@ def classify(row: MailRow, client: httpx.Client) -> tuple[bool, str]:
 # ---------- Main
 
 def resolve_query(args: argparse.Namespace) -> tuple[str, int | None]:
-    """Build the notmuch query and limit from CLI args."""
+    """Build the notmuch query and limit from CLI args.
+
+    Always excludes mail we've already decided on:
+      - tag:pr::triaged (per-message decision was made)
+      - thread:"{tag:pr::significant}" (the whole thread was deemed significant
+        — replies on the same thread shouldn't trigger a new PR)
+
+    To re-classify a tagged mail, remove the tag first: `notmuch tag -pr::triaged …`
+    """
     if args.since_cursor:
         cursor = load_cursor()
         extra = " ".join(args.query) if args.query else None
-        return cursor_query(cursor, extra), args.limit
-    if args.query:
-        return " ".join(args.query), args.limit
-    return "tag:inbox and date:1w..", args.limit or 50
+        base = cursor_query(cursor, extra)
+        limit = args.limit
+    elif args.query:
+        base = " ".join(args.query)
+        limit = args.limit
+    else:
+        base = "tag:inbox and date:1w.."
+        limit = args.limit or 50
+
+    base = f"({base}) and not (tag:pr::triaged or thread:\"{{tag:pr::significant}}\")"
+    return base, limit
 
 
 def format_line(idx: int, total: int, tag: str, row: MailRow, reason: str = "") -> str:
@@ -244,6 +306,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--limit", type=int, help="Cap number of mails")
     ap.add_argument("--verbose", "-v", action="store_true",
                     help="Print first 200 chars of body for each classified mail")
+    ap.add_argument("--apply", action="store_true",
+                    help="Persist decisions as notmuch tags (pr::triaged + "
+                         "pr::significant|pr::skip). Default is dry-run.")
     ap.add_argument("query", nargs="*",
                     help="notmuch query (default: tag:inbox and date:1w..)")
     args = ap.parse_args(argv)
@@ -253,11 +318,20 @@ def main(argv: list[str]) -> int:
     if not ids:
         print(f"# no mail matched: {query}", file=sys.stderr)
         return 0
-    print(f"# {len(ids)} mail(s) to triage  (query: {query})", file=sys.stderr)
+
+    kept_ids, dupes = dedupe_by_thread(ids)
+    n_thread_dup = sum(len(v) for v in dupes.values())
+    mode = "APPLY" if args.apply else "dry-run"
+    print(
+        f"# [{mode}] {len(ids)} candidate(s); "
+        f"{n_thread_dup} thread-dup → {len(kept_ids)} to classify  "
+        f"(query: {query})",
+        file=sys.stderr,
+    )
 
     n_sig = n_skip_triage = n_classified = n_error = 0
     with httpx.Client() as client:
-        for i, msg_id in enumerate(ids, 1):
+        for i, msg_id in enumerate(kept_ids, 1):
             row = load_mail(msg_id)
             if row is None:
                 n_error += 1
@@ -266,31 +340,47 @@ def main(argv: list[str]) -> int:
             t_skip = triage_skip(row)
             if t_skip:
                 n_skip_triage += 1
-                print(format_line(i, len(ids), "SKIP  ", row, t_skip))
+                print(format_line(i, len(kept_ids), "SKIP  ", row, t_skip))
+                if args.apply:
+                    # Triage decisions are per-message: a github noreply in a
+                    # thread that later gets a human reply shouldn't taint the
+                    # whole thread. The future human message will get its own
+                    # classifier pass.
+                    apply_tags(f"id:{msg_id}", ["+pr::triaged", "+pr::skip"])
                 continue
 
             try:
                 sig, reason = classify(row, client)
             except Exception as e:
                 n_error += 1
-                print(f"[{i:3}/{len(ids)}] ERROR  id:{msg_id}: {e}", file=sys.stderr)
+                print(f"[{i:3}/{len(kept_ids)}] ERROR  id:{msg_id}: {e}",
+                      file=sys.stderr)
                 continue
 
             n_classified += 1
             if sig:
                 n_sig += 1
             label = "SIG   " if sig else "skip  "
-            print(format_line(i, len(ids), label, row, reason))
+            print(format_line(i, len(kept_ids), label, row, reason))
             if args.verbose and row.body:
                 body_snip = row.body[:200].replace("\n", " ")
                 print(f"             body:   {body_snip}…")
 
+            if args.apply:
+                # Classifier decisions go on the THREAD — once a thread is
+                # decided, replies on the same thread shouldn't trigger
+                # another PR. dupes already in this batch get tagged for
+                # free as part of the thread.
+                tid = thread_of(msg_id)
+                target = f"thread:{tid}" if tid else f"id:{msg_id}"
+                decision = "+pr::significant" if sig else "+pr::skip"
+                apply_tags(target, ["+pr::triaged", decision])
+
     print(
-        f"\n# done: {len(ids)} candidates, "
-        f"{n_skip_triage} triage-skipped, "
-        f"{n_classified} classified, "
-        f"{n_sig} significant, "
-        f"{n_error} error(s)",
+        f"\n# done: {len(ids)} candidate(s) "
+        f"({n_thread_dup} thread-dup, {n_skip_triage} triage-skip, "
+        f"{n_classified} classified, {n_sig} sig, {n_error} error(s))"
+        + ("  [TAGS APPLIED]" if args.apply else "  [dry-run, no tags written]"),
         file=sys.stderr,
     )
     return 0
