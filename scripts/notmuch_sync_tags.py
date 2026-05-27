@@ -80,6 +80,27 @@ def discover_label_rules() -> list[tuple[str, str, tuple[str, ...]]]:
     return rules
 
 
+def discover_folder_rules() -> list[tuple[str, str, tuple[str, ...]]]:
+    """Auto-discover `Folders/<name>` maildirs and emit canonical-folder rules.
+
+    Proton user-created folders are canonical (a message lives in exactly one
+    folder), so anything routed here by a sieve filter should drop out of
+    `tag:inbox` the same way Archive/Spam/Trash do. The tag added matches the
+    folder name lowercased, with non-alphanum collapsed to `_`.
+    """
+    folders_dir = MAILDIR_ROOT / "Folders"
+    if not folders_dir.is_dir():
+        return []
+    rules: list[tuple[str, str, tuple[str, ...]]] = []
+    for entry in sorted(folders_dir.iterdir()):
+        if not (entry / "cur").is_dir():
+            continue
+        name = entry.name
+        tag = "".join(c if c.isalnum() else "_" for c in name).lower().strip("_")
+        rules.append((f"Folders/{name}", tag, ("inbox",)))
+    return rules
+
+
 def nm_count(query: str) -> int:
     out = subprocess.run(
         ["notmuch", "count", query], check=True, capture_output=True, text=True
@@ -120,7 +141,7 @@ def backup_dump() -> pathlib.Path:
 def plan() -> list[dict]:
     """Compute deltas for each rule without changing anything."""
     out = []
-    for folder, add_tag, remove_tags in RULES + discover_label_rules():
+    for folder, add_tag, remove_tags in RULES + discover_folder_rules() + discover_label_rules():
         folder_q = _folder_query(folder)
         to_add = nm_count(f"{folder_q} and not tag:{add_tag}")
         removals = {}
@@ -138,7 +159,7 @@ def plan() -> list[dict]:
 
 
 def apply(quiet: bool = False) -> None:
-    for folder, add_tag, remove_tags in RULES + discover_label_rules():
+    for folder, add_tag, remove_tags in RULES + discover_folder_rules() + discover_label_rules():
         folder_q = _folder_query(folder)
         add_q = f"{folder_q} and not tag:{add_tag}"
         if nm_count(add_q):
