@@ -28,8 +28,11 @@ Common invocations:
     uv run scripts/pr_compose.py --file-prs --apply --limit-prs 2 'id:none'
 
 Env overrides:
-    MLX_BASE          (default http://gpu-host:8080)
-    PR_COMPOSE_MODEL  (default mlx-community/Qwen3.6-35B-A3B-4bit)
+    MLX_BASE                      (default http://gpu-host:8080)
+    PR_COMPOSE_CLASSIFIER_MODEL   (default Qwen3.6-35B-A3B-4bit-DWQ)
+    PR_COMPOSE_WRITER_MODEL       (default Qwen3.6-35B-A3B-4bit-DWQ — bump
+                                   to -6bit or -8bit-DWQ for better tool
+                                   routing + prose quality at writer time)
 """
 
 from __future__ import annotations
@@ -71,9 +74,20 @@ from scripts.mailshow import (  # noqa: E402
 # ---------- Config
 
 MLX_BASE = os.environ.get("MLX_BASE", "http://gpu-host:8080")
-MODEL = os.environ.get(
-    "PR_COMPOSE_MODEL",
-    "mlx-community/Qwen3.6-35B-A3B-4bit",
+
+# Two-tier model setup. The classifier runs on every new mail — pick speed.
+# The writer only runs on the ~5% deemed significant — pick quality. Quants
+# above 4-bit help the writer's tool-call routing + Norwegian prose; the
+# classifier's binary "significant?" decision doesn't need extra bits.
+# `4bit-DWQ` avoids the standard-4-bit tool-use degradation (mlx-lm #1011).
+# Both default to the same DWQ build if you only want to download one.
+CLASSIFIER_MODEL = os.environ.get(
+    "PR_COMPOSE_CLASSIFIER_MODEL",
+    "mlx-community/Qwen3.6-35B-A3B-4bit-DWQ",
+)
+WRITER_MODEL = os.environ.get(
+    "PR_COMPOSE_WRITER_MODEL",
+    "mlx-community/Qwen3.6-35B-A3B-4bit-DWQ",
 )
 BODY_MAX_CHARS = 4000  # cap the body sent to the classifier; receipts/notices are short
 
@@ -272,7 +286,7 @@ def classify(row: MailRow, client: httpx.Client) -> tuple[bool, str]:
     body = row.body[:BODY_MAX_CHARS]
     user_content = f"Subject: {row.subject}\nFrom: {row.sender}\n\n{body}"
     payload = {
-        "model": MODEL,
+        "model": CLASSIFIER_MODEL,
         "messages": [
             {"role": "system", "content": CLASSIFIER_SYSTEM},
             {"role": "user", "content": user_content},
@@ -291,28 +305,88 @@ def classify(row: MailRow, client: httpx.Client) -> tuple[bool, str]:
 # ---------- Writer
 
 WRITER_SYSTEM = """\
-Du foreslår en seksjon til Examples daglige minne-notat
-(`memory/YYYY-MM-DD.md`) basert på en epost han har mottatt. Svar BARE
-med JSON på formen:
+You draft a section for Example's daily memory file (`memory/YYYY-MM-DD.md`)
+based on an email he received. **The drafted content (pr_title, headings,
+body, candidate titles) must be in Norwegian.** JSON keys are English.
+
+Respond with ONLY this JSON (no prose, no code fences):
 
 {
-  "pr_title": "Kort norsk PR-tittel (max 70 tegn)",
-  "branch_keyword": "kort-kebab-case-ascii-slug",
-  "memory_heading": "Norsk overskrift uten '## '-prefiks",
-  "memory_body": "Markdown-innhold for seksjonen, 2-6 setninger på norsk"
+  "pr_title": "<kort norsk tittel, max 70 tegn>",
+  "branch_keyword": "<short-kebab-case-ascii-slug, 2-5 words>",
+  "memory_heading": "<norsk overskrift uten '## ' prefiks>",
+  "memory_body": "<markdown-innhold på norsk, 2-6 setninger; bruk kulepunkter for handlingspunkter>",
+  "calendar_candidates": [
+    {
+      "date": "YYYY-MM-DD or YYYY-MM-DD – YYYY-MM-DD",
+      "title": "<kort norsk event-tittel>",
+      "evidence": "<kort sitat eller henvisning til e-post-kontekst>"
+    }
+  ]
 }
 
-Krav:
-- `pr_title`: handlingsfokusert. Eksempler:
+Requirements:
+- `pr_title` action-focused. Examples (Norwegian):
   - "Streik-varsel fra Eksempeldalen barnehage"
   - "Tilbud fra Eksempel Elektriske — oppussings-strøm"
-- `branch_keyword`: kun a-z, 0-9, bindestrek. 2-5 ord. Eksempler:
-  "streik-eksempeldalen", "eksempel-elektriske-tilbud".
-- `memory_heading`: blir `## <heading>` i daglig-notatet.
-- `memory_body`: viktigste fakta og handlingspunkter — datoer, frister,
-  beløp, kontaktpersoner. Skriv slik at Example hugser kontekst
-  senere. Bruk markdown der det passer (kulepunkter for handlinger).
+- `branch_keyword`: ASCII a-z, 0-9, hyphens only.
+- `memory_heading` becomes `## <heading>` in the daily note.
+- `memory_body` covers the key facts and follow-ups — dates, deadlines,
+  amounts, contact people — so Example can recall the context later.
+- `calendar_candidates`: every concrete date or deadline mentioned in the
+  email, even if you suspect it's already on the calendar. Use ISO dates;
+  resolve relative references ("neste fredag", "uke 24") to absolute dates.
+  Empty list `[]` if the email has no dates. **You don't need to check
+  whether candidates are already on the calendar — Python does that
+  deduplication after you respond.**
 """
+
+
+# ---------- Tools the writer can call
+
+def _tool_get_calendar_events(start_date: str, end_date: str,
+                              repo_root: Path | None = None) -> str:
+    """Tool executor. JSON list of events in [start, end] from CALENDAR.md and
+    CALENDAR-PAST.md (one-off events only — the recurring sections don't have
+    parseable per-occurrence dates yet)."""
+    import datetime as _dt
+    from scripts.retire_calendar import parse as _parse_calendar, event_dates
+    try:
+        start = _dt.date.fromisoformat(start_date)
+        end = _dt.date.fromisoformat(end_date)
+    except ValueError as e:
+        return json.dumps({"error": f"invalid date: {e}"})
+    if start > end:
+        return json.dumps({"error": "start_date after end_date"})
+
+    root = repo_root or Path(__file__).resolve().parent.parent
+    events: list[dict[str, str]] = []
+    for fname in ("CALENDAR.md", "CALENDAR-PAST.md"):
+        path = root / fname
+        if not path.exists():
+            continue
+        try:
+            doc = _parse_calendar(path.read_text())
+        except Exception as e:  # pragma: no cover — guard against parser drift
+            events.append({"error": f"failed to parse {fname}: {e}"})
+            continue
+        for section in doc.sections:
+            for line in section.lines:
+                dates = event_dates(line)
+                if dates is None:
+                    continue
+                ev_start, ev_end = dates
+                if ev_end < start or ev_start > end:
+                    continue
+                events.append({
+                    "start": ev_start.isoformat(),
+                    "end": ev_end.isoformat(),
+                    "line": line.strip(),
+                    "source": fname,
+                })
+    return json.dumps({"range": [start_date, end_date], "events": events},
+                      ensure_ascii=False)
+
 
 _SLUG_FOLDS = str.maketrans({
     "æ": "ae", "ø": "o", "å": "a",
@@ -333,37 +407,110 @@ def _slugify(s: str) -> str:
     return s.strip("-")[:50]
 
 
-def _validate_writer_output(d: dict) -> dict[str, str]:
+def _validate_writer_output(d: dict) -> dict:
+    """Verify required str fields + optional `calendar_candidates` list, normalise.
+    Returns a dict with the str fields and a `calendar_candidates: list[dict]`
+    (possibly empty)."""
     required = ("pr_title", "branch_keyword", "memory_heading", "memory_body")
     for k in required:
         if k not in d or not isinstance(d[k], str):
             raise ValueError(f"writer output missing/invalid {k!r}: {d!r}")
-    out = {k: d[k] for k in required}
+    out: dict = {k: d[k] for k in required}
     out["branch_keyword"] = _slugify(out["branch_keyword"]) or "mail"
     out["pr_title"] = out["pr_title"][:70].strip()
     out["memory_heading"] = out["memory_heading"].lstrip("# ").strip()
     out["memory_body"] = out["memory_body"].rstrip() + "\n"
+
+    candidates = d.get("calendar_candidates") or []
+    if not isinstance(candidates, list):
+        candidates = []
+    validated: list[dict] = []
+    for c in candidates:
+        if not isinstance(c, dict):
+            continue
+        validated.append({
+            "date":   str(c.get("date", "")).strip(),
+            "title":  str(c.get("title", "")).strip(),
+            "evidence": str(c.get("evidence", "")).strip(),
+            "already_in_calendar": bool(c.get("already_in_calendar", False)),
+        })
+    out["calendar_candidates"] = validated
     return out
 
 
-def compose_pr(row: MailRow, client: httpx.Client) -> dict[str, str]:
-    """Call MLX writer for one mail. Returns validated writer dict."""
+def compose_pr(row: MailRow, client: httpx.Client) -> dict:
+    """Call MLX writer for one mail. Returns validated writer dict with
+    `calendar_candidates` enriched by deterministic Python-side calendar
+    lookup (model only proposes candidates; Python sets
+    `already_in_calendar`)."""
     body = row.body[:BODY_MAX_CHARS]
     user_content = f"Subject: {row.subject}\nFrom: {row.sender}\n\n{body}"
     payload = {
-        "model": MODEL,
+        "model": WRITER_MODEL,
         "messages": [
             {"role": "system", "content": WRITER_SYSTEM},
             {"role": "user", "content": user_content},
         ],
-        "temperature": 0.2,  # light non-determinism for prose
-        "max_tokens": 600,
+        "temperature": 0.2,
+        "max_tokens": 1500,
         "chat_template_kwargs": {"enable_thinking": False},
     }
     r = client.post(f"{MLX_BASE}/v1/chat/completions", json=payload, timeout=120)
     r.raise_for_status()
     content = r.json()["choices"][0]["message"]["content"]
-    return _validate_writer_output(json.loads(_strip_code_fence(content)))
+    out = _validate_writer_output(json.loads(_strip_code_fence(content)))
+    out["calendar_candidates"] = _verify_candidates(out["calendar_candidates"])
+    return out
+
+
+def _verify_candidates(candidates: list[dict]) -> list[dict]:
+    """For each candidate, look up the date(s) in CALENDAR.md and set
+    `already_in_calendar` based on whether any existing event overlaps the
+    candidate's date or date range. Deterministic alternative to having
+    the model do this via tool calls (which is unreliable in MLX as of
+    May 2026 — see git history for the agent-loop attempt)."""
+    import datetime as _dt
+    if not candidates:
+        return []
+    enriched: list[dict] = []
+    for c in candidates:
+        date_str = c.get("date", "").strip()
+        start, end = _parse_candidate_date(date_str)
+        if start is None or end is None:
+            # Can't parse — pass it through with already_in_calendar=False
+            # so the human reviewer sees the candidate and can act on it.
+            enriched.append({**c, "already_in_calendar": False})
+            continue
+        # Tight range matching candidate's own span — no need to look wider.
+        result = json.loads(_tool_get_calendar_events(
+            start.isoformat(), end.isoformat(),
+        ))
+        events = result.get("events", [])
+        # Title-fuzzy match is brittle; date overlap is enough signal that
+        # the human reviewer should check whether it's the same event.
+        already = len(events) > 0
+        enriched.append({**c, "already_in_calendar": already})
+    return enriched
+
+
+_DATE_SINGLE = re.compile(r"^(\d{4}-\d{2}-\d{2})$")
+_DATE_SPAN = re.compile(r"^(\d{4}-\d{2}-\d{2})\s*[–-]\s*(\d{4}-\d{2}-\d{2})$")
+
+
+def _parse_candidate_date(s: str):
+    """Parse the model's `date` field. Accepts a single ISO date or a span
+    with an en-dash or hyphen separator. Returns (start, end) as
+    datetime.date pairs, or (None, None) if unparseable."""
+    import datetime as _dt
+    m = _DATE_SINGLE.match(s)
+    if m:
+        d = _dt.date.fromisoformat(m.group(1))
+        return d, d
+    m = _DATE_SPAN.match(s)
+    if m:
+        return (_dt.date.fromisoformat(m.group(1)),
+                _dt.date.fromisoformat(m.group(2)))
+    return None, None
 
 
 def make_branch_name(keyword: str, today: date | None = None,
@@ -375,9 +522,24 @@ def make_branch_name(keyword: str, today: date | None = None,
     return f"mail/{today.isoformat()}-{keyword}-{suffix}"
 
 
-def _render_pr_body(row: MailRow, thread_id: str) -> str:
+def _render_pr_body(row: MailRow, thread_id: str,
+                    calendar_candidates: list[dict] | None = None) -> str:
     body_clip = row.body[:4000]
     truncated_note = " (truncated; full mail via `notmuch show`)" if len(row.body) > 4000 else ""
+
+    candidates_section = ""
+    if calendar_candidates:
+        lines = ["", "## Calendar candidates", "",
+                 "_⚠ overlap = same-day event exists in CALENDAR.md but may be "
+                 "unrelated. Reviewer disambiguates._", ""]
+        for c in calendar_candidates:
+            marker = "⚠ overlap" if c.get("already_in_calendar") else "⊕ new"
+            lines.append(
+                f"- **{c.get('date', '')}** — {c.get('title', '')}  "
+                f"_({marker})_  \n  evidence: {c.get('evidence', '')}"
+            )
+        candidates_section = "\n".join(lines) + "\n"
+
     return (
         f"**Source mail:** `thread:{thread_id}`  \n"
         f"**Subject:** {row.subject}  \n"
@@ -390,6 +552,7 @@ def _render_pr_body(row: MailRow, thread_id: str) -> str:
         f"and merge. To rollback: "
         f"`notmuch tag -pr::filed -pr::significant +pr::skip thread:{thread_id}` "
         f"then close the PR.\n"
+        f"{candidates_section}"
         f"\n"
         f"<details>\n"
         f"<summary>Rendered mail body (first 4000 chars{truncated_note})</summary>\n"
@@ -441,11 +604,24 @@ def file_pr_for_message(
     repo_root = repo_root or Path(__file__).resolve().parent.parent
     branch = make_branch_name(writer["branch_keyword"], today)
 
+    candidates = writer.get("calendar_candidates") or []
+    cand_summary = ""
+    if candidates:
+        cand_lines = []
+        for c in candidates:
+            # ⚠ means "date overlaps an existing event" — not necessarily the
+            # same event (CALENDAR.md may have unrelated fotballkamp etc. on
+            # the same date). Reviewer disambiguates.
+            marker = "⚠ overlap" if c.get("already_in_calendar") else "⊕ new   "
+            cand_lines.append(f"             cal:    [{marker}] {c.get('date', '')} — {c.get('title', '')}")
+        cand_summary = "\n" + "\n".join(cand_lines)
+
     print(
         f"  → branch: {branch}\n"
         f"     title:  {writer['pr_title']}\n"
         f"     edit:   memory/{today.isoformat()}.md  +## {writer['memory_heading']}\n"
-        f"     body:   {writer['memory_body'].strip()[:300]}",
+        f"     body:   {writer['memory_body'].strip()[:300]}"
+        f"{cand_summary}",
         file=sys.stderr,
     )
 
@@ -505,7 +681,7 @@ def file_pr_for_message(
              "--base", "master",
              "--head", branch,
              "--title", f"MEM: {writer['pr_title']}",
-             "--body", _render_pr_body(row, thread_id)],
+             "--body", _render_pr_body(row, thread_id, candidates)],
             env=env, capture_output=True, text=True, check=True,
         )
         return result.stdout.strip()

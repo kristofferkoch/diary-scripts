@@ -6,6 +6,7 @@ MLX HTTP call and notmuch subprocesses are stubbed, never live."""
 from __future__ import annotations
 
 import argparse
+import json
 from datetime import datetime, timezone
 from email import message_from_bytes
 from email.policy import default as email_default
@@ -428,9 +429,14 @@ def test_compose_pr_parses_and_normalises() -> None:
     assert out["pr_title"] == "Streik-varsel Eksempeldalen"
 
 
-def test_compose_pr_disables_thinking() -> None:
-    """Same regression guard as the classifier — the writer must also turn
-    thinking off, or it burns 600+ tokens on traces before emitting JSON."""
+def test_compose_pr_disables_thinking_and_omits_tools() -> None:
+    """REGRESSION GUARD. The writer runs in single-call non-thinking mode
+    after the tool-use agent loop proved unreliable on MLX (Qwen3.6 +
+    DWQ: ~67% truncation rate on multi-iter thinking, even at 8k tokens;
+    `tool_choice: required` silently ignored with full writer prompt).
+    Calendar deduplication is done by `_verify_candidates` in Python
+    rather than by model tool calls. If a future change re-introduces
+    tool use, update this guard and verify reliability first."""
     from scripts.pr_compose import compose_pr
     client = _StubClient(
         '{"pr_title": "x", "branch_keyword": "x", '
@@ -439,6 +445,7 @@ def test_compose_pr_disables_thinking() -> None:
     compose_pr(_row(body="x"), client)
     assert client.last_payload is not None
     assert client.last_payload["chat_template_kwargs"]["enable_thinking"] is False
+    assert "tools" not in client.last_payload
 
 
 # ---------- _render_pr_body ----------
@@ -462,3 +469,222 @@ def test_render_pr_body_marks_truncated_when_body_long() -> None:
     row = _row(subject="x", sender="y@z", body="a" * 5000)
     body = _render_pr_body(row, "t")
     assert "truncated" in body
+
+
+# ---------- tools: _tool_get_calendar_events ----------
+
+CALENDAR_FIXTURE = """\
+# Calendar
+
+## One-off events by month
+
+### May 2026
+
+- **2026-05-27 10:10–10:40** — Foreldresamtale Bjorn
+- **2026-05-29 (all day)** — Planleggingsdag barnehagen
+- **2026-05-31 14:00** — Fika hos Arna
+
+### June 2026
+
+- **2026-06-02 17:30** — Fotballkamp Robin
+- **2026-06-29 – 2026-07-03 (uke 27)** — Sommerskolen Robin
+"""
+
+
+@pytest.fixture
+def cal_repo(tmp_path):
+    (tmp_path / "CALENDAR.md").write_text(CALENDAR_FIXTURE)
+    (tmp_path / "CALENDAR-PAST.md").write_text(
+        "# Past\n\n## One-off events by month\n\n### April 2026\n\n- **2026-04-15** — Old event\n"
+    )
+    return tmp_path
+
+
+def test_tool_get_calendar_events_in_range(cal_repo) -> None:
+    from scripts.pr_compose import _tool_get_calendar_events
+    out = json.loads(_tool_get_calendar_events("2026-05-27", "2026-06-02", repo_root=cal_repo))
+    lines = [e["line"] for e in out["events"]]
+    assert any("Foreldresamtale Bjorn" in l for l in lines)
+    assert any("Planleggingsdag" in l for l in lines)
+    assert any("Fika hos Arna" in l for l in lines)
+    assert any("Fotballkamp Robin" in l for l in lines)
+    # Out of range:
+    assert not any("Sommerskolen" in l for l in lines)
+
+
+def test_tool_get_calendar_events_span_overlaps_range(cal_repo) -> None:
+    """A span 2026-06-29 → 2026-07-03 must surface when range is 2026-07-01..07-02."""
+    from scripts.pr_compose import _tool_get_calendar_events
+    out = json.loads(_tool_get_calendar_events("2026-07-01", "2026-07-02", repo_root=cal_repo))
+    assert any("Sommerskolen" in e["line"] for e in out["events"])
+
+
+def test_tool_get_calendar_events_includes_past(cal_repo) -> None:
+    from scripts.pr_compose import _tool_get_calendar_events
+    out = json.loads(_tool_get_calendar_events("2026-04-01", "2026-04-30", repo_root=cal_repo))
+    assert any("Old event" in e["line"] for e in out["events"])
+    assert any(e["source"] == "CALENDAR-PAST.md" for e in out["events"])
+
+
+def test_tool_get_calendar_events_empty_range(cal_repo) -> None:
+    from scripts.pr_compose import _tool_get_calendar_events
+    out = json.loads(_tool_get_calendar_events("2027-01-01", "2027-01-31", repo_root=cal_repo))
+    assert out["events"] == []
+
+
+def test_tool_get_calendar_events_rejects_bad_date(cal_repo) -> None:
+    from scripts.pr_compose import _tool_get_calendar_events
+    out = json.loads(_tool_get_calendar_events("not-a-date", "2026-06-01", repo_root=cal_repo))
+    assert "error" in out
+
+
+def test_tool_get_calendar_events_rejects_inverted_range(cal_repo) -> None:
+    from scripts.pr_compose import _tool_get_calendar_events
+    out = json.loads(_tool_get_calendar_events("2026-06-01", "2026-05-01", repo_root=cal_repo))
+    assert "error" in out
+
+
+# ---------- compose_pr — Python-side calendar verification ----------
+
+def test_compose_pr_calls_verify_candidates(monkeypatch) -> None:
+    """compose_pr must hand the model's candidates through _verify_candidates
+    so already_in_calendar is set by Python, not the model. Tool-use through
+    the OpenAI agent loop is unreliable on MLX + Qwen3.6 (high truncation
+    rate, `tool_choice: required` silently ignored)."""
+    from scripts import pr_compose as pc
+    seen = {"called_with": None}
+
+    def fake_verify(candidates):
+        seen["called_with"] = candidates
+        return [{**c, "already_in_calendar": True} for c in candidates]
+
+    monkeypatch.setattr(pc, "_verify_candidates", fake_verify)
+    client = _StubClient(json.dumps(_writer_dict(calendar_candidates=[
+        {"date": "2026-05-29", "title": "Test", "evidence": "e"}
+    ])))
+    out = pc.compose_pr(_row(body="x"), client)
+    assert seen["called_with"][0]["title"] == "Test"
+    assert out["calendar_candidates"][0]["already_in_calendar"] is True
+
+
+# ---------- _parse_candidate_date ----------
+
+@pytest.mark.parametrize("raw, expected_start, expected_end", [
+    ("2026-05-29", "2026-05-29", "2026-05-29"),
+    ("2026-06-29 – 2026-07-03", "2026-06-29", "2026-07-03"),  # en-dash
+    ("2026-06-29 - 2026-07-03", "2026-06-29", "2026-07-03"),  # hyphen
+    ("2026-06-29–2026-07-03", "2026-06-29", "2026-07-03"),    # no spaces
+])
+def test_parse_candidate_date_valid(raw, expected_start, expected_end) -> None:
+    from datetime import date
+    from scripts.pr_compose import _parse_candidate_date
+    s, e = _parse_candidate_date(raw)
+    assert s == date.fromisoformat(expected_start)
+    assert e == date.fromisoformat(expected_end)
+
+
+@pytest.mark.parametrize("raw", [
+    "",
+    "2026-05",         # incomplete
+    "next Friday",     # natural language — model should have resolved this
+    "fredag",
+    "2026-05-29 17:00",  # time appended (model shouldn't include but defensive)
+])
+def test_parse_candidate_date_unparseable(raw) -> None:
+    from scripts.pr_compose import _parse_candidate_date
+    s, e = _parse_candidate_date(raw)
+    assert s is None and e is None
+
+
+# ---------- _verify_candidates ----------
+
+def test_verify_candidates_marks_overlap_as_already(cal_repo, monkeypatch) -> None:
+    """Candidate overlapping with an existing event should be flagged
+    already_in_calendar=True."""
+    from scripts import pr_compose as pc
+    real_tool = pc._tool_get_calendar_events
+    monkeypatch.setattr(pc, "_tool_get_calendar_events",
+                        lambda s, e: real_tool(s, e, repo_root=cal_repo))
+    out = pc._verify_candidates([
+        {"date": "2026-05-29", "title": "Planleggingsdag", "evidence": "fredag"},
+    ])
+    assert out[0]["already_in_calendar"] is True
+
+
+def test_verify_candidates_marks_no_overlap_as_new(cal_repo, monkeypatch) -> None:
+    from scripts import pr_compose as pc
+    real_tool = pc._tool_get_calendar_events
+    monkeypatch.setattr(pc, "_tool_get_calendar_events",
+                        lambda s, e: real_tool(s, e, repo_root=cal_repo))
+    out = pc._verify_candidates([
+        {"date": "2026-12-25", "title": "Julaften", "evidence": "x"},
+    ])
+    assert out[0]["already_in_calendar"] is False
+
+
+def test_verify_candidates_preserves_unparseable_dates(monkeypatch) -> None:
+    """If date can't be parsed (model produced bad output), still surface
+    the candidate to the human reviewer with already_in_calendar=False."""
+    from scripts import pr_compose as pc
+    monkeypatch.setattr(pc, "_tool_get_calendar_events",
+                        lambda s, e: '{"events": []}')
+    out = pc._verify_candidates([
+        {"date": "next Friday", "title": "Møte", "evidence": "x"},
+    ])
+    assert len(out) == 1
+    assert out[0]["already_in_calendar"] is False
+    assert out[0]["title"] == "Møte"
+
+
+def test_verify_candidates_handles_empty_list() -> None:
+    from scripts.pr_compose import _verify_candidates
+    assert _verify_candidates([]) == []
+
+
+# ---------- writer output: calendar_candidates ----------
+
+def test_validate_writer_output_accepts_calendar_candidates() -> None:
+    from scripts.pr_compose import _validate_writer_output
+    d = _writer_dict(calendar_candidates=[
+        {"date": "2026-05-29", "title": "Planleggingsdag",
+         "evidence": "fredag", "already_in_calendar": True}
+    ])
+    out = _validate_writer_output(d)
+    assert len(out["calendar_candidates"]) == 1
+    assert out["calendar_candidates"][0]["already_in_calendar"] is True
+
+
+def test_validate_writer_output_defaults_empty_candidates_list() -> None:
+    from scripts.pr_compose import _validate_writer_output
+    out = _validate_writer_output(_writer_dict())
+    assert out["calendar_candidates"] == []
+
+
+def test_validate_writer_output_drops_malformed_candidate_entries() -> None:
+    from scripts.pr_compose import _validate_writer_output
+    out = _validate_writer_output(_writer_dict(calendar_candidates=[
+        "not a dict",
+        {"date": "2026-05-29", "title": "OK", "evidence": "e"},
+    ]))
+    # Only the dict survives.
+    assert len(out["calendar_candidates"]) == 1
+    assert out["calendar_candidates"][0]["title"] == "OK"
+
+
+def test_render_pr_body_renders_calendar_candidates_section() -> None:
+    from scripts.pr_compose import _render_pr_body
+    row = _row(subject="Bursdag", sender="x@y", body="Olai fyller år 29.05")
+    body = _render_pr_body(row, "tid", calendar_candidates=[
+        {"date": "2026-05-29", "title": "Bursdag Olai",
+         "evidence": "fyller år 29.05", "already_in_calendar": False},
+    ])
+    assert "Calendar candidates" in body
+    assert "Bursdag Olai" in body
+    assert "⊕ new" in body
+
+
+def test_render_pr_body_no_candidates_section_when_empty() -> None:
+    from scripts.pr_compose import _render_pr_body
+    row = _row(subject="x", sender="y@z", body="body")
+    body = _render_pr_body(row, "t", calendar_candidates=[])
+    assert "Calendar candidates" not in body
