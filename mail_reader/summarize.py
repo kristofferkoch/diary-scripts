@@ -6,10 +6,13 @@ the draft lands first and is shown immediately, the final replaces it
 when ready. All historical rows are preserved (no overwrites of `done`
 or `failed` rows) for future quality assessment.
 
-The DB acts as the queue. `summaries.requested_at` is the priority key —
-bumping it via `bump_priority()` moves a row to the front of its tier's
-worker queue. Workers in `mail_reader.workers` consume the queue via
-`UPDATE … FOR UPDATE SKIP LOCKED`.
+The DB acts as the queue. Workers in `mail_reader.workers` consume it
+via `UPDATE … FOR UPDATE SKIP LOCKED`, ordered by `(priority DESC,
+requested_at DESC, id ASC)`. Priority is a 0..3 heuristic-floor score
+written at enqueue (see `priority.py`); `requested_at` orders within a
+priority tier. `bump_priority()` promotes a row to HIGH and sets
+`requested_at = now()` so a user-opened mail always beats algorithmic
+guesses.
 
 State machine (see DESIGN.md §11):
 
@@ -31,7 +34,7 @@ from typing import TypedDict
 
 import psycopg
 
-from . import db, extract
+from . import db, extract, priority
 
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://gpu-host:11434").rstrip("/")
@@ -427,18 +430,38 @@ def read_state(conn: psycopg.Connection, notmuch_msg_id: str) -> SummaryState | 
 
 # ----------------- claim (enqueue) -----------------
 
-def _msg_row_id(conn: psycopg.Connection, notmuch_msg_id: str) -> int | None:
+class _MsgMeta(TypedDict):
+    id: int
+    from_addr: str | None
+    subject: str | None
+
+
+def _msg_meta(conn: psycopg.Connection,
+              notmuch_msg_id: str) -> _MsgMeta | None:
+    """Fetch (id, from_addr, subject) for a notmuch message-Id. Returns
+    None if the message hasn't been embedded yet — enqueue paths use
+    this to know there's nothing to enqueue against."""
     with conn.cursor() as cur:
-        cur.execute("SELECT id FROM messages WHERE message_id = %s",
-                    (notmuch_msg_id,))
+        cur.execute(
+            "SELECT id, from_addr, subject FROM messages WHERE message_id = %s",
+            (notmuch_msg_id,),
+        )
         r = cur.fetchone()
-        return r[0] if r else None
+        if r is None:
+            return None
+        return {"id": r[0], "from_addr": r[1], "subject": r[2]}
 
 
-def _claim_one(conn: psycopg.Connection, mrid: int,
+def _claim_one(conn: psycopg.Connection, meta: _MsgMeta,
                model: str, tier: int) -> bool:
     """Atomic claim for a specific (model, tier) pass at current prompt version.
-    Returns True iff this caller inserted a fresh `pending` row."""
+    Returns True iff this caller inserted a fresh `pending` row.
+
+    Priority is computed from the sender by `priority.score()` and
+    written into the new row. Tier-1 may later refine it once the body
+    has been read; until then the heuristic-floor is the only writer."""
+    mrid = meta["id"]
+    prio = priority.score(meta.get("from_addr"), meta.get("subject"))
     with conn.cursor() as cur:
         # Reclaim abandoned in-flight rows for this exact pass.
         cur.execute(
@@ -461,13 +484,13 @@ def _claim_one(conn: psycopg.Connection, mrid: int,
             """
             INSERT INTO summaries
                 (message_id, model, prompt_version, short, status,
-                 quality_tier, requested_at)
-            VALUES (%s, %s, %s, '', 'pending', %s, now())
+                 quality_tier, requested_at, priority)
+            VALUES (%s, %s, %s, '', 'pending', %s, now(), %s)
             ON CONFLICT (message_id, model, prompt_version)
             WHERE status IN ('pending', 'streaming') DO NOTHING
             RETURNING id
             """,
-            (mrid, model, PROMPT_VERSION, tier),
+            (mrid, model, PROMPT_VERSION, tier, prio),
         )
         claimed = cur.fetchone() is not None
         conn.commit()
@@ -480,14 +503,14 @@ def claim_for_generation(conn: psycopg.Connection, notmuch_msg_id: str,
     """Claim a single pass. Defaults to the highest-tier pass (the "final"
     summary). Used by tests + summarize_inbox; the webapp uses
     `schedule_all_passes` instead."""
-    mrid = _msg_row_id(conn, notmuch_msg_id)
-    if mrid is None:
+    meta = _msg_meta(conn, notmuch_msg_id)
+    if meta is None:
         return False
     if model is None:
         p = PASS_BY_TIER[MAX_TIER]
         model, tier = p["model"], p["tier"]
     assert tier is not None
-    return _claim_one(conn, mrid, model, tier)
+    return _claim_one(conn, meta, model, tier)
 
 
 def reclaim_stale_streaming(conn: psycopg.Connection,
@@ -528,12 +551,12 @@ def schedule_all_passes(conn: psycopg.Connection,
     """Enqueue every configured pass for this mail. Returns the count of
     NEW claims (0 if all passes already have rows). Idempotent — the
     partial unique index keeps existing in-flight rows from duplicating."""
-    mrid = _msg_row_id(conn, notmuch_msg_id)
-    if mrid is None:
+    meta = _msg_meta(conn, notmuch_msg_id)
+    if meta is None:
         return 0
     new = 0
     for p in PASSES:
-        if _claim_one(conn, mrid, p["model"], p["tier"]):
+        if _claim_one(conn, meta, p["model"], p["tier"]):
             new += 1
     return new
 
@@ -572,22 +595,27 @@ def queue_counts(conn: psycopg.Connection) -> list[QueueCount]:
 
 def bump_priority(conn: psycopg.Connection,
                   notmuch_msg_ids: list[str]) -> int:
-    """Move any pending rows for these mails to the front of the queue
-    by setting requested_at = now(). Called when the user opens a view
-    that displays these mails. Returns rows touched."""
+    """Move any pending rows for these mails to the front of the queue.
+
+    The user opening a mail is a strong signal that overrides the
+    heuristic-floor: we promote `priority` to HIGH (never demote — `GREATEST`
+    keeps an already-HIGH row at HIGH rather than overwriting) and set
+    `requested_at = now()` so the row also wins the tiebreak within the
+    HIGH band. Returns rows touched."""
     if not notmuch_msg_ids:
         return 0
     with conn.cursor() as cur:
         cur.execute(
             """
             UPDATE summaries
-               SET requested_at = now()
+               SET priority = GREATEST(priority, %s),
+                   requested_at = now()
              WHERE status = 'pending'
                AND message_id IN (
                    SELECT id FROM messages WHERE message_id = ANY(%s)
                )
             """,
-            (notmuch_msg_ids,),
+            (priority.HIGH, notmuch_msg_ids),
         )
         n = cur.rowcount
         conn.commit()

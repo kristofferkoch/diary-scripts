@@ -48,7 +48,7 @@ def _claim_next(model: str, tier: int) -> str | None:
                     WHERE s.status = 'pending'
                       AND s.quality_tier = %s
                       AND s.model = %s
-                    ORDER BY s.requested_at DESC, s.id ASC
+                    ORDER BY s.priority DESC, s.requested_at DESC, s.id ASC
                     LIMIT 1
                     FOR UPDATE SKIP LOCKED
                 )

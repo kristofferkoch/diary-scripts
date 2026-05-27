@@ -336,6 +336,80 @@ def test_bump_priority_moves_row_to_now(conn, fresh_msg, monkeypatch):
         conn.commit()
 
 
+def test_schedule_all_passes_writes_priority(conn, fresh_msg, monkeypatch):
+    """priority.score is called per claim, and the returned value lands in
+    the new row's `priority` column. Patches PASSES + the scorer so we
+    don't depend on whatever sender the fresh_msg fixture happens to
+    pick."""
+    from mail_reader import priority as priority_mod
+    TEST_PASSES = [{"model": "pytest-pass-fast", "tier": 91}]
+    monkeypatch.setattr(summarize, "PASSES", TEST_PASSES)
+    monkeypatch.setattr(priority_mod, "score", lambda *a, **k: priority_mod.HIGH)
+    summarize.schedule_all_passes(conn, fresh_msg)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT priority FROM summaries
+            WHERE message_id = (SELECT id FROM messages WHERE message_id = %s)
+              AND model = 'pytest-pass-fast'
+            """,
+            (fresh_msg,),
+        )
+        prio = cur.fetchone()[0]
+    assert prio == priority_mod.HIGH
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM summaries
+            WHERE message_id = (SELECT id FROM messages WHERE message_id = %s)
+              AND model = 'pytest-pass-fast'
+            """,
+            (fresh_msg,),
+        )
+        conn.commit()
+
+
+def test_bump_priority_promotes_to_high(conn, fresh_msg, monkeypatch):
+    """A row that the heuristic-floor scored as NOISE (e.g. a newsletter)
+    must rise all the way to HIGH when the user opens the mail — that's
+    the override contract. Also verifies an already-HIGH row stays HIGH
+    (GREATEST never demotes)."""
+    from mail_reader import priority as priority_mod
+    TEST_PASSES = [
+        {"model": "pytest-pass-noise", "tier": 81},
+        {"model": "pytest-pass-high",  "tier": 82},
+    ]
+    monkeypatch.setattr(summarize, "PASSES", TEST_PASSES)
+    # Patch the scorer so the two passes land at different priorities.
+    scores = iter([priority_mod.NOISE, priority_mod.HIGH])
+    monkeypatch.setattr(priority_mod, "score", lambda *a, **k: next(scores))
+    summarize.schedule_all_passes(conn, fresh_msg)
+    summarize.bump_priority(conn, [fresh_msg])
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT model, priority FROM summaries
+            WHERE message_id = (SELECT id FROM messages WHERE message_id = %s)
+              AND model LIKE 'pytest-pass-%%'
+            ORDER BY model
+            """,
+            (fresh_msg,),
+        )
+        rows = dict(cur.fetchall())
+    assert rows["pytest-pass-noise"] == priority_mod.HIGH
+    assert rows["pytest-pass-high"] == priority_mod.HIGH
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM summaries
+            WHERE message_id = (SELECT id FROM messages WHERE message_id = %s)
+              AND model LIKE 'pytest-pass-%%'
+            """,
+            (fresh_msg,),
+        )
+        conn.commit()
+
+
 def test_read_state_done_draft_when_lower_tier_done_and_higher_pending(conn, fresh_msg):
     """The combined-state contract: if a fast (low tier) pass is done but
     a slow (higher tier) pass is still in flight, read_state returns

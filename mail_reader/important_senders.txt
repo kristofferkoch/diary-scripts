@@ -1,0 +1,29 @@
+# Senders that should jump the summary worker queue. One regex per line,
+# case-insensitive substring match on the full `from_addr`. Lines that
+# are blank or start with `#` are ignored. Order doesn't matter —
+# `priority.score()` returns HIGH (3) on the first match.
+#
+# Noise patterns in priority.py (noreply@, no-reply@, marketing@, etc.)
+# are checked BEFORE this list, so adding `@some-domain\.no` here is
+# safe even when that domain also sends newsletters from `noreply@`.
+
+# Familie
+astrid\.hansen@gmail\.com
+relative2@example.com
+
+# Skole / barnehage (Bydel Gamle Oslo)
+@school.example
+postutsendelse@schoolapp\.no
+
+# Aktive håndverkere
+@eksempel-el\.no
+@exampleconcrete\.no
+
+# Regnskapsfører
+@accountant.example
+
+# Examplefund-personer (NB: ikke hele domenet — markedskommentar@, seminar@
+# o.l. er nyhetsbrev og skal ikke prioriteres opp)
+ole\.berg@examplefund\.no
+colleague2@examplefund.no
+colleague3@examplefund.no
