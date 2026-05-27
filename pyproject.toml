@@ -14,6 +14,8 @@ dependencies = [
     "markdown>=3.6",
     # spond_sync (Olen/Spond, unofficial)
     "spond>=1.2",
+    # pr_compose — HTTP client to the local MLX server on gpu-host:8080
+    "httpx>=0.27",
 ]
 
 [dependency-groups]
