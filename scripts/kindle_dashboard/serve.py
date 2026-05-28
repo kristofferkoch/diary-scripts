@@ -122,6 +122,14 @@ def preview() -> str:
 </html>"""
 
 
+@app.on_event("startup")
+async def _start_watcher() -> None:
+    """Kick off the precipitation watcher in the background."""
+    from .watcher import precipitation_watcher
+
+    asyncio.create_task(precipitation_watcher())
+
+
 @app.on_event("shutdown")
 async def _shutdown() -> None:
     await render.shutdown_browser()

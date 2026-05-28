@@ -477,51 +477,39 @@ def weather_block() -> dict[str, Any] | None:
 _nowcast_cache: dict[str, Any] = {"fetched_at": None, "payload": None}
 NOWCAST_TTL_SECONDS = 240  # nowcast updates every ~5 min; 4 min is safe.
 
+RAIN_ON_THRESHOLD = 0.05  # mm/h — anything below this counts as "dry".
 
-def nowcast_block() -> dict[str, Any] | None:
-    """Yr.no 90-minute precipitation nowcast.
 
-    Returns:
-        {"bars": [mm_per_hour, ...]    # one float per 5-min slot (18 total)
-         "max_rate": float,
-         "total_mm": float,
-         "first_rain_minute": int | None,
-         "summary": str,                # short Norwegian, e.g. "Tørt"
-         "now_time": "HH:MM",
-         "end_time":  "HH:MM"}
-    """
+def _fetch_nowcast_payload() -> dict[str, Any] | None:
+    """Cached fetch of the yr nowcast payload. Returns None on failure."""
     import httpx
 
     now = _dt.datetime.now(_dt.UTC)
     if _nowcast_cache["fetched_at"] and _nowcast_cache["payload"]:
         age = (now - _nowcast_cache["fetched_at"]).total_seconds()
         if age < NOWCAST_TTL_SECONDS:
-            payload = _nowcast_cache["payload"]
-        else:
-            payload = None
-    else:
-        payload = None
-    if payload is None:
-        try:
-            r = httpx.get(
-                "https://api.met.no/weatherapi/nowcast/2.0/complete",
-                params={"lat": WEATHER_LAT, "lon": WEATHER_LON},
-                headers={"User-Agent": WEATHER_UA},
-                timeout=15,
-            )
-            r.raise_for_status()
-            payload = r.json()
-            _nowcast_cache["payload"] = payload
-            _nowcast_cache["fetched_at"] = now
-        except Exception:
-            return None
-
-    series = (payload.get("properties") or {}).get("timeseries") or []
-    if not series:
+            return _nowcast_cache["payload"]
+    try:
+        r = httpx.get(
+            "https://api.met.no/weatherapi/nowcast/2.0/complete",
+            params={"lat": WEATHER_LAT, "lon": WEATHER_LON},
+            headers={"User-Agent": WEATHER_UA},
+            timeout=15,
+        )
+        r.raise_for_status()
+        payload = r.json()
+        _nowcast_cache["payload"] = payload
+        _nowcast_cache["fetched_at"] = now
+        return payload
+    except Exception:
         return None
 
-    # Take the first 18 entries (5-min slots → 90 min). Sample is every 5 min;
-    # if it's not, we still take whatever the API hands us and clip to 18.
+
+def _parse_nowcast_bars(
+    payload: dict[str, Any],
+) -> tuple[list[float], int | None]:
+    """Extract the 18 5-min precipitation bars + first-rain-minute marker."""
+    series = (payload.get("properties") or {}).get("timeseries") or []
     bars: list[float] = []
     first_rain_minute: int | None = None
     for i, entry in enumerate(series[:18]):
@@ -530,19 +518,50 @@ def nowcast_block() -> dict[str, Any] | None:
         )
         rate = float(details.get("precipitation_rate", 0.0) or 0.0)
         bars.append(rate)
-        if rate > 0.05 and first_rain_minute is None:
+        if rate > RAIN_ON_THRESHOLD and first_rain_minute is None:
             first_rain_minute = i * 5
+    return bars, first_rain_minute
+
+
+def nowcast_stats() -> dict[str, Any] | None:
+    """Low-level nowcast summary — returns numbers even when it's dry.
+
+    Used by the precipitation watcher to detect dry → rain (and back)
+    transitions. Returns None only when the API fetch fails or there's no
+    timeseries; a confidently-dry 90 min is `max_rate == 0.0`, not None.
+    """
+    payload = _fetch_nowcast_payload()
+    if payload is None:
+        return None
+    bars, first_rain_minute = _parse_nowcast_bars(payload)
+    if not bars:
+        return None
+    return {
+        "max_rate": round(max(bars), 3),
+        "first_rain_minute": first_rain_minute,
+        "fetched_at": _nowcast_cache["fetched_at"],
+    }
+
+
+def nowcast_block() -> dict[str, Any] | None:
+    """Yr.no 90-minute precipitation nowcast for the template.
+
+    Hides the block (returns None) when it's dry — that's intentional, so
+    the rendered PNG stays bit-identical on quiet days and the e-ink panel
+    avoids unnecessary refreshes.
+    """
+    payload = _fetch_nowcast_payload()
+    if payload is None:
+        return None
+    bars, first_rain_minute = _parse_nowcast_bars(payload)
     if not bars:
         return None
 
     max_rate = max(bars)
+    if max_rate < RAIN_ON_THRESHOLD:
+        return None
     total_mm = sum(b * (5 / 60) for b in bars)  # rate (mm/h) × 5 min
 
-    # Hide the block entirely when the next 90 min is dry — the wall display
-    # avoids visible refreshes by keeping the PNG identical when nothing
-    # interesting changes. A standing "Tørt" placeholder defeats that.
-    if max_rate < 0.05:
-        return None
     if first_rain_minute == 0:
         if max_rate < 0.5:
             summary = "Lett regn nå"
