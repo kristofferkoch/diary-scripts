@@ -29,10 +29,20 @@ Common invocations:
 
 Env overrides:
     MLX_BASE                      (default http://gpu-host:8080)
+                                  — classifier tier (mlx_lm.server)
+    NUEXTRACT_BASE                (default http://gpu-host:8081)
+                                  — extractor tier (mlx_vlm.server)
     PR_COMPOSE_CLASSIFIER_MODEL   (default Qwen3.6-35B-A3B-4bit-DWQ)
-    PR_COMPOSE_WRITER_MODEL       (default Qwen3.6-35B-A3B-4bit-DWQ — bump
-                                   to -6bit or -8bit-DWQ for better tool
-                                   routing + prose quality at writer time)
+    PR_COMPOSE_WRITER_MODEL       (default NuExtract3-bf16 — schema-guided
+                                   extractor on Qwen3.5-4B, ~5 GB. Override
+                                   to mlx-community/numind-NuExtract-2.0-8B-MLX
+                                   for the older 8 B model if needed. Both
+                                   use the same chat-template-kwargs
+                                   protocol; per-model sampling is auto-
+                                   selected by family detection in
+                                   `_writer_payload`. Replaces the Qwen3.6
+                                   prose writer that lost a fight with
+                                   thinking-mode tool loops, May 2026.)
 """
 
 from __future__ import annotations
@@ -74,20 +84,29 @@ from scripts.mailshow import (  # noqa: E402
 # ---------- Config
 
 MLX_BASE = os.environ.get("MLX_BASE", "http://gpu-host:8080")
+NUEXTRACT_BASE = os.environ.get("NUEXTRACT_BASE", "http://gpu-host:8081")
 
-# Two-tier model setup. The classifier runs on every new mail — pick speed.
-# The writer only runs on the ~5% deemed significant — pick quality. Quants
-# above 4-bit help the writer's tool-call routing + Norwegian prose; the
-# classifier's binary "significant?" decision doesn't need extra bits.
-# `4bit-DWQ` avoids the standard-4-bit tool-use degradation (mlx-lm #1011).
-# Both default to the same DWQ build if you only want to download one.
+# Two-tier model setup, two servers.
+#
+# Classifier (mlx_lm.server on MLX_BASE): runs on every new mail —
+# pick a fast MoE quant. Qwen3.6-4bit-DWQ avoids the standard-4-bit
+# tool-use degradation (mlx-lm #1011) and handles the binary
+# significant/skip JSON reliably.
+#
+# Writer (mlx_vlm.server on NUEXTRACT_BASE): runs only on the ~5%
+# deemed significant. We use NuExtract — purpose-built schema-guided
+# extractor — instead of a general-purpose LLM, because thinking-mode
+# Qwen3 chains loop indefinitely on ambiguous typography (see
+# canonicalize_for_llm docstring) and non-thinking Qwen3 won't tool-
+# call. NuExtract has no thinking loop to break (NuExtract-2.0) or
+# keeps it opt-in (NuExtract3, off by default).
 CLASSIFIER_MODEL = os.environ.get(
     "PR_COMPOSE_CLASSIFIER_MODEL",
     "mlx-community/Qwen3.6-35B-A3B-4bit-DWQ",
 )
 WRITER_MODEL = os.environ.get(
     "PR_COMPOSE_WRITER_MODEL",
-    "mlx-community/Qwen3.6-35B-A3B-4bit-DWQ",
+    "mlx-community/NuExtract3-bf16",
 )
 BODY_MAX_CHARS = 4000  # cap the body sent to the classifier; receipts/notices are short
 
@@ -303,9 +322,17 @@ def triage_skip(row: MailRow) -> str | None:
 
 # ---------- Classifier
 
+_LEAKED_EOS_TOKENS = ("<|im_end|>", "<|endoftext|>", "<|end|>")
+
+
 def _strip_code_fence(s: str) -> str:
-    """Qwen sometimes wraps JSON in ```json ... ``` despite being told not to."""
+    """Clean LLM JSON output: strip leaked EOS tokens (mlx_vlm.server doesn't
+    strip them) and code fences (Qwen sometimes wraps JSON in ```json ...```
+    despite being told not to)."""
     s = s.strip()
+    for tok in _LEAKED_EOS_TOKENS:
+        if s.endswith(tok):
+            s = s[: -len(tok)].rstrip()
     if not s.startswith("```"):
         return s
     s = s.strip("`").strip()
@@ -335,44 +362,34 @@ def classify(row: MailRow, client: httpx.Client) -> tuple[bool, str]:
     return bool(parsed["significant"]), str(parsed.get("reason", ""))[:200]
 
 
-# ---------- Writer
+# ---------- Writer (NuExtract schema-guided extractor)
 
-WRITER_SYSTEM = """\
-You draft a section for Example's daily memory file (`memory/YYYY-MM-DD.md`)
-based on an email he received. **The drafted content (pr_title, headings,
-body, candidate titles) must be in Norwegian.** JSON keys are English.
-
-Respond with ONLY this JSON (no prose, no code fences):
-
-{
-  "pr_title": "<kort norsk tittel, max 70 tegn>",
-  "branch_keyword": "<short-kebab-case-ascii-slug, 2-5 words>",
-  "memory_heading": "<norsk overskrift uten '## ' prefiks>",
-  "memory_body": "<markdown-innhold på norsk, 2-6 setninger; bruk kulepunkter for handlingspunkter>",
-  "calendar_candidates": [
-    {
-      "date": "YYYY-MM-DD or YYYY-MM-DD – YYYY-MM-DD",
-      "title": "<kort norsk event-tittel>",
-      "evidence": "<kort sitat eller henvisning til e-post-kontekst>"
-    }
-  ]
+# NuExtract schema. Keys are output field names; values are the typed
+# DSL — see https://huggingface.co/numind/NuExtract-2.0-8B and
+# https://huggingface.co/numind/NuExtract3.
+#
+# Type choices:
+#   "string"          — paraphrase OK (titles, headings, body prose)
+#   "verbatim-string" — exact text from the input (quoted evidence,
+#                       sender names — anything we want untouched)
+#
+# `date` and `date-time` types exist but we use "string" here because
+# the model needs to produce date *ranges* ("2026-06-04 – 2026-06-05")
+# and the typed `date` field rejects ranges.
+#
+# The model is not instructed in prose at all — the schema is the
+# contract. Validation lives Python-side (`_validate_writer_output`).
+WRITER_SCHEMA = {
+    "pr_title": "string",
+    "branch_keyword": "string",
+    "memory_heading": "string",
+    "memory_body": "string",
+    "calendar_candidates": [{
+        "date": "string",
+        "title": "string",
+        "evidence": "verbatim-string",
+    }],
 }
-
-Requirements:
-- `pr_title` action-focused. Examples (Norwegian):
-  - "Streik-varsel fra Eksempeldalen barnehage"
-  - "Tilbud fra Eksempel Elektriske — oppussings-strøm"
-- `branch_keyword`: ASCII a-z, 0-9, hyphens only.
-- `memory_heading` becomes `## <heading>` in the daily note.
-- `memory_body` covers the key facts and follow-ups — dates, deadlines,
-  amounts, contact people — so Example can recall the context later.
-- `calendar_candidates`: every concrete date or deadline mentioned in the
-  email, even if you suspect it's already on the calendar. Use ISO dates;
-  resolve relative references ("neste fredag", "uke 24") to absolute dates.
-  Empty list `[]` if the email has no dates. **You don't need to check
-  whether candidates are already on the calendar — Python does that
-  deduplication after you respond.**
-"""
 
 
 # ---------- Tools the writer can call
@@ -440,55 +457,115 @@ def _slugify(s: str) -> str:
     return s.strip("-")[:50]
 
 
+def _str_field(d: dict, key: str) -> str:
+    """Coerce d[key] to a stripped string; treat None / non-str as empty.
+    NuExtract returns `null` for any field it couldn't fill from the
+    document (e.g. memory_body on a 187-char event invite), so we can't
+    rely on isinstance(d[key], str)."""
+    v = d.get(key)
+    return v.strip() if isinstance(v, str) else ""
+
+
 def _validate_writer_output(d: dict) -> dict:
-    """Verify required str fields + optional `calendar_candidates` list, normalise.
-    Returns a dict with the str fields and a `calendar_candidates: list[dict]`
-    (possibly empty)."""
-    required = ("pr_title", "branch_keyword", "memory_heading", "memory_body")
-    for k in required:
-        if k not in d or not isinstance(d[k], str):
-            raise ValueError(f"writer output missing/invalid {k!r}: {d!r}")
-    out: dict = {k: d[k] for k in required}
-    out["branch_keyword"] = _slugify(out["branch_keyword"]) or "mail"
-    out["pr_title"] = out["pr_title"][:70].strip()
-    out["memory_heading"] = out["memory_heading"].lstrip("# ").strip()
-    out["memory_body"] = out["memory_body"].rstrip() + "\n"
+    """Verify the model output and normalise into the dict shape consumed by
+    `file_pr_for_message`. Tolerant of `null` field values (NuExtract returns
+    those for fields it couldn't fill) — only `pr_title` is strictly
+    required because without it the PR has no title.
+
+    `calendar_candidates` is deduped by (date, title, evidence) so reply-
+    chains that quote the same date multiple times don't produce N copies."""
+    if not isinstance(d, dict):
+        raise ValueError(f"writer output is not a dict: {d!r}")
+
+    pr_title = _str_field(d, "pr_title")
+    if not pr_title:
+        raise ValueError(f"writer output missing pr_title: {d!r}")
+
+    branch_keyword = _slugify(_str_field(d, "branch_keyword") or pr_title) or "mail"
+    memory_heading = _str_field(d, "memory_heading") or pr_title
+    memory_body = (
+        _str_field(d, "memory_body")
+        or "_(modell trakk ikke ut detaljer — se PR-body for kildemailen)_"
+    )
+
+    out: dict = {
+        "pr_title": pr_title[:70].strip(),
+        "branch_keyword": branch_keyword,
+        "memory_heading": memory_heading.lstrip("# ").strip(),
+        "memory_body": memory_body.rstrip() + "\n",
+    }
 
     candidates = d.get("calendar_candidates") or []
     if not isinstance(candidates, list):
         candidates = []
+    seen: set[tuple[str, str, str]] = set()
     validated: list[dict] = []
     for c in candidates:
         if not isinstance(c, dict):
             continue
+        date = _str_field(c, "date")
+        if not date:
+            continue  # date-less candidate is useless for calendar dedup
+        title = _str_field(c, "title")
+        evidence = _str_field(c, "evidence")
+        key = (date, title, evidence)
+        if key in seen:
+            continue
+        seen.add(key)
         validated.append({
-            "date":   str(c.get("date", "")).strip(),
-            "title":  str(c.get("title", "")).strip(),
-            "evidence": str(c.get("evidence", "")).strip(),
+            "date": date,
+            "title": title,
+            "evidence": evidence,
             "already_in_calendar": bool(c.get("already_in_calendar", False)),
         })
     out["calendar_candidates"] = validated
     return out
 
 
-def compose_pr(row: MailRow, client: httpx.Client) -> dict:
-    """Call MLX writer for one mail. Returns validated writer dict with
-    `calendar_candidates` enriched by deterministic Python-side calendar
-    lookup (model only proposes candidates; Python sets
-    `already_in_calendar`)."""
-    body = row.body[:BODY_MAX_CHARS]
-    user_content = f"Subject: {row.subject}\nFrom: {row.sender}\n\n{body}"
-    payload = {
-        "model": WRITER_MODEL,
+def _writer_payload(model: str, document: str, schema: dict) -> dict:
+    """Build the chat-completions payload for the extractor tier.
+
+    mlx_vlm.server silently drops `chat_template_kwargs.template` (the
+    standard NuExtract integration kwarg that vLLM honors). Workaround:
+    inline the `# Template:` / `# Context:` blocks that NuExtract's
+    chat template would normally produce, directly in the user message.
+    Verified 2026-05-28 against NuExtract3-bf16.
+
+    Branches on model family because NuExtract3 wants `temperature=0.2`
+    + `enable_thinking=False` in fast mode, while NuExtract-2.0 wants
+    greedy (`temperature=0`) and has no thinking knob.
+    """
+    template_str = json.dumps(schema, indent=4)
+    user_text = f"# Template:\n{template_str}\n# Context:\n{document}"
+    chat_template_kwargs: dict = {}
+    if "NuExtract3" in model:
+        temperature = 0.2
+        chat_template_kwargs["enable_thinking"] = False
+    else:
+        temperature = 0  # NuExtract-2.0 → greedy
+    payload: dict = {
+        "model": model,
         "messages": [
-            {"role": "system", "content": WRITER_SYSTEM},
-            {"role": "user", "content": user_content},
+            {"role": "user", "content": [{"type": "text", "text": user_text}]},
         ],
-        "temperature": 0.2,
-        "max_tokens": 1500,
-        "chat_template_kwargs": {"enable_thinking": False},
+        "temperature": temperature,
+        "max_tokens": 2048,
     }
-    r = client.post(f"{MLX_BASE}/v1/chat/completions", json=payload, timeout=120)
+    if chat_template_kwargs:
+        payload["chat_template_kwargs"] = chat_template_kwargs
+    return payload
+
+
+def compose_pr(row: MailRow, client: httpx.Client) -> dict:
+    """Call the NuExtract extractor for one mail. Returns the validated
+    writer dict with `calendar_candidates` enriched by deterministic
+    Python-side calendar lookup (model only proposes candidates;
+    Python sets `already_in_calendar`)."""
+    body = canonicalize_for_llm(row.body[:BODY_MAX_CHARS])
+    subject = canonicalize_for_llm(row.subject)
+    document = f"Subject: {subject}\nFrom: {row.sender}\n\n{body}"
+    payload = _writer_payload(WRITER_MODEL, document, WRITER_SCHEMA)
+    r = client.post(f"{NUEXTRACT_BASE}/v1/chat/completions", json=payload, timeout=300)
     r.raise_for_status()
     content = r.json()["choices"][0]["message"]["content"]
     out = _validate_writer_output(json.loads(_strip_code_fence(content)))

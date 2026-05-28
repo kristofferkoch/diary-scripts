@@ -385,10 +385,77 @@ def test_validate_writer_output_rejects_missing_key() -> None:
         _validate_writer_output(bad)
 
 
-def test_validate_writer_output_rejects_non_string() -> None:
+def test_validate_writer_output_tolerates_null_fields() -> None:
+    """NuExtract returns `null` for any field it couldn't fill (e.g.
+    memory_body on a 187-char event-invite mail like Spiker'n sommerfest).
+    Falling through with a crash would block the pipeline on otherwise-
+    valid extractions; the validator instead substitutes pr_title for
+    missing heading/branch and a Norwegian placeholder for missing body."""
     from scripts.pr_compose import _validate_writer_output
-    with pytest.raises(ValueError, match="memory_body"):
-        _validate_writer_output(_writer_dict(memory_body=42))
+    out = _validate_writer_output(_writer_dict(
+        memory_heading=None,
+        memory_body=None,
+        branch_keyword=None,
+    ))
+    assert out["memory_heading"] == "Tilbud fra Eksempel Elektriske"  # falls back to pr_title
+    assert "modell trakk ikke ut" in out["memory_body"]
+    assert out["branch_keyword"] == "tilbud-fra-eksempel-elektriske"  # slugified pr_title
+
+
+def test_validate_writer_output_still_rejects_missing_pr_title() -> None:
+    """pr_title is the one field without a sensible fallback — a PR has
+    to have a title. If NuExtract returns null/empty for it, that's a
+    hard failure rather than silently producing a blank PR."""
+    from scripts.pr_compose import _validate_writer_output
+    with pytest.raises(ValueError, match="pr_title"):
+        _validate_writer_output(_writer_dict(pr_title=None))
+    with pytest.raises(ValueError, match="pr_title"):
+        _validate_writer_output(_writer_dict(pr_title=""))
+
+
+def test_validate_writer_output_dedups_calendar_candidates() -> None:
+    """Reply-chain quoting causes NuExtract to emit the same (date, title,
+    evidence) candidate multiple times — see the Pia/Examplefund thread which
+    produced 27. mai × 3. Dedup is keyed on the full triple so different
+    events on the same date still come through."""
+    from scripts.pr_compose import _validate_writer_output
+    out = _validate_writer_output(_writer_dict(calendar_candidates=[
+        {"date": "2026-05-27", "title": "Møte", "evidence": "onsdag 27. mai"},
+        {"date": "2026-05-27", "title": "Møte", "evidence": "onsdag 27. mai"},
+        {"date": "2026-05-27", "title": "Lunsj", "evidence": "samme dag 12:00"},
+        {"date": "2026-05-27", "title": "Møte", "evidence": "onsdag 27. mai"},
+    ]))
+    assert len(out["calendar_candidates"]) == 2
+    titles = {c["title"] for c in out["calendar_candidates"]}
+    assert titles == {"Møte", "Lunsj"}
+
+
+def test_validate_writer_output_drops_dateless_candidates() -> None:
+    """A candidate without a date is useless (can't dedup against the
+    calendar, can't render meaningfully) — quietly drop rather than
+    pollute the PR body."""
+    from scripts.pr_compose import _validate_writer_output
+    out = _validate_writer_output(_writer_dict(calendar_candidates=[
+        {"date": "2026-05-27", "title": "OK", "evidence": "27. mai"},
+        {"date": None, "title": "Mangler dato", "evidence": "snart"},
+        {"date": "", "title": "Tom dato", "evidence": "snart"},
+    ]))
+    assert len(out["calendar_candidates"]) == 1
+    assert out["calendar_candidates"][0]["title"] == "OK"
+
+
+def test_validate_writer_output_tolerates_null_candidate_fields() -> None:
+    """Some Pia-style candidates come back with title=null even though the
+    date is present. We keep them (date is the actionable bit) and just
+    treat null title/evidence as empty strings."""
+    from scripts.pr_compose import _validate_writer_output
+    out = _validate_writer_output(_writer_dict(calendar_candidates=[
+        {"date": "2026-05-27", "title": None, "evidence": None},
+    ]))
+    assert len(out["calendar_candidates"]) == 1
+    assert out["calendar_candidates"][0]["date"] == "2026-05-27"
+    assert out["calendar_candidates"][0]["title"] == ""
+    assert out["calendar_candidates"][0]["evidence"] == ""
 
 
 # ---------- writer: make_branch_name ----------
