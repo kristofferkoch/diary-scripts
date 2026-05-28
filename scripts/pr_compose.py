@@ -575,7 +575,16 @@ def compose_pr(row: MailRow, client: httpx.Client) -> dict:
     r = client.post(f"{NUEXTRACT_BASE}/v1/chat/completions", json=payload, timeout=300)
     r.raise_for_status()
     content = r.json()["choices"][0]["message"]["content"]
-    out = _validate_writer_output(json.loads(_strip_code_fence(content)))
+    parsed = json.loads(_strip_code_fence(content))
+    # Subject fallback for pr_title. NuExtract at temperature=0.2 occasionally
+    # returns null for every field on terse mails (Spiker'n-class invites);
+    # the validator hard-rejects null pr_title because a PR needs a title.
+    # Subject is always present and for these mails IS the title — the
+    # body-substance gate downstream still correctly skips when there's
+    # nothing else to memorialise.
+    if not (isinstance(parsed.get("pr_title"), str) and parsed["pr_title"].strip()):
+        parsed["pr_title"] = row.subject or "(no subject)"
+    out = _validate_writer_output(parsed)
     out["calendar_candidates"] = _verify_candidates(out["calendar_candidates"])
     return out
 

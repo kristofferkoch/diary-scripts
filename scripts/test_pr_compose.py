@@ -517,6 +517,24 @@ def test_compose_pr_parses_and_normalises() -> None:
     assert out["pr_title"] == "Streik-varsel Eksempeldalen"
 
 
+def test_compose_pr_falls_back_to_subject_when_title_null() -> None:
+    """NuExtract at temp=0.2 occasionally nulls every field on terse mails
+    (Spiker'n sommerfest, 187 chars). The validator hard-rejects null
+    pr_title, so without this fallback we crash on otherwise-skippable
+    threads. Subject is always present and for these mails IS the title;
+    body-substance gate handles the no-real-content case downstream."""
+    from scripts.pr_compose import compose_pr
+    canned = (
+        '{"pr_title": null, "branch_keyword": null, '
+        '"memory_heading": null, "memory_body": null, '
+        '"calendar_candidates": []}'
+    )
+    client = _StubClient(canned)
+    out = compose_pr(_row(subject="Velkommen til sommerfest", body="x"), client)
+    assert out["pr_title"] == "Velkommen til sommerfest"
+    assert out["memory_body_from_model"] is False  # substance gate trips
+
+
 def test_compose_pr_disables_thinking_and_omits_tools() -> None:
     """REGRESSION GUARD. The writer runs in single-call non-thinking mode
     after the tool-use agent loop proved unreliable on MLX (Qwen3.6 +
