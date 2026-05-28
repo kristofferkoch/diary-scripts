@@ -631,6 +631,78 @@ def test_render_memory_section_filters_past_dates_from_heading() -> None:
     assert heading == "User Holding AS - 2025"  # untouched, no future dates
 
 
+# ---------- writer: _assert_single_commit_against_origin ----------
+
+def _init_test_repo(tmp_path):
+    """Build a tiny git repo with an `origin/master` ref the helper can
+    diff against. Returns (origin_path, worktree_path) — both real git
+    repos so the subprocess.run calls in the helper behave like prod."""
+    import subprocess as _sp
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _sp.run(["git", "-C", str(origin), "init", "--bare", "-q"], check=True)
+
+    work = tmp_path / "work"
+    _sp.run(["git", "clone", "-q", str(origin), str(work)], check=True)
+    _sp.run(["git", "-C", str(work), "config", "user.email", "t@t"], check=True)
+    _sp.run(["git", "-C", str(work), "config", "user.name", "T"], check=True)
+    (work / "x").write_text("x")
+    _sp.run(["git", "-C", str(work), "add", "x"], check=True)
+    _sp.run(["git", "-C", str(work), "commit", "-q", "-m", "init"], check=True)
+    # Push so origin/master exists in `work`.
+    _sp.run(["git", "-C", str(work), "branch", "-m", "master"], check=True)
+    _sp.run(["git", "-C", str(work), "push", "-q", "-u", "origin", "master"],
+            check=True)
+    return work
+
+
+def test_assert_single_commit_passes_for_one_commit_ahead(tmp_path) -> None:
+    """The happy path: bot branched from origin/master, added one
+    commit, about to push. Check must succeed silently."""
+    import subprocess as _sp
+    from scripts.pr_compose import _assert_single_commit_against_origin
+    work = _init_test_repo(tmp_path)
+    (work / "x").write_text("y")
+    _sp.run(["git", "-C", str(work), "commit", "-aq", "-m", "bot"], check=True)
+    # Single bot commit ahead of origin/master → no raise.
+    _assert_single_commit_against_origin(work)
+
+
+def test_assert_single_commit_raises_when_branch_has_extra_commits(tmp_path) -> None:
+    """REGRESSION GUARD. The original Phase-1 bug: bot worktree was
+    created from local `master`, which had an unpushed user commit on
+    top of `origin/master`. The bot's own commit then sat on top of
+    that, giving 2 commits against origin/master and leaking the user's
+    work-in-progress into the PR. The check refuses to push in that
+    case so the contamination is impossible to hit again."""
+    import subprocess as _sp
+    from scripts.pr_compose import _assert_single_commit_against_origin
+    work = _init_test_repo(tmp_path)
+    # Two commits on top of origin/master — user's WIP + bot's commit.
+    (work / "y").write_text("user")
+    _sp.run(["git", "-C", str(work), "add", "y"], check=True)
+    _sp.run(["git", "-C", str(work), "commit", "-q", "-m", "user wip"], check=True)
+    (work / "z").write_text("bot")
+    _sp.run(["git", "-C", str(work), "add", "z"], check=True)
+    _sp.run(["git", "-C", str(work), "commit", "-q", "-m", "bot"], check=True)
+    with pytest.raises(RuntimeError) as exc:
+        _assert_single_commit_against_origin(work)
+    msg = str(exc.value)
+    assert "2 commits" in msg
+    assert "refusing to push" in msg
+    assert "user wip" in msg  # the offending commit listed
+
+
+def test_assert_single_commit_raises_when_zero_commits(tmp_path) -> None:
+    """Zero commits ahead = nothing to push = something went wrong
+    earlier in the pipeline (probably the commit step). Loud error
+    rather than a silent no-op push."""
+    from scripts.pr_compose import _assert_single_commit_against_origin
+    work = _init_test_repo(tmp_path)
+    with pytest.raises(RuntimeError, match=r"0 commits.*expected 1"):
+        _assert_single_commit_against_origin(work)
+
+
 # ---------- writer: _calendar_event_line / _insert_calendar_events ----------
 
 def test_calendar_event_line_basic() -> None:

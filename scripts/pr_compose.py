@@ -903,6 +903,36 @@ def _bot_pat() -> str:
     return out.split("\n", 1)[0].strip()
 
 
+def _assert_single_commit_against_origin(worktree: Path,
+                                         base_ref: str = "origin/master") -> None:
+    """Refuse to push if the bot's branch contains anything other than
+    exactly one commit ahead of `base_ref`. A clean bot PR has exactly
+    one bot-authored MEM: commit on top of `origin/master`; anything
+    else means the branch was contaminated (e.g. branched from a stale
+    local `master` carrying unpushed work) and pushing would leak
+    unrelated content into the PR.
+
+    Raises RuntimeError loudly with the offending commit list so the
+    cause is visible in the per-thread error log."""
+    n_str = subprocess.run(
+        ["git", "-C", str(worktree), "rev-list", "--count", f"{base_ref}..HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    n = int(n_str)
+    if n == 1:
+        return
+    log = subprocess.run(
+        ["git", "-C", str(worktree), "log", "--format=%h %an %s",
+         f"{base_ref}..HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    raise RuntimeError(
+        f"bot branch has {n} commits against {base_ref}, expected 1.\n"
+        f"refusing to push to avoid leaking unrelated work.\n"
+        f"branch contents:\n{log}"
+    )
+
+
 def _latest_msg_in_thread(thread_id: str) -> str | None:
     """notmuch newest-first; return the newest message id in the thread."""
     out = subprocess.run(
@@ -1011,6 +1041,8 @@ def file_pr_for_message(
              "commit", "-m", commit_msg],
             check=True,
         )
+
+        _assert_single_commit_against_origin(worktree_path)
 
         push_url = f"https://{BOT_NAME}:{pat}@github.com/{DIARY_REPO}.git"
         subprocess.run(
