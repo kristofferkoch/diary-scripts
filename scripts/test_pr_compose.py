@@ -705,13 +705,67 @@ def test_assert_single_commit_raises_when_zero_commits(tmp_path) -> None:
 
 # ---------- writer: _calendar_event_line / _insert_calendar_events ----------
 
+def _src(title="Tilbudsbrev Eksempel", date="2026-05-28", tid="deadbeef"):
+    from scripts.pr_compose import _format_source
+    return _format_source(title, date, tid)
+
+
+def test_format_source_includes_title_date_thread() -> None:
+    """The (Kilde: ...) tail must be human-readable + grep-back-able:
+    title for context, date for chronology, thread for direct mail
+    lookup via notmuch."""
+    s = _src()
+    assert '"Tilbudsbrev Eksempel"' in s
+    assert "2026-05-28" in s
+    assert "thread:deadbeef" in s
+    assert s.startswith("(Kilde: mail ")
+    assert s.endswith(".)")
+
+
+def test_format_source_truncates_long_titles() -> None:
+    """Real subjects can be 100+ chars ("Re: SV: Tilbudsbrev: 20260510-1
+    [Eksempel Elektriske AS, 20260510-1: Eksempelveien 3 B Tiege]") — would
+    push event lines past terminal width and bloat CALENDAR.md."""
+    from scripts.pr_compose import _format_source
+    long = "Re: SV: Tilbudsbrev 20260510-1 [Eksempel Elektriske AS, Eksempelveien 3 B Tiege] med lange filer"
+    s = _format_source(long, "2026-05-28", "x")
+    # Title content in quotes is capped (allow ellipsis char).
+    title_part = s.split('"')[1]
+    assert len(title_part) <= 60
+    assert title_part.endswith("…")
+
+
+def test_format_source_canonicalizes_typography() -> None:
+    """Subjects often contain smart quotes / non-ASCII apostrophes; the
+    Kilde line should normalise them so CALENDAR.md uses ASCII
+    consistently (and so the embedded `"..."` quoting doesn't get
+    confused by curly quotes inside the title)."""
+    from scripts.pr_compose import _format_source
+    s = _format_source("Velkommen til Spiker`n", "2026-05-28", "x")
+    assert "`" not in s  # backtick folded to straight apostrophe
+    s2 = _format_source('Re: "Streik" på Eksempeldalen', "2026-05-28", "x")
+    # Embedded double-quote replaced with single so the outer "..." stays paired.
+    assert s2.count('"') == 2  # only the outer quoting
+
+
+def test_format_source_omits_date_when_empty() -> None:
+    """Bulk-mailers sometimes emit non-RFC Date headers we can't parse.
+    Don't insert a stray empty space — render Kilde without the date."""
+    from scripts.pr_compose import _format_source
+    s = _format_source("Tilbud", "", "x")
+    assert '"Tilbud"' in s
+    assert "thread:x" in s
+    assert "  " not in s  # no double-space from missing date
+
+
 def test_calendar_event_line_basic() -> None:
     from scripts.pr_compose import _calendar_event_line
     line = _calendar_event_line(
-        {"date": "2026-06-03", "title": "Gulvet primes"},
-        thread_id="deadbeef",
+        {"date": "2026-06-03", "title": "Gulvet primes"}, source=_src(),
     )
-    assert line == "- **2026-06-03** — Gulvet primes. (Kilde: mail thread:deadbeef.)\n"
+    assert line.startswith("- **2026-06-03** — Gulvet primes. ")
+    assert "(Kilde: mail " in line
+    assert "thread:deadbeef" in line
 
 
 def test_calendar_event_line_parses_back_to_original_date() -> None:
@@ -721,7 +775,7 @@ def test_calendar_event_line_parses_back_to_original_date() -> None:
     from scripts.pr_compose import _calendar_event_line
     from scripts.retire_calendar import event_dates
     line = _calendar_event_line(
-        {"date": "2026-06-03", "title": "Gulvet primes"}, thread_id="x",
+        {"date": "2026-06-03", "title": "Gulvet primes"}, source=_src(),
     )
     assert event_dates(line) == (_dt.date(2026, 6, 3), _dt.date(2026, 6, 3))
 
@@ -732,7 +786,7 @@ def test_calendar_event_line_empty_title_uses_placeholder() -> None:
     from scripts.pr_compose import _calendar_event_line
     from scripts.retire_calendar import event_dates
     line = _calendar_event_line(
-        {"date": "2026-06-03", "title": ""}, thread_id="x",
+        {"date": "2026-06-03", "title": ""}, source=_src(),
     )
     assert "(uten tittel)" in line
     assert event_dates(line) is not None
@@ -751,12 +805,13 @@ def test_insert_calendar_events_creates_month_section(tmp_path) -> None:
     )
     n = _insert_calendar_events(
         [{"date": "2026-06-10", "title": "Ny event"}],
-        cal, thread_id="abc", today=_d(2026, 5, 28),
+        cal, source=_src(tid="abc"), today=_d(2026, 5, 28),
     )
     assert n == 1
     text = cal.read_text()
     assert "### June 2026" in text
-    assert "- **2026-06-10** — Ny event. (Kilde: mail thread:abc.)" in text
+    assert "- **2026-06-10** — Ny event. (Kilde: mail " in text
+    assert "thread:abc" in text
     assert "- **2026-05-20** — Already there." in text  # existing preserved
 
 
@@ -775,7 +830,7 @@ def test_insert_calendar_events_inserts_chronologically(tmp_path) -> None:
     )
     _insert_calendar_events(
         [{"date": "2026-06-08", "title": "Middle"}],
-        cal, thread_id="x", today=_d(2026, 5, 28),
+        cal, source=_src(tid="x"), today=_d(2026, 5, 28),
     )
     lines = cal.read_text().splitlines()
     june_lines = [ln for ln in lines if "2026-06-" in ln]
@@ -796,7 +851,7 @@ def test_insert_calendar_events_skips_past_dates(tmp_path) -> None:
     original = cal.read_text()
     n = _insert_calendar_events(
         [{"date": "2025-04-01", "title": "Past transaction"}],
-        cal, thread_id="x", today=_d(2026, 5, 28),
+        cal, source=_src(tid="x"), today=_d(2026, 5, 28),
     )
     assert n == 0
     assert cal.read_text() == original  # byte-identical
@@ -810,7 +865,7 @@ def test_insert_calendar_events_no_candidates_no_write(tmp_path) -> None:
     cal = tmp_path / "CALENDAR.md"
     cal.write_text("# Calendar\n\n## One-off events by month\n")
     original_mtime = cal.stat().st_mtime_ns
-    n = _insert_calendar_events([], cal, thread_id="x", today=_d(2026, 5, 28))
+    n = _insert_calendar_events([], cal, source=_src(tid="x"), today=_d(2026, 5, 28))
     assert n == 0
     assert cal.stat().st_mtime_ns == original_mtime  # untouched
 
@@ -829,7 +884,7 @@ def test_insert_calendar_events_handles_overlap_candidates(tmp_path) -> None:
     )
     n = _insert_calendar_events(
         [{"date": "2026-06-04", "title": "Avretting", "already_in_calendar": True}],
-        cal, thread_id="x", today=_d(2026, 5, 28),
+        cal, source=_src(tid="x"), today=_d(2026, 5, 28),
     )
     assert n == 1
     assert "- **2026-06-04** — Avretting" in cal.read_text()

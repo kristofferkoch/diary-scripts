@@ -165,6 +165,7 @@ class MailRow:
     sender: str
     body: str
     tags: list[str]
+    date: str = ""  # ISO YYYY-MM-DD from the mail's Date header, "" if unparseable
 
 
 # ---------- Mail helpers
@@ -288,6 +289,23 @@ def canonicalize_for_llm(text: str) -> str:
     return unicodedata.normalize("NFKC", text).translate(_LLM_CHAR_MAP)
 
 
+def _mail_date_iso(msg) -> str:
+    """Parse the Date header to ISO YYYY-MM-DD. Returns "" on unparseable
+    headers (some bulk-mailers emit non-RFC-compliant dates) — caller
+    falls back to today's date for the (Kilde: ...) tag in CALENDAR.md."""
+    raw = msg.get("Date")
+    if not raw:
+        return ""
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return ""
+    if dt is None:
+        return ""
+    return dt.date().isoformat()
+
+
 def load_mail(msg_id: str) -> MailRow | None:
     """Fetch a MailRow for the given message_id. Returns None on fetch failure
     (printed to stderr so the caller can keep looping)."""
@@ -303,6 +321,7 @@ def load_mail(msg_id: str) -> MailRow | None:
         sender=str(msg.get("From", "")).strip(),
         body=extract_body(msg),
         tags=get_tags(msg_id),
+        date=_mail_date_iso(msg),
     )
 
 
@@ -802,17 +821,31 @@ def _render_memory_section(writer: dict, today: date | None = None) -> tuple[str
     return heading, body
 
 
-def _calendar_event_line(candidate: dict, thread_id: str) -> str:
+_KILDE_TITLE_MAX = 60
+
+
+def _format_source(mail_title: str, mail_date: str, thread_id: str) -> str:
+    """Build the `(Kilde: ...)` parenthetical for CALENDAR.md event lines.
+    Includes the mail's subject (truncated, canonicalised) and date for
+    human readability + thread id for grep-back to the source mail."""
+    title = canonicalize_for_llm(mail_title).replace('"', "'").strip()
+    if len(title) > _KILDE_TITLE_MAX:
+        title = title[: _KILDE_TITLE_MAX - 1].rstrip() + "…"
+    date_clause = f" {mail_date}" if mail_date else ""
+    return f'(Kilde: mail "{title}"{date_clause}, thread:{thread_id}.)'
+
+
+def _calendar_event_line(candidate: dict, source: str) -> str:
     """Format one future candidate as a CALENDAR.md parseable event line
-    per CALENDAR-RULES.md. The (Kilde: thread:...) tail gives the
-    reviewer + future-me a direct link back to the source mail."""
+    per CALENDAR-RULES.md. The `source` is the `(Kilde: ...)` tail —
+    title + date for humans, thread id for grep-back."""
     date_str = candidate["date"]
     title = candidate.get("title") or "(uten tittel)"
-    return f"- **{date_str}** — {title}. (Kilde: mail thread:{thread_id}.)\n"
+    return f"- **{date_str}** — {title}. {source}\n"
 
 
 def _insert_calendar_events(candidates: list[dict], calendar_path: Path,
-                            thread_id: str,
+                            source: str,
                             today: date | None = None) -> int:
     """Merge future candidates into CALENDAR.md under their month
     sections. Returns count of events inserted. Idempotent w.r.t.
@@ -834,7 +867,7 @@ def _insert_calendar_events(candidates: list[dict], calendar_path: Path,
         if start is None:
             continue
         section = ensure_section(doc, MONTHS_EN[start.month - 1], start.year)
-        section.insert_event_sorted(_calendar_event_line(c, thread_id))
+        section.insert_event_sorted(_calendar_event_line(c, source))
         inserted += 1
     calendar_path.write_text(doc.render())
     return inserted
@@ -1016,8 +1049,10 @@ def file_pr_for_message(
 
         files_to_add = [str(memory_rel)]
         calendar_rel = Path("CALENDAR.md")
+        source = _format_source(row.subject, row.date or today.isoformat(),
+                                thread_id)
         n_events = _insert_calendar_events(
-            candidates, worktree_path / calendar_rel, thread_id, today,
+            candidates, worktree_path / calendar_rel, source, today,
         )
         if n_events:
             files_to_add.append(str(calendar_rel))
