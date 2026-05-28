@@ -582,6 +582,66 @@ layer (`SKIP_SENDER_SUBSTRINGS` in `pr_compose.py`) filters
 model — the loop breaks regardless of how the model decides.
 Belt-and-suspenders with the bot-mail folder routing.
 
+### Future: relative-date resolution via tool calling
+
+Real example we hit on 2026-05-28: Sommerskolen sent a reminder
+saying "én uke før kursstart kan du logge inn på våre nettsider og lese
+velkomstbrev". The course start is `2026-06-29` (already in
+`CALENDAR.md`), so the implied date is `2026-06-22` — but **the
+extractor only sees the mail body**, not `CALENDAR.md`, and cannot
+resolve "kursstart" to a concrete date. Tier 3 has the same blindspot.
+
+The unlock is a model that can reliably tool-call against a calendar-
+lookup tool (the Python-side `_tool_get_calendar_events` we already
+have is the right shape for this). The agent loop: extractor produces
+calendar candidates + unresolved relative references; a resolution
+tier with tool access looks up the anchor events, does the arithmetic,
+and appends concrete dates. We attempted this with Qwen3.6 and hit the
+upstream tool-calling reliability cliff (thinking-on loops, thinking-
+off skips tools — Qwen3 #1817, vllm #18819).
+
+The monthly model-check (`CALENDAR.md` → Recurring månedlig → "Sjekk
+pipeline-modeller + server-software") is the explicit gate for re-
+attempting this feature. Don't pick it up in isolation; the chance of
+a usable candidate is highest right after a model that scores well on
+the tool-calling-judgment benchmark below appears.
+
+Worth tracking because this class of dates ("X dager før Y", "uken
+etter Z", "før sommerferien") is common in school mail, contractor
+mail, and event invites. Catching them automatically would turn the
+calendar from "what the mail literally mentions" into "what the mail
+implies given the existing schedule".
+
+**Where to actually look for candidates** (curated 2026-05-28; the
+landscape moves — review during the monthly check):
+
+- [`huggingface.co/mlx-community`](https://huggingface.co/mlx-community)
+  — anything that lands here can run on `gpu-host` immediately. Sort
+  by "Recently Created", or subscribe via
+  [`zernel/huggingface-trending-feed`](https://github.com/zernel/huggingface-trending-feed)
+  RSS.
+- [`huggingface.co/numind`](https://huggingface.co/numind) — for
+  future NuExtract versions (4? 5?). Same chat-template-kwargs protocol
+  as 2.0/3, already validated for our tier 2.
+- [`huggingface.co/Qwen`](https://huggingface.co/Qwen) — for future
+  Qwen versions. Qwen 3.7 or 4 with the tool-calling bug fixed is the
+  most likely unlock for tier 2.5. Check Qwen3 issue #1817 for fix
+  status before assuming a new release helps.
+- [`lintware/tool-calling-benchmark`](https://github.com/lintware/tool-calling-benchmark)
+  — fork of MikeVeerman's benchmark with **MLX + llama.cpp backends on
+  Apple Silicon**. Measures *judgment* (when to call), not just
+  *execution* (whether the JSON parses) — exactly the metric tier 2.5
+  needs. Run this against any candidate before wiring it in. Surprise
+  finding from earlier rounds: `qwen3:1.7b` topped the benchmark at
+  0.960 Agent Score — small models can do this well.
+- [Simon Willison's newsletter](https://simonw.substack.com/) — high-
+  signal weekly digest of LLM releases. Covers local models, tool
+  calling, multimodal — all relevant to our pipeline.
+- [r/LocalLLaMA](https://www.reddit.com/r/LocalLLaMA/) — community
+  where benchmarks like lintware's go viral first. High noise, but
+  also where "this new model is actually different" posts surface
+  before aggregators catch them.
+
 ---
 
 ## mail_reader webapp
