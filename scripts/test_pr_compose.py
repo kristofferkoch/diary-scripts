@@ -517,6 +517,121 @@ def test_compose_pr_parses_and_normalises() -> None:
     assert out["pr_title"] == "Streik-varsel Eksempeldalen"
 
 
+# ---------- writer: _is_future / _render_memory_section ----------
+
+def test_is_future_single_date() -> None:
+    from datetime import date as _d
+    from scripts.pr_compose import _is_future
+    today = _d(2026, 5, 28)
+    assert _is_future("2026-05-28", today) is True  # today counts as future
+    assert _is_future("2026-05-29", today) is True
+    assert _is_future("2026-05-27", today) is False
+    assert _is_future("2025-12-31", today) is False
+
+
+def test_is_future_date_range_uses_end() -> None:
+    """A multi-day event that started yesterday but ends tomorrow is still
+    future-relevant — we use the END of the range."""
+    from datetime import date as _d
+    from scripts.pr_compose import _is_future
+    today = _d(2026, 5, 28)
+    assert _is_future("2026-05-27 – 2026-05-29", today) is True
+    assert _is_future("2026-05-25 – 2026-05-27", today) is False
+
+
+def test_is_future_unparseable_returns_false() -> None:
+    """Unparseable date strings are treated as non-future so they don't
+    accidentally rescue the substance gate or land in the diff."""
+    from datetime import date as _d
+    from scripts.pr_compose import _is_future
+    today = _d(2026, 5, 28)
+    assert _is_future("", today) is False
+    assert _is_future("snart", today) is False
+    assert _is_future("2026", today) is False
+
+
+def test_render_memory_section_no_candidates_passthrough() -> None:
+    from scripts.pr_compose import _render_memory_section
+    writer = {
+        "memory_heading": "Tilbud fra Eksempel",
+        "memory_body": "Tilbudet er på 95 000 NOK.\n",
+        "calendar_candidates": [],
+    }
+    heading, body = _render_memory_section(writer)
+    assert heading == "Tilbud fra Eksempel"
+    assert body == "Tilbudet er på 95 000 NOK.\n"
+
+
+def test_render_memory_section_prepends_earliest_future_date_to_heading() -> None:
+    """The earliest future candidate's date becomes a chronological anchor
+    in the heading so the daily file groups by date naturally."""
+    from datetime import date as _d
+    from scripts.pr_compose import _render_memory_section
+    writer = {
+        "memory_heading": "Sommerfest Spiker'n",
+        "memory_body": "Velkommen-mail fra SchoolApp.\n",
+        "calendar_candidates": [
+            {"date": "2026-06-15", "title": "Frist RSVP", "evidence": "innen 15.6"},
+            {"date": "2026-06-10", "title": "Sommerfest", "evidence": "10. juni"},
+        ],
+    }
+    heading, _ = _render_memory_section(writer, today=_d(2026, 5, 28))
+    assert heading == "2026-06-10 — Sommerfest Spiker'n"
+
+
+def test_render_memory_section_appends_datoer_block() -> None:
+    from datetime import date as _d
+    from scripts.pr_compose import _render_memory_section
+    writer = {
+        "memory_heading": "Sommerfest",
+        "memory_body": "Velkommen.\n",
+        "calendar_candidates": [
+            {"date": "2026-06-10", "title": "Sommerfest", "already_in_calendar": True,
+             "evidence": "10. juni"},
+            {"date": "2026-06-15", "title": "RSVP-frist", "already_in_calendar": False,
+             "evidence": "innen 15.6"},
+        ],
+    }
+    _, body = _render_memory_section(writer, today=_d(2026, 5, 28))
+    assert "**Datoer:**" in body
+    assert "- **2026-06-10** — Sommerfest _(allerede i CALENDAR.md)_" in body
+    assert "- **2026-06-15** — RSVP-frist" in body
+    assert "_(allerede i CALENDAR.md)_" not in body.split("RSVP-frist")[1]  # marker only on overlap
+
+
+def test_render_memory_section_filters_past_dates() -> None:
+    """Pia/Examplefund-style mails reference past transaction dates — those
+    shouldn't pollute the heading or Datoer block."""
+    from datetime import date as _d
+    from scripts.pr_compose import _render_memory_section
+    writer = {
+        "memory_heading": "User Holding AS - 2025",
+        "memory_body": "Skattepapirer.\n",
+        "calendar_candidates": [
+            {"date": "2025-04-01", "title": "Kjøp", "evidence": "..."},
+            {"date": "2025-10-30", "title": "Realisasjon", "evidence": "..."},
+        ],
+    }
+    heading, body = _render_memory_section(writer, today=_d(2026, 5, 28))
+    assert heading == "User Holding AS - 2025"  # untouched, no future dates
+    assert "**Datoer:**" not in body  # no future dates to list
+
+
+def test_render_memory_section_handles_empty_title() -> None:
+    """Pia-style candidates often have empty titles (model returned null);
+    the renderer should still produce a readable bullet."""
+    from datetime import date as _d
+    from scripts.pr_compose import _render_memory_section
+    writer = {
+        "memory_heading": "x",
+        "memory_body": "y\n",
+        "calendar_candidates": [{"date": "2026-06-10", "title": "", "evidence": "10/6"}],
+    }
+    _, body = _render_memory_section(writer, today=_d(2026, 5, 28))
+    assert "- **2026-06-10**" in body
+    assert "— —" not in body  # no stray double-dash from empty title
+
+
 def test_compose_pr_falls_back_to_subject_when_title_null() -> None:
     """NuExtract at temp=0.2 occasionally nulls every field on terse mails
     (Spiker'n sommerfest, 187 chars). The validator hard-rejects null

@@ -639,6 +639,50 @@ def _parse_candidate_date(s: str):
     return None, None
 
 
+def _is_future(date_str: str, today: date | None = None) -> bool:
+    """True if the candidate's date range ends today or later. Past dates
+    (NuExtract drags historical references like transaction dates out of
+    e.g. accounting mails) shouldn't pollute the file diff."""
+    today = today or date.today()
+    end = _parse_candidate_date(date_str)[1]
+    return end is not None and end >= today
+
+
+def _future_candidates(candidates: list[dict],
+                       today: date | None = None) -> list[dict]:
+    """Subset of candidates whose date is in the future. Used by both the
+    substance gate and the file-diff renderer."""
+    today = today or date.today()
+    return [c for c in candidates if _is_future(c.get("date", ""), today)]
+
+
+def _render_memory_section(writer: dict, today: date | None = None) -> tuple[str, str]:
+    """Build (heading, body) for the daily-memory-file diff. Prepends the
+    earliest future date to the heading so the chronological structure
+    of the daily file is preserved; appends a Datoer block listing all
+    future candidates with overlap markers. Both deterministic — no
+    model call. Returns the writer's existing heading/body unchanged
+    if there are no future candidates."""
+    heading = writer["memory_heading"]
+    body = writer["memory_body"]
+    future = sorted(
+        _future_candidates(writer.get("calendar_candidates") or [], today),
+        key=lambda c: c["date"],
+    )
+    if not future:
+        return heading, body
+
+    heading = f"{future[0]['date']} — {heading}"
+    lines = ["", "**Datoer:**", ""]
+    for c in future:
+        marker = " _(allerede i CALENDAR.md)_" if c.get("already_in_calendar") else ""
+        title = c.get("title") or ""
+        sep = f" — {title}" if title else ""
+        lines.append(f"- **{c['date']}**{sep}{marker}")
+    body = body.rstrip() + "\n" + "\n".join(lines) + "\n"
+    return heading, body
+
+
 def make_branch_name(keyword: str, today: date | None = None,
                      rng: random.Random | None = None) -> str:
     """Construct `mail/<YYYY-MM-DD>-<keyword>-<rand4>` for the feature branch."""
@@ -742,11 +786,13 @@ def file_pr_for_message(
             cand_lines.append(f"             cal:    [{marker}] {c.get('date', '')} — {c.get('title', '')}")
         cand_summary = "\n" + "\n".join(cand_lines)
 
+    rendered_heading, rendered_body = _render_memory_section(writer, today)
+
     print(
         f"  → branch: {branch}\n"
         f"     title:  {writer['pr_title']}\n"
-        f"     edit:   memory/{today.isoformat()}.md  +## {writer['memory_heading']}\n"
-        f"     body:   {writer['memory_body'].strip()[:300]}"
+        f"     edit:   memory/{today.isoformat()}.md  +## {rendered_heading}\n"
+        f"     body:   {rendered_body.strip()[:300]}"
         f"{cand_summary}",
         file=sys.stderr,
     )
@@ -769,7 +815,7 @@ def file_pr_for_message(
         existing = memory_path.read_text() if memory_path.exists() else f"# {today.isoformat()}\n"
         new_content = (
             existing.rstrip()
-            + f"\n\n## {writer['memory_heading']}\n\n{writer['memory_body']}"
+            + f"\n\n## {rendered_heading}\n\n{rendered_body}"
         )
         memory_path.write_text(new_content)
 
@@ -871,14 +917,18 @@ def file_prs_for_significant_threads(args: argparse.Namespace,
             continue
 
         # Substance gate: the file diff that lands in memory/YYYY-MM-DD.md
-        # is just `## heading + memory_body`. If the model returned a null
-        # body the validator filled in a placeholder so dry-run / preview
-        # is readable, but filing such a PR pollutes the long-term memory
-        # file with noise. Skip + tag `pr::nofile` so the thread doesn't
-        # come back next run. (calendar_candidates ride along on the PR
-        # description, not the file diff, so they don't rescue substance.)
-        if not writer.get("memory_body_from_model"):
-            print(f"  ⊘ skipping — no substantive memory body extracted "
+        # is `## heading + body + optional Datoer block`. Substance =
+        # model wrote a real body, OR we have future-dated candidates
+        # that _render_memory_section will pull into the diff as a date
+        # anchor + Datoer list. Past-only candidates (Pia/Examplefund had 4×
+        # 2025 transaction dates) don't count — they'd render the same
+        # noise as null body. Skip + tag `pr::nofile` so the thread
+        # doesn't come back next run.
+        has_body = writer.get("memory_body_from_model", False)
+        has_future = bool(_future_candidates(
+            writer.get("calendar_candidates") or []))
+        if not (has_body or has_future):
+            print(f"  ⊘ skipping — no body and no future dates "
                   f"(would be placeholder-only diff)",
                   file=sys.stderr)
             if args.apply:
