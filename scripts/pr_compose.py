@@ -236,6 +236,39 @@ def extract_body(msg: email.message.EmailMessage) -> str:
     return ""
 
 
+# Typographic canonicalization for LLM inputs. Qwen3.6 thinking-mode has
+# been observed to lock into an infinite "Wait, is it 'Spiker`n' or
+# 'Spiker'n'?" loop when the source mail contains non-canonical apostrophes
+# (backtick, acute, smart-quotes). Folding to a single canonical form
+# removes the ambiguity the model can't commit on. NFKC handles composed
+# vs decomposed forms first; the translate table covers char swaps that
+# NFKC leaves alone (backtick is not an apostrophe variant in unicode).
+_LLM_CHAR_MAP = str.maketrans({
+    "`":      "'",  # backtick → straight apostrophe (the Spiker'n trigger)
+    "´": "'",  # acute accent
+    "‘": "'",  # left single quote
+    "’": "'",  # right single quote (Norwegian smart quote)
+    "“": '"',  # left double quote
+    "”": '"',  # right double quote
+    "–": "-",  # en dash → hyphen-minus
+    "—": "-",  # em dash → hyphen-minus
+    " ": " ", # non-breaking space → space
+})
+
+
+def canonicalize_for_llm(text: str) -> str:
+    """Normalize typographic variants that confuse LLMs into commitment loops.
+
+    Targets a Qwen3.6 thinking-mode failure where input with non-canonical
+    apostrophes (backtick `, acute ´, smart quotes ' ') causes the model to
+    fixate on "which form is correct?" and loop indefinitely in reasoning.
+    Folding to a single canonical form (straight ASCII apostrophe / quote /
+    hyphen) removes the ambiguity. Applied at the writer input boundary.
+    """
+    import unicodedata
+    return unicodedata.normalize("NFKC", text).translate(_LLM_CHAR_MAP)
+
+
 def load_mail(msg_id: str) -> MailRow | None:
     """Fetch a MailRow for the given message_id. Returns None on fetch failure
     (printed to stderr so the caller can keep looping)."""
