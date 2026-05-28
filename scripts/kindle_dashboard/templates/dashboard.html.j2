@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="no">
+<head>
+<meta charset="utf-8">
+<title>Kindle dashboard</title>
+<style>
+  /* Sizing in px — viewport is locked at 1448×1072 (landscape). Font sizes
+     are deliberately large because the Kindle is wall-mounted and read
+     from across the room. */
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    width: 1448px; height: 1072px;
+    background: #fff; color: #000;
+    font-family: "DejaVu Sans", "Liberation Sans", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    font-feature-settings: "tnum";
+  }
+  body { display: grid; grid-template-rows: auto 1fr auto; padding: 32px 48px; }
+
+  header {
+    display: flex; justify-content: space-between; align-items: baseline;
+    border-bottom: 4px solid #000; padding-bottom: 14px;
+  }
+  header h1 { margin: 0; font-size: 92px; font-weight: 800; letter-spacing: -1px; }
+  header .now { font-size: 56px; font-weight: 700;
+                font-variant-numeric: tabular-nums; }
+
+  main {
+    display: grid;
+    grid-template-columns: 1.25fr 1fr;
+    gap: 36px;
+    padding-top: 24px;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  section { padding-top: 4px; min-width: 0; }
+  section > h2 {
+    margin: 0 0 14px 0;
+    font-size: 50px; font-weight: 800;
+    text-transform: uppercase; letter-spacing: 1px;
+    border-bottom: 3px solid #000; padding-bottom: 6px;
+  }
+
+  /* --- calendar (left): mini-month grid + agenda below ------------------- */
+
+  .calendar { display: grid; grid-template-rows: auto 1fr;
+              gap: 18px; min-height: 0; }
+
+  .month {
+    border: 3px solid #000;
+    padding: 10px 16px 12px 16px;
+  }
+  .month-name {
+    font-size: 32px; font-weight: 800;
+    text-transform: uppercase; letter-spacing: 2px;
+    margin: 0 0 4px 0;
+  }
+  table.month-grid {
+    width: 100%; border-collapse: collapse;
+    font-variant-numeric: tabular-nums;
+    font-size: 24px; font-weight: 600;
+  }
+  table.month-grid thead th {
+    font-size: 18px; font-weight: 700;
+    text-align: center; padding-bottom: 4px;
+    border-bottom: 1.5px solid #000;
+    color: #555; letter-spacing: 1px;
+  }
+  table.month-grid td {
+    text-align: center; vertical-align: middle;
+    padding: 0;
+    width: 14.285%;
+    height: 36px;
+    position: relative;
+  }
+  table.month-grid td .num {
+    display: inline-block; min-width: 32px;
+    line-height: 32px;
+  }
+  table.month-grid td.out  .num { color: #aaa; font-weight: 400; }
+  table.month-grid td.today .num {
+    background: #000; color: #fff;
+    border-radius: 4px;
+    font-weight: 800;
+  }
+  table.month-grid td.busy::after {
+    content: "●";
+    position: absolute;
+    left: 50%; bottom: 0;
+    transform: translateX(-50%);
+    font-size: 12px; line-height: 1;
+  }
+  table.month-grid td.today.busy::after { color: #fff; }
+
+  .agenda { overflow: hidden; }
+  .agenda h3 {
+    margin: 12px 0 6px 0; font-size: 32px; font-weight: 800;
+    text-transform: uppercase; letter-spacing: 1px;
+    border-bottom: 2px solid #000; padding-bottom: 2px;
+  }
+  .agenda h3:first-child { margin-top: 0; }
+  ul.events { list-style: none; padding: 0; margin: 0; }
+  ul.events li {
+    padding: 6px 0;
+    border-bottom: 1px dashed #888;
+    font-size: 30px; line-height: 1.2;
+    display: grid;
+    grid-template-columns: 200px 60px 1fr;
+    gap: 12px;
+    align-items: baseline;
+  }
+  ul.events li .time { font-weight: 700; font-variant-numeric: tabular-nums; }
+  ul.events li .who  { font-weight: 700; text-align: center;
+                       border: 2px solid #000; border-radius: 6px;
+                       padding: 2px 0; font-size: 24px; }
+  ul.events li .who:empty { border: 0; }
+  ul.events li .text {
+    overflow: hidden; text-overflow: ellipsis; display: -webkit-box;
+    -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  }
+
+  .empty { color: #555; font-style: italic; font-size: 26px; }
+
+  /* --- right column: weather + spond ------------------------------------- */
+
+  ul.spond { list-style: none; padding: 0; margin: 0; }
+  ul.spond li {
+    padding: 8px 0;
+    border-bottom: 1px dotted #888;
+    font-size: 26px; line-height: 1.25;
+    display: grid;
+    grid-template-columns: 48px 200px 1fr;
+    gap: 12px;
+    align-items: baseline;
+    overflow: hidden;
+  }
+  ul.spond li .badge {
+    text-align: center;
+    border: 2px solid #000; border-radius: 6px;
+    font-size: 22px; font-weight: 700; padding: 2px 0;
+  }
+  ul.spond li .when { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  ul.spond li .title {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
+  .weather { font-size: 32px; line-height: 1.35; }
+  .weather .today {
+    padding-bottom: 12px; border-bottom: 2px solid #000;
+    margin-bottom: 12px;
+    display: flex; align-items: center; gap: 16px;
+  }
+  .weather .today .wicon { width: 96px; height: 96px; flex: 0 0 auto; }
+  .weather .today .today-text { display: flex; flex-direction: column;
+                                line-height: 1.1; }
+  .weather .today .today-text .label { font-size: 36px; font-weight: 700; }
+  .weather .today .today-text .range { font-size: 28px; font-weight: 600;
+                                       font-variant-numeric: tabular-nums; }
+
+  .weather .day {
+    display: grid;
+    grid-template-columns: 56px 1fr auto;
+    gap: 14px; align-items: center;
+    padding: 4px 0; font-variant-numeric: tabular-nums;
+  }
+  .weather .day .wicon { width: 48px; height: 48px; flex: 0 0 auto; }
+  .weather .day-label {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-weight: 600;
+  }
+  .weather .day-temp { white-space: nowrap; font-weight: 600; }
+
+  /* Yr.no SVGs are soft and colourful. The #karrikert SVG filter (defined
+     just below in <body>) extracts luminance and posterizes to 4 stops, so
+     the icons read as bold black silhouettes with a sliver of gray accent —
+     much closer to a hand-stamped weather symbol on e-ink. */
+  .wicon { filter: url(#karrikert); }
+
+  /* Nowcast — 18-bar chart of next 90 min precip. */
+  .nowcast {
+    margin: 16px 0 18px 0;
+    padding: 10px 12px 8px 12px;
+    border: 2px solid #000;
+  }
+  .nowcast .head {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 24px; font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .nowcast .head .summary { font-weight: 800; }
+  .nowcast .head .range  { font-variant-numeric: tabular-nums;
+                           font-weight: 500; color: #555; }
+  .nowcast .bars {
+    display: grid;
+    grid-template-columns: repeat(18, 1fr);
+    gap: 2px;
+    align-items: end;
+    height: 64px;
+    border-bottom: 2px solid #000;
+  }
+  .nowcast .bars .bar {
+    background: #000;
+    min-height: 1.5px;
+  }
+  .nowcast .bars .bar.dry { background: #ccc; min-height: 1.5px; }
+  .nowcast .axis {
+    display: flex; justify-content: space-between;
+    font-size: 18px; color: #555;
+    margin-top: 2px; font-variant-numeric: tabular-nums;
+  }
+
+  footer {
+    border-top: 2px solid #000; margin-top: 18px; padding-top: 10px;
+    font-size: 26px; display: flex; justify-content: space-between;
+    color: #000; font-variant-numeric: tabular-nums;
+  }
+  footer .sep   { padding: 0 16px; color: #888; }
+  footer .stamp { font-size: 20px; color: #555; }
+</style>
+</head>
+<body>
+  <!-- Reusable SVG colour filter; applied via filter: url(#karrikert) above. -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <filter id="karrikert">
+        <feColorMatrix type="matrix" values="
+          0.30 0.59 0.11 0 0
+          0.30 0.59 0.11 0 0
+          0.30 0.59 0.11 0 0
+          0    0    0    1 0"/>
+        <feComponentTransfer>
+          <feFuncR type="discrete" tableValues="0 0 0 0.4 1"/>
+          <feFuncG type="discrete" tableValues="0 0 0 0.4 1"/>
+          <feFuncB type="discrete" tableValues="0 0 0 0.4 1"/>
+        </feComponentTransfer>
+      </filter>
+    </defs>
+  </svg>
+
+  <header>
+    <h1>{{ today_label }}</h1>
+  </header>
+
+  <main>
+    <section class="calendar">
+      {% if month %}
+        <div class="month">
+          <h2 class="month-name">{{ month.name }}</h2>
+          <table class="month-grid">
+            <thead>
+              <tr>
+                <th>Ma</th><th>Ti</th><th>On</th><th>To</th>
+                <th>Fr</th><th>Lø</th><th>Sø</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for week in month.weeks %}
+                <tr>
+                  {% for cell in week %}
+                    <td class="{% if not cell.in_month %}out{% endif %} {% if cell.is_today %}today{% endif %} {% if cell.has_events %}busy{% endif %}">
+                      <span class="num">{{ cell.day }}</span>
+                    </td>
+                  {% endfor %}
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% endif %}
+
+      <div class="agenda">
+        {% for day in days %}
+          <h3>{{ day.label }}</h3>
+          {% if day.events %}
+            <ul class="events">
+              {% for ev in day.events %}
+                <li>
+                  <span class="time">{{ ev.time }}</span>
+                  {% if ev.who %}<span class="who">{{ ev.who }}</span>{% else %}<span></span>{% endif %}
+                  <span class="text">{{ ev.text }}</span>
+                </li>
+              {% endfor %}
+            </ul>
+          {% else %}
+            <p class="empty">— ingen avtaler</p>
+          {% endif %}
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="right">
+      <div class="weather">
+        {% if weather %}
+          <div class="today">
+            {% if weather.today.icon_uri %}
+              <img class="wicon" src="{{ weather.today.icon_uri }}" alt="">
+            {% endif %}
+            <span class="today-text">
+              <span class="label">{{ weather.today.summary }}</span>
+              <span class="range">{{ weather.today.lo }}° – {{ weather.today.hi }}°</span>
+            </span>
+          </div>
+          {% for day in weather.next %}
+            <div class="day">
+              {% if day.icon_uri %}
+                <img class="wicon" src="{{ day.icon_uri }}" alt="">
+              {% else %}
+                <span></span>
+              {% endif %}
+              <span class="day-label">{{ day.label }}</span>
+              <span class="day-temp">{{ day.lo }}° – {{ day.hi }}°</span>
+            </div>
+          {% endfor %}
+        {% else %}
+          <p class="empty">— vær ikke tilgjengelig</p>
+        {% endif %}
+      </div>
+
+      {% if nowcast and nowcast.max_rate > 0 %}
+        <div class="nowcast">
+          <div class="head">
+            <span class="summary">{{ nowcast.summary }}</span>
+            <span class="range">neste 90 min · {{ nowcast.now_time }}–{{ nowcast.end_time }}</span>
+          </div>
+          <div class="bars">
+            {% set max_rate = nowcast.max_rate if nowcast.max_rate > 0.5 else 0.5 %}
+            {% for r in nowcast.bars %}
+              <div class="bar {% if r < 0.05 %}dry{% endif %}"
+                   style="height: {{ (100.0 * r / max_rate) | round(1) }}%;"></div>
+            {% endfor %}
+          </div>
+          <div class="axis">
+            <span>nå</span>
+            <span>30 min</span>
+            <span>60 min</span>
+            <span>90 min</span>
+          </div>
+        </div>
+      {% endif %}
+
+      <h2>Venter svar</h2>
+      {% if spond %}
+        <ul class="spond">
+          {% for s in spond %}
+            <li>
+              <span class="badge">{{ s.who }}</span>
+              <span class="when">{{ s.when }}</span>
+              <span class="title">{{ s.title }}</span>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="empty">— ingen utestående svar</p>
+      {% endif %}
+    </section>
+  </main>
+
+  <footer>
+    {% if sun %}
+      <span>☀&#xFE0E; {{ sun.rise }}<span class="sep">·</span>{{ sun.set }}</span>
+    {% else %}
+      <span></span>
+    {% endif %}
+    <span class="stamp">Sist oppdatert {{ rendered_at }}</span>
+  </footer>
+</body>
+</html>
