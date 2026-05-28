@@ -602,18 +602,16 @@ def compose_pr(row: MailRow, client: httpx.Client) -> dict:
     # sentence-pick task ("Husk på å skriv en lapp" instead of a curated
     # entry). The generator gets the extraction as fact anchors so dates,
     # names, amounts don't drift.
-    try:
-        gen = generate_memory_prose(row, document, out, client)
-    except Exception as e:
-        print(f"!! tier-3 generator failed (keeping NuExtract output): {e}",
-              file=sys.stderr)
-    else:
-        if gen.get("heading"):
-            out["memory_heading"] = gen["heading"].lstrip("# ").strip()
-        if gen.get("body"):
-            out["memory_body"] = gen["body"].rstrip() + "\n"
-            out["memory_body_from_model"] = True
-
+    #
+    # No fallback on failure — offensive programming. :8080 is shared
+    # infrastructure with the classifier; if it's broken we want to see
+    # it loudly rather than silently degrade to NuExtract sentence-
+    # plucking. Errors propagate to file_prs_for_significant_threads
+    # which logs + counts the thread as error and moves on.
+    gen = generate_memory_prose(row, document, out, client)
+    out["memory_heading"] = gen["heading"].lstrip("# ").strip()
+    out["memory_body"] = gen["body"].rstrip() + "\n"
+    out["memory_body_from_model"] = True
     return out
 
 
@@ -642,28 +640,42 @@ direkte med `HEADING:`.
 
 def _parse_generator_output(text: str) -> dict:
     """Pull HEADING / BODY out of the generator's line-format output.
-    Tolerant: leading prose, trailing prose, missing markers all
-    produce a partial result rather than raising. Empty result lets
-    compose_pr fall back to NuExtract output."""
+    Strict: raises ValueError on missing markers or empty fields. The
+    parser is the boundary between "model produced expected format" and
+    "something is wrong" — silent partial results would hide prompt
+    drift, model changes, or :8080 returning chatty prose."""
     text = _strip_code_fence(text)
     heading = ""
     body_lines: list[str] = []
     in_body = False
+    saw_heading = False
+    saw_body_marker = False
     for line in text.splitlines():
         if not in_body:
             m = re.match(r"^HEADING:\s*(.*)$", line)
             if m:
                 heading = m.group(1).strip()
+                saw_heading = True
                 continue
-            if line.strip() == "BODY:" or line.strip().startswith("BODY:"):
+            if line.strip().startswith("BODY:"):
                 in_body = True
+                saw_body_marker = True
                 inline = line.split("BODY:", 1)[1].strip()
                 if inline:
                     body_lines.append(inline)
                 continue
         else:
             body_lines.append(line)
-    return {"heading": heading, "body": "\n".join(body_lines).strip()}
+    body = "\n".join(body_lines).strip()
+    if not saw_heading:
+        raise ValueError(f"generator output missing HEADING: marker: {text[:200]!r}")
+    if not saw_body_marker:
+        raise ValueError(f"generator output missing BODY: marker: {text[:200]!r}")
+    if not heading:
+        raise ValueError(f"generator output has empty HEADING: {text[:200]!r}")
+    if not body:
+        raise ValueError(f"generator output has empty BODY: {text[:200]!r}")
+    return {"heading": heading, "body": body}
 
 
 def generate_memory_prose(row: MailRow, document: str, extraction: dict,

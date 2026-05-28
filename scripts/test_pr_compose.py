@@ -520,13 +520,15 @@ def test_make_branch_name_random_suffix_varies() -> None:
 
 def test_compose_pr_parses_and_normalises() -> None:
     from scripts.pr_compose import compose_pr
-    canned = (
-        '{"pr_title": "Streik-varsel Eksempeldalen", '
-        '"branch_keyword": "Streik Eksempeldalen", '
-        '"memory_heading": "Streik-varsel", '
-        '"memory_body": "Barnehagen varsler mulig streik fra 5. juni."}'
-    )
-    client = _StubClient(canned)
+    client = _StubClient({
+        "8081": (
+            '{"pr_title": "Streik-varsel Eksempeldalen", '
+            '"branch_keyword": "Streik Eksempeldalen", '
+            '"memory_heading": "Streik-varsel", '
+            '"memory_body": "Barnehagen varsler mulig streik fra 5. juni."}'
+        ),
+        "8080": "HEADING: Streik-varsel\nBODY:\nBarnehagen varsler streik.\n",
+    })
     out = compose_pr(_row(body="Streikevarsel innhold"), client)
     assert out["branch_keyword"] == "streik-eksempeldalen"  # slugified + folded
     assert out["pr_title"] == "Streik-varsel Eksempeldalen"
@@ -651,18 +653,21 @@ def test_compose_pr_falls_back_to_subject_when_title_null() -> None:
     """NuExtract at temp=0.2 occasionally nulls every field on terse mails
     (Spiker'n sommerfest, 187 chars). The validator hard-rejects null
     pr_title, so without this fallback we crash on otherwise-skippable
-    threads. Subject is always present and for these mails IS the title;
-    body-substance gate handles the no-real-content case downstream."""
+    threads. Subject is always present and for these mails IS the title.
+    (The substance gate now passes because tier-3 fills in heading/body
+    — the gate fires on real null-extraction in production when tier-3
+    also struggles, not in this controlled-stub test.)"""
     from scripts.pr_compose import compose_pr
-    canned = (
-        '{"pr_title": null, "branch_keyword": null, '
-        '"memory_heading": null, "memory_body": null, '
-        '"calendar_candidates": []}'
-    )
-    client = _StubClient(canned)
+    client = _StubClient({
+        "8081": (
+            '{"pr_title": null, "branch_keyword": null, '
+            '"memory_heading": null, "memory_body": null, '
+            '"calendar_candidates": []}'
+        ),
+        "8080": "HEADING: Sommerfest\nBODY:\nVelkommen-mail fra SchoolApp.\n",
+    })
     out = compose_pr(_row(subject="Velkommen til sommerfest", body="x"), client)
     assert out["pr_title"] == "Velkommen til sommerfest"
-    assert out["memory_body_from_model"] is False  # substance gate trips
 
 
 # ---------- writer: tier-3 generator ----------
@@ -703,14 +708,33 @@ def test_parse_generator_output_strips_code_fence() -> None:
     assert out["body"] == "y"
 
 
-def test_parse_generator_output_missing_markers_returns_empty() -> None:
-    """If the model just emits prose without the markers, return empty so
-    compose_pr falls back to NuExtract output instead of stuffing the
-    raw generator response into the file diff."""
+def test_parse_generator_output_raises_on_missing_heading_marker() -> None:
+    """Offensive programming: the parser is the boundary between "model
+    produced expected format" and "something is broken upstream". Silent
+    partial results would hide prompt drift or :8080 returning chatty
+    prose. Caller (compose_pr → file_prs_for_significant_threads) sees
+    the loud error and counts the thread as error."""
     from scripts.pr_compose import _parse_generator_output
-    out = _parse_generator_output("Her er en oppsummering: dette er en mail.")
-    assert out["heading"] == ""
-    assert out["body"] == ""
+    with pytest.raises(ValueError, match="HEADING"):
+        _parse_generator_output("Her er en oppsummering: dette er en mail.")
+
+
+def test_parse_generator_output_raises_on_missing_body_marker() -> None:
+    from scripts.pr_compose import _parse_generator_output
+    with pytest.raises(ValueError, match="BODY"):
+        _parse_generator_output("HEADING: x\nIngen body-markør her.")
+
+
+def test_parse_generator_output_raises_on_empty_heading() -> None:
+    from scripts.pr_compose import _parse_generator_output
+    with pytest.raises(ValueError, match="empty HEADING"):
+        _parse_generator_output("HEADING:\nBODY:\ny\n")
+
+
+def test_parse_generator_output_raises_on_empty_body() -> None:
+    from scripts.pr_compose import _parse_generator_output
+    with pytest.raises(ValueError, match="empty BODY"):
+        _parse_generator_output("HEADING: x\nBODY:\n")
 
 
 def test_compose_pr_uses_generator_output_for_heading_and_body() -> None:
@@ -738,22 +762,24 @@ def test_compose_pr_uses_generator_output_for_heading_and_body() -> None:
     assert out["memory_body_from_model"] is True
 
 
-def test_compose_pr_falls_back_to_nuextract_when_generator_fails() -> None:
-    """Generator failure (transport error, malformed output) must not
-    block the pipeline — fall back to NuExtract's heading/body."""
+def test_compose_pr_propagates_generator_parse_failure() -> None:
+    """REGRESSION GUARD. Earlier version silently fell back to NuExtract's
+    sentence-plucking output when the generator returned malformed text.
+    That hid prompt drift / model changes / :8080 issues. Now: parse
+    error from the generator propagates up and the per-thread error
+    handler in file_prs_for_significant_threads counts it loudly."""
     from scripts.pr_compose import compose_pr
     client = _StubClient({
-        "8081": (  # NuExtract — good output
+        "8081": (
             '{"pr_title": "x", "branch_keyword": "x", '
             '"memory_heading": "Tilbud Eksempel", '
             '"memory_body": "Tilbudet er på 95 000 NOK.", '
             '"calendar_candidates": []}'
         ),
-        "8080": "I am just chatting, no HEADING/BODY here",  # parser → empty
+        "8080": "I am just chatting, no HEADING/BODY here",  # parser raises
     })
-    out = compose_pr(_row(body="x"), client)
-    assert out["memory_heading"] == "Tilbud Eksempel"  # from NuExtract
-    assert "95 000 NOK" in out["memory_body"]
+    with pytest.raises(ValueError, match="HEADING"):
+        compose_pr(_row(body="x"), client)
 
 
 def test_compose_pr_passes_nuextract_facts_to_generator() -> None:
@@ -779,23 +805,27 @@ def test_compose_pr_passes_nuextract_facts_to_generator() -> None:
     assert "Frist" in user_msg
 
 
-def test_compose_pr_disables_thinking_and_omits_tools() -> None:
-    """REGRESSION GUARD. The writer runs in single-call non-thinking mode
-    after the tool-use agent loop proved unreliable on MLX (Qwen3.6 +
-    DWQ: ~67% truncation rate on multi-iter thinking, even at 8k tokens;
-    `tool_choice: required` silently ignored with full writer prompt).
-    Calendar deduplication is done by `_verify_candidates` in Python
-    rather than by model tool calls. If a future change re-introduces
-    tool use, update this guard and verify reliability first."""
+def test_compose_pr_disables_thinking_and_omits_tools_on_both_tiers() -> None:
+    """REGRESSION GUARD. Both the NuExtract extractor (:8081) and the Qwen
+    tier-3 generator (:8080) must run with thinking disabled and no
+    tools. Qwen3.6 thinking-mode + tool-calling is an upstream-broken
+    combination — thinking-on loops on uncertainty, thinking-off skips
+    tool calls. NuExtract has no thinking mode but we still pass
+    enable_thinking=False to be safe. Calendar dedup is Python-side."""
     from scripts.pr_compose import compose_pr
-    client = _StubClient(
-        '{"pr_title": "x", "branch_keyword": "x", '
-        '"memory_heading": "x", "memory_body": "x"}'
-    )
+    client = _StubClient({
+        "8081": (
+            '{"pr_title": "x", "branch_keyword": "x", '
+            '"memory_heading": "x", "memory_body": "x", '
+            '"calendar_candidates": []}'
+        ),
+        "8080": "HEADING: x\nBODY:\ny\n",
+    })
     compose_pr(_row(body="x"), client)
-    assert client.last_payload is not None
-    assert client.last_payload["chat_template_kwargs"]["enable_thinking"] is False
-    assert "tools" not in client.last_payload
+    assert len(client.posts) == 2
+    for url, payload in client.posts:
+        assert payload["chat_template_kwargs"]["enable_thinking"] is False, url
+        assert "tools" not in payload, url
 
 
 # ---------- _render_pr_body ----------
@@ -909,9 +939,12 @@ def test_compose_pr_calls_verify_candidates(monkeypatch) -> None:
         return [{**c, "already_in_calendar": True} for c in candidates]
 
     monkeypatch.setattr(pc, "_verify_candidates", fake_verify)
-    client = _StubClient(json.dumps(_writer_dict(calendar_candidates=[
-        {"date": "2026-05-29", "title": "Test", "evidence": "e"}
-    ])))
+    client = _StubClient({
+        "8081": json.dumps(_writer_dict(calendar_candidates=[
+            {"date": "2026-05-29", "title": "Test", "evidence": "e"}
+        ])),
+        "8080": "HEADING: x\nBODY:\ny\n",
+    })
     out = pc.compose_pr(_row(body="x"), client)
     assert seen["called_with"][0]["title"] == "Test"
     assert out["calendar_candidates"][0]["already_in_calendar"] is True
