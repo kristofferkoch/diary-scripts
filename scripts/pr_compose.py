@@ -625,12 +625,23 @@ Du skriver en kort, faktuell norsk memory-entry for Examples daglige
 fil basert på en mail. Du får mailen, og en JSON med strukturerte fakta
 NuExtract har trukket ut (datoer, kalenderkandidater, foreslått tittel).
 
-Format strengt:
+Output må følge dette eksakte formatet — to bokstavelige markører:
 
 HEADING: <kort overskrift, 3-8 ord, ingen `##` prefiks>
 BODY:
 <2-4 setninger markdown. Inkluder nøkkelfakta: avsender (hvis bedrift),
 datoer/frister, handling som kreves. Konsis, ikke prosaisk.>
+
+`BODY:` markøren er obligatorisk på egen linje før brødteksten — ikke
+hopp den over. Eksempel på korrekt output (ekte format, mellom -----):
+
+-----
+HEADING: Tilbud fra Eksempel Elektriske
+BODY:
+Pat Olsen sendte tilbudsbrev 20260510-1 på 95 000 NOK for
+elektroarbeid før sommerferien. Astrid driver tråden. Frist for svar
+ikke spesifisert.
+-----
 
 Bruk faktaene som ankerpunkter — datoer, beløp, navn skal være riktige.
 Ingen prefiks, ingen kode-fence, ingen kommentarer etter BODY. Start
