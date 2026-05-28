@@ -444,6 +444,27 @@ def test_validate_writer_output_drops_dateless_candidates() -> None:
     assert out["calendar_candidates"][0]["title"] == "OK"
 
 
+def test_validate_writer_output_flags_no_substance_when_body_null() -> None:
+    """The substance flag drives whether file_prs_for_significant_threads
+    actually opens a PR. When the model returns null body, the validator
+    fills in a placeholder *for preview readability* but marks
+    memory_body_from_model=False so the caller can skip — a placeholder
+    file diff (heading + filler) is noise in the long-term memory file."""
+    from scripts.pr_compose import _validate_writer_output
+    out = _validate_writer_output(_writer_dict(memory_body=None))
+    assert out["memory_body_from_model"] is False
+    out = _validate_writer_output(_writer_dict(memory_body=""))
+    assert out["memory_body_from_model"] is False
+
+
+def test_validate_writer_output_flags_substance_when_body_present() -> None:
+    from scripts.pr_compose import _validate_writer_output
+    out = _validate_writer_output(_writer_dict(
+        memory_body="Tilbudet er på 95 000 NOK. Frist 15. juni.",
+    ))
+    assert out["memory_body_from_model"] is True
+
+
 def test_validate_writer_output_tolerates_null_candidate_fields() -> None:
     """Some Pia-style candidates come back with title=null even though the
     date is present. We keep them (date is the actionable bit) and just

@@ -483,8 +483,9 @@ def _validate_writer_output(d: dict) -> dict:
 
     branch_keyword = _slugify(_str_field(d, "branch_keyword") or pr_title) or "mail"
     memory_heading = _str_field(d, "memory_heading") or pr_title
+    raw_body = _str_field(d, "memory_body")
     memory_body = (
-        _str_field(d, "memory_body")
+        raw_body
         or "_(modell trakk ikke ut detaljer — se PR-body for kildemailen)_"
     )
 
@@ -493,6 +494,12 @@ def _validate_writer_output(d: dict) -> dict:
         "branch_keyword": branch_keyword,
         "memory_heading": memory_heading.lstrip("# ").strip(),
         "memory_body": memory_body.rstrip() + "\n",
+        # Used by file_prs_for_significant_threads to decide whether the
+        # writer's output is worth filing. A heading + placeholder body
+        # is noise in the long-term memory file — better to tag the
+        # thread `pr::nofile` and skip than to ship a non-diff that gets
+        # closed unmerged.
+        "memory_body_from_model": bool(raw_body),
     }
 
     candidates = d.get("calendar_candidates") or []
@@ -804,11 +811,13 @@ def file_pr_for_message(
 
 
 def file_prs_for_significant_threads(args: argparse.Namespace,
-                                      client: httpx.Client) -> tuple[int, int]:
+                                      client: httpx.Client) -> tuple[int, int, int]:
     """Find pr::significant threads without pr::filed; write + open PRs.
 
-    Returns (n_filed, n_error)."""
-    query = "tag:pr::significant and not tag:pr::filed"
+    Returns (n_filed, n_nofile, n_error). n_nofile = threads where the
+    writer produced no substantive body (placeholder-only diff) — those
+    are skipped + tagged `pr::nofile`."""
+    query = "tag:pr::significant and not tag:pr::filed and not tag:pr::nofile"
     out = subprocess.run(
         ["notmuch", "search", "--output=threads", query],
         check=True, capture_output=True, text=True,
@@ -832,7 +841,7 @@ def file_prs_for_significant_threads(args: argparse.Namespace,
     print(f"\n# [{mode}] filing PRs for {len(thread_ids)} thread(s)",
           file=sys.stderr)
 
-    n_filed = n_error = 0
+    n_filed = n_nofile = n_error = 0
     for i, tid in enumerate(thread_ids, 1):
         msg_id = _latest_msg_in_thread(tid)
         if not msg_id:
@@ -851,6 +860,23 @@ def file_prs_for_significant_threads(args: argparse.Namespace,
             print(f"!! writer failed: {e}", file=sys.stderr)
             n_error += 1
             continue
+
+        # Substance gate: the file diff that lands in memory/YYYY-MM-DD.md
+        # is just `## heading + memory_body`. If the model returned a null
+        # body the validator filled in a placeholder so dry-run / preview
+        # is readable, but filing such a PR pollutes the long-term memory
+        # file with noise. Skip + tag `pr::nofile` so the thread doesn't
+        # come back next run. (calendar_candidates ride along on the PR
+        # description, not the file diff, so they don't rescue substance.)
+        if not writer.get("memory_body_from_model"):
+            print(f"  ⊘ skipping — no substantive memory body extracted "
+                  f"(would be placeholder-only diff)",
+                  file=sys.stderr)
+            if args.apply:
+                apply_tags(f"thread:{tid}", ["+pr::nofile"])
+            n_nofile += 1
+            continue
+
         try:
             pr_url = file_pr_for_message(row, tid, writer, apply=args.apply)
         except subprocess.CalledProcessError as e:
@@ -863,7 +889,7 @@ def file_prs_for_significant_threads(args: argparse.Namespace,
             print(f"  ✓ {pr_url}")
             n_filed += 1
 
-    return n_filed, n_error
+    return n_filed, n_nofile, n_error
 
 
 # ---------- Main
@@ -999,10 +1025,11 @@ def main(argv: list[str]) -> int:
 
     if args.file_prs:
         with httpx.Client() as client:
-            n_filed, n_pr_err = file_prs_for_significant_threads(args, client)
+            n_filed, n_nofile, n_pr_err = file_prs_for_significant_threads(args, client)
         print(
             f"\n# file-prs done: {n_filed} PR(s) "
             + ("filed" if args.apply else "(dry-run)")
+            + f", {n_nofile} skipped (no substance)"
             + f", {n_pr_err} error(s)",
             file=sys.stderr,
         )
