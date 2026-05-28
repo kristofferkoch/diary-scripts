@@ -564,10 +564,20 @@ def _writer_payload(model: str, document: str, schema: dict) -> dict:
 
 
 def compose_pr(row: MailRow, client: httpx.Client) -> dict:
-    """Call the NuExtract extractor for one mail. Returns the validated
-    writer dict with `calendar_candidates` enriched by deterministic
-    Python-side calendar lookup (model only proposes candidates;
-    Python sets `already_in_calendar`)."""
+    """Two-stage extraction + generation for one mail.
+
+    Stage 2 (extractor, NuExtract on NUEXTRACT_BASE): structured facts —
+    calendar_candidates, pr_title, branch_keyword.
+
+    Stage 3 (generator, Qwen3.6 on MLX_BASE): rewrites memory_heading +
+    memory_body as concise Norwegian prose given the extraction + raw
+    mail. Replaces NuExtract's prose fields (NuExtract often picks
+    random sentences as "summary"); falls back to NuExtract output if
+    the generator call fails so the pipeline doesn't deadlock on a
+    flaky :8080.
+
+    Returns the validated writer dict with `calendar_candidates`
+    enriched by deterministic Python-side calendar lookup."""
     body = canonicalize_for_llm(row.body[:BODY_MAX_CHARS])
     subject = canonicalize_for_llm(row.subject)
     document = f"Subject: {subject}\nFrom: {row.sender}\n\n{body}"
@@ -586,7 +596,103 @@ def compose_pr(row: MailRow, client: httpx.Client) -> dict:
         parsed["pr_title"] = row.subject or "(no subject)"
     out = _validate_writer_output(parsed)
     out["calendar_candidates"] = _verify_candidates(out["calendar_candidates"])
+
+    # Tier 3: rewrite heading + body with Qwen3.6 on :8080. NuExtract is
+    # purpose-built for extraction and treats summarisation as a
+    # sentence-pick task ("Husk på å skriv en lapp" instead of a curated
+    # entry). The generator gets the extraction as fact anchors so dates,
+    # names, amounts don't drift.
+    try:
+        gen = generate_memory_prose(row, document, out, client)
+    except Exception as e:
+        print(f"!! tier-3 generator failed (keeping NuExtract output): {e}",
+              file=sys.stderr)
+    else:
+        if gen.get("heading"):
+            out["memory_heading"] = gen["heading"].lstrip("# ").strip()
+        if gen.get("body"):
+            out["memory_body"] = gen["body"].rstrip() + "\n"
+            out["memory_body_from_model"] = True
+
     return out
+
+
+# Tier 3 — generator. Reuses the classifier model on MLX_BASE because
+# it's already loaded. Qwen3.6 thinking-mode loops on extraction-under-
+# uncertainty, but pure prose generation with structured facts as input
+# is the kind of task it should handle — the failure was task fit, not
+# capability.
+GENERATOR_SYSTEM = """\
+Du skriver en kort, faktuell norsk memory-entry for Examples daglige
+fil basert på en mail. Du får mailen, og en JSON med strukturerte fakta
+NuExtract har trukket ut (datoer, kalenderkandidater, foreslått tittel).
+
+Format strengt:
+
+HEADING: <kort overskrift, 3-8 ord, ingen `##` prefiks>
+BODY:
+<2-4 setninger markdown. Inkluder nøkkelfakta: avsender (hvis bedrift),
+datoer/frister, handling som kreves. Konsis, ikke prosaisk.>
+
+Bruk faktaene som ankerpunkter — datoer, beløp, navn skal være riktige.
+Ingen prefiks, ingen kode-fence, ingen kommentarer etter BODY. Start
+direkte med `HEADING:`.
+"""
+
+
+def _parse_generator_output(text: str) -> dict:
+    """Pull HEADING / BODY out of the generator's line-format output.
+    Tolerant: leading prose, trailing prose, missing markers all
+    produce a partial result rather than raising. Empty result lets
+    compose_pr fall back to NuExtract output."""
+    text = _strip_code_fence(text)
+    heading = ""
+    body_lines: list[str] = []
+    in_body = False
+    for line in text.splitlines():
+        if not in_body:
+            m = re.match(r"^HEADING:\s*(.*)$", line)
+            if m:
+                heading = m.group(1).strip()
+                continue
+            if line.strip() == "BODY:" or line.strip().startswith("BODY:"):
+                in_body = True
+                inline = line.split("BODY:", 1)[1].strip()
+                if inline:
+                    body_lines.append(inline)
+                continue
+        else:
+            body_lines.append(line)
+    return {"heading": heading, "body": "\n".join(body_lines).strip()}
+
+
+def generate_memory_prose(row: MailRow, document: str, extraction: dict,
+                          client: httpx.Client) -> dict:
+    """Call the tier-3 generator. Returns {"heading": str, "body": str}.
+    `document` is the canonicalized mail body already prepared by
+    compose_pr; we reuse it so canonicalization rules don't drift."""
+    facts = {
+        "pr_title_suggested": extraction.get("pr_title", ""),
+        "calendar_candidates": extraction.get("calendar_candidates", []),
+    }
+    user = (
+        f"Mail:\n{document}\n\n"
+        f"Strukturerte fakta:\n{json.dumps(facts, ensure_ascii=False, indent=2)}"
+    )
+    payload = {
+        "model": CLASSIFIER_MODEL,  # Qwen3.6-4bit-DWQ, already on :8080
+        "messages": [
+            {"role": "system", "content": GENERATOR_SYSTEM},
+            {"role": "user", "content": user},
+        ],
+        "temperature": 0.3,
+        "max_tokens": 500,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    r = client.post(f"{MLX_BASE}/v1/chat/completions", json=payload, timeout=120)
+    r.raise_for_status()
+    content = r.json()["choices"][0]["message"]["content"]
+    return _parse_generator_output(content)
 
 
 def _verify_candidates(candidates: list[dict]) -> list[dict]:

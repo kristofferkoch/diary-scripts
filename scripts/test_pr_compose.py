@@ -233,13 +233,28 @@ class _StubResponse:
 
 
 class _StubClient:
-    """Captures the POST payload for assertions; returns a canned response."""
-    def __init__(self, content: str) -> None:
+    """Captures the POST payload for assertions; returns a canned response.
+
+    `content` can be:
+      - a str: same response for every URL (legacy single-endpoint tests).
+      - a dict {url-substring: str}: route per-URL. Used by tests that need
+        to distinguish NuExtract (port 8081) from generator (port 8080).
+    """
+    def __init__(self, content: str | dict[str, str]) -> None:
         self._content = content
         self.last_payload: dict | None = None
+        # Per-call (url, payload) log so multi-endpoint tests can assert
+        # what was sent where without having to read last_payload mid-flight.
+        self.posts: list[tuple[str, dict]] = []
 
     def post(self, url, json=None, timeout=None):  # noqa: A002
         self.last_payload = json
+        self.posts.append((url, json))
+        if isinstance(self._content, dict):
+            for key, val in self._content.items():
+                if key in url:
+                    return _StubResponse(val)
+            raise KeyError(f"_StubClient: no canned response for url {url!r}")
         return _StubResponse(self._content)
 
 
@@ -648,6 +663,120 @@ def test_compose_pr_falls_back_to_subject_when_title_null() -> None:
     out = compose_pr(_row(subject="Velkommen til sommerfest", body="x"), client)
     assert out["pr_title"] == "Velkommen til sommerfest"
     assert out["memory_body_from_model"] is False  # substance gate trips
+
+
+# ---------- writer: tier-3 generator ----------
+
+def test_parse_generator_output_clean() -> None:
+    from scripts.pr_compose import _parse_generator_output
+    out = _parse_generator_output(
+        "HEADING: Sommerfest Spiker'n\nBODY:\nVelkommen-mail fra SchoolApp.\n"
+    )
+    assert out["heading"] == "Sommerfest Spiker'n"
+    assert out["body"] == "Velkommen-mail fra SchoolApp."
+
+
+def test_parse_generator_output_multiline_body() -> None:
+    """Generator body is markdown; multiple lines + blank lines must
+    survive to the file diff."""
+    from scripts.pr_compose import _parse_generator_output
+    out = _parse_generator_output(
+        "HEADING: Plan for gulvarbeid\n"
+        "BODY:\n"
+        "Gulvet primes 3. juni.\n"
+        "\n"
+        "- Varmekabler 3.-4. juni\n"
+        "- Avretting 4.-5. juni\n"
+    )
+    assert "Varmekabler 3.-4. juni" in out["body"]
+    assert "Avretting" in out["body"]
+
+
+def test_parse_generator_output_strips_code_fence() -> None:
+    """Qwen sometimes wraps output in ```markdown ``` despite being told
+    not to. Reuse _strip_code_fence semantics."""
+    from scripts.pr_compose import _parse_generator_output
+    out = _parse_generator_output(
+        "```\nHEADING: x\nBODY:\ny\n```"
+    )
+    assert out["heading"] == "x"
+    assert out["body"] == "y"
+
+
+def test_parse_generator_output_missing_markers_returns_empty() -> None:
+    """If the model just emits prose without the markers, return empty so
+    compose_pr falls back to NuExtract output instead of stuffing the
+    raw generator response into the file diff."""
+    from scripts.pr_compose import _parse_generator_output
+    out = _parse_generator_output("Her er en oppsummering: dette er en mail.")
+    assert out["heading"] == ""
+    assert out["body"] == ""
+
+
+def test_compose_pr_uses_generator_output_for_heading_and_body() -> None:
+    """Tier-3 generator replaces NuExtract's heading/body when it
+    succeeds. NuExtract still owns calendar_candidates + pr_title."""
+    from scripts.pr_compose import compose_pr
+    client = _StubClient({
+        "8081": (  # NuExtract
+            '{"pr_title": "Tilbud Eksempel", '
+            '"branch_keyword": "eksempel-tilbud", '
+            '"memory_heading": "Tilbud", '
+            '"memory_body": "Tilbud", '
+            '"calendar_candidates": []}'
+        ),
+        "8080": (  # Generator
+            "HEADING: Eksempel tilbud — uke 23\n"
+            "BODY:\n"
+            "Tilbudet er på 95 000 NOK. Frist 15. juni.\n"
+        ),
+    })
+    out = compose_pr(_row(body="Tilbudsbrev"), client)
+    assert out["memory_heading"] == "Eksempel tilbud — uke 23"
+    assert "95 000 NOK" in out["memory_body"]
+    assert out["pr_title"] == "Tilbud Eksempel"  # from NuExtract, untouched
+    assert out["memory_body_from_model"] is True
+
+
+def test_compose_pr_falls_back_to_nuextract_when_generator_fails() -> None:
+    """Generator failure (transport error, malformed output) must not
+    block the pipeline — fall back to NuExtract's heading/body."""
+    from scripts.pr_compose import compose_pr
+    client = _StubClient({
+        "8081": (  # NuExtract — good output
+            '{"pr_title": "x", "branch_keyword": "x", '
+            '"memory_heading": "Tilbud Eksempel", '
+            '"memory_body": "Tilbudet er på 95 000 NOK.", '
+            '"calendar_candidates": []}'
+        ),
+        "8080": "I am just chatting, no HEADING/BODY here",  # parser → empty
+    })
+    out = compose_pr(_row(body="x"), client)
+    assert out["memory_heading"] == "Tilbud Eksempel"  # from NuExtract
+    assert "95 000 NOK" in out["memory_body"]
+
+
+def test_compose_pr_passes_nuextract_facts_to_generator() -> None:
+    """Generator gets the extraction as JSON in the user message so it
+    can anchor dates/amounts/names without re-extracting from the mail."""
+    from scripts.pr_compose import compose_pr
+    client = _StubClient({
+        "8081": (
+            '{"pr_title": "x", "branch_keyword": "x", '
+            '"memory_heading": "x", "memory_body": "x", '
+            '"calendar_candidates": [{"date": "2026-06-10", "title": "Frist", '
+            '"evidence": "innen 10/6"}]}'
+        ),
+        "8080": "HEADING: y\nBODY:\nz\n",
+    })
+    compose_pr(_row(body="x"), client)
+    # Two calls: NuExtract first, generator second.
+    assert len(client.posts) == 2
+    gen_url, gen_payload = client.posts[1]
+    assert "8080" in gen_url
+    user_msg = gen_payload["messages"][-1]["content"]
+    assert "2026-06-10" in user_msg
+    assert "Frist" in user_msg
 
 
 def test_compose_pr_disables_thinking_and_omits_tools() -> None:
