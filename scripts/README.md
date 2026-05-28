@@ -53,6 +53,52 @@ uv run scripts/mailshow.py --since-cursor 'from:astrid'   # narrow within the cu
 Don't write fresh inline `python3 -c "..."` blocks for body extraction — extend this
 script instead so improvements stick.
 
+### Processing new mail (SOP)
+
+The cursor `memory/mail-state.json` → `last_successful_run` is the start
+point. It's **hand-maintained** and easy to forget — the cursor has
+drifted multiple times because earlier passes wrote the daily note but
+never bumped the JSON.
+
+1. **Read the cursor** — `uv run scripts/mailshow.py --since-cursor --headers-only`
+   (or add a filter: `--since-cursor 'from:astrid'`). The script reads
+   `memory/mail-state.json` itself and prints the cursor it used. Anything
+   returned is candidate-new.
+2. **Cross-check recent daily notes** (`memory/YYYY-MM-DD.md`) for
+   "Mail-status" / "Inbox-gjennomgang" sections that already cover items
+   in that window. If they do, the real high-water mark is the latest of
+   those, not the JSON cursor.
+3. **Triage** with `mailshow.py` / `search_mail.py`. Record durable facts
+   per CLAUDE.md → "How to add a memory".
+4. **Bump `last_successful_run`** in `memory/mail-state.json` to the
+   timestamp of the newest message processed (use the message's `Date:`
+   header in UTC), and commit it together with the memory updates under
+   `MEM:`. Don't skip this step — that's what causes the cursor to lag
+   real sweeps.
+
+**Also check sent mail when summarising thread state.** The mail cursor
+tracks `tag:inbox` only — user's own replies and forwards never enter the
+inbox. A status summary built from cursor + topic-file scans will miss
+things user already handled. When the user asks "are we good with X?" or
+"what's left on Y?" for an ongoing correspondence, run
+`notmuch search 'from:user@example.com and to:<counterparty> and date:<window>..'`
+(or `mailshow.py thread:<id>` for the full conversation) before
+answering. Treat both directions as load-bearing. Lesson 2026-05-27 —
+declared a VPS-årsoppgave outstanding for User Holding regnskapet that
+user had already forwarded to the accountant the day before.
+
+### Live pipeline services
+
+`mail-sync.timer` runs every 15 min: `mbsync -a` → `notmuch new`
+(`post-new` hook syncs tags) → `embed_mail.py --tier 1 --quiet` →
+`mail_reader.summarize_inbox` (last two non-fatal). Long-running
+services: `proton-bridge`, `goimapnotify` (IDLE push), `mail-reader`
+(FastAPI at 127.0.0.1:8800 behind Caddy `/mail/`). Wrapper:
+`~/.local/bin/mail-sync.sh`. Don't manually re-sync to "see new mail" —
+just query notmuch; if something genuinely looks stale, check
+`systemctl --user status mail-sync.service` first. No digest cron yet
+(planned alongside Signal).
+
 ### Semantic search — `search_mail.py` (pgvector + bge-m3)
 
 Use `scripts/search_mail.py` for fuzzy / cross-language / topical queries —
@@ -248,6 +294,62 @@ streams. Lesson from 2026-04-27 (`MEMORY.md`).
 
 ---
 
+## Spond — `spond_sync.py` / `spondshow.py`
+
+Evaluation phase, no timer yet. `scripts/spond_sync.py --once` pulls
+chats + events + posts via the Olen/Spond library and appends raw JSONL
+to `memory/spond/YYYY-MM-DD.jsonl`. State cursor lives at
+`memory/spond-state.json` (auto-bumped by the script — unlike the mail
+cursor). Use `scripts/spondshow.py --since-cursor [--headers-only]` to
+triage new items; `--kind event --future` filters to upcoming events.
+Run **manually** for now; we'll add a systemd timer once we trust it.
+
+Upstream library does not expose full per-chat message history nor Spond
+Pay; the pipeline captures "chat X has new activity" signals + event /
+post bodies, while payment receipts come in over mail.
+
+### Auth
+
+- `SPOND_USERNAME` is exported from user's `~/.bashrc` — call
+  `spond_sync.py` / `spondshow.py` bare under `uv run`, **no inline
+  `SPOND_USERNAME=…` prefix** (a guessed override silently routes to the
+  wrong account).
+- Password: `pass show spond/user` (override with `$SPOND_PASSWORD_CMD`).
+- 2FA must be **off** on the Spond account — Olen/Spond doesn't implement
+  the OTP-verify flow
+  ([issue #205](https://github.com/Olen/Spond/issues/205)).
+- Set `$SPOND_RSVP_MEMBER_ID` to surface accept/decline/unanswered
+  markers in event headers; Robin' member-id in Eksempel-IL G-lag is
+  `0123456789ABCDEF0123456789ABCDEF`.
+
+### Processing new Spond items (SOP)
+
+Unlike the mail cursor, `memory/spond-state.json` is auto-bumped —
+running `spond_sync.py --once` updates `last_successful_run` and the
+per-chat / per-event / per-post seen-sets on every successful run. The
+cursor reflects "the last time `spond_sync.py` ran cleanly", not "the
+last time we wrote a digest".
+
+1. **Fetch new activity** — `uv run scripts/spond_sync.py --once`.
+   Prints a one-line `new records: total=N, by_kind={...}` summary on
+   stderr; appends new records to `memory/spond/YYYY-MM-DD.jsonl`.
+   Idempotent — re-running with no new activity is a no-op.
+2. **Triage** — `uv run scripts/spondshow.py --since-cursor
+   --headers-only` for a one-line summary per record; drop
+   `--headers-only` to see full JSON bodies. Filter with `--kind
+   chat|event|post` or pin to `--chat <id>` / `--event <id>`.
+3. **Distil into the daily note** — for *actionable* items
+   (kampendringer, oppmøtefrister, betalingskrav, foreldredugnad), add a
+   `## Spond` section to today's `memory/YYYY-MM-DD.md`. Posts from the
+   klubb-feed are deliberately low-signal — capture in JSONL, only
+   surface to the daily note if there's a real follow-up.
+4. **Commit** — daily-note updates under `MEM:`; pipeline changes under
+   `TOOLS:`. The state file (`memory/spond-state.json`) and the JSONL
+   files (`memory/spond/*.jsonl`) are generated — commit them alongside,
+   but don't hand-edit.
+
+---
+
 ## Finance — `finance_ingest.py`
 
 Summarise a Bulder Bank CSV export and cross-reference it with the embedded
@@ -297,9 +399,13 @@ Cadence: monthly, see `CALENDAR.md`. Always reuse the existing pipeline:
 
 ## Calendar — `retire_calendar.py`
 
-Part of the daily **sjekk-flow** (mail + spond + retire). Cuts expired one-off
-events out of `CALENDAR.md` and inserts them into `CALENDAR-PAST.md`. See
-`CLAUDE.md` → "Sjekk-flow: retire past calendar entries" for the full procedure.
+Part of the daily **sjekk-flow** (mail + spond + retire). The user's
+daily "sjekk" (typically phrased "les / sjekk mail og spond") includes
+retiring expired one-off events from `CALENDAR.md` — without this step,
+the calendar slowly fills with past entries and the top of the file stops
+being a useful "what's next" view.
+
+### Mechanical step — use the script
 
 ```bash
 uv run scripts/retire_calendar.py --dry-run            # preview
@@ -307,16 +413,41 @@ uv run scripts/retire_calendar.py                      # apply, today = date.tod
 uv run scripts/retire_calendar.py --today 2026-06-01   # simulate a later date
 ```
 
-- Operates only inside `## One-off events by month`. Recurring weekly/monthly/
-  quarterly sections are skipped.
+Cuts every event line whose end-date is strictly before today's
+`currentDate` out of `## One-off events by month` in `CALENDAR.md`,
+inserts it into the matching `### <Month> <Year>` subheading in
+`CALENDAR-PAST.md` (creating the subheading in chronological order if
+missing), and drops any month subheading that ends up empty. Idempotent
+— re-running with nothing to do leaves both files byte-identical.
+Recurring weekly/monthly/quarterly sections are never touched.
+
+### Manual step — enrichment
+
+After running the script, look through the lines it moved (printed on
+stderr). For any event the daily-note sweep gave new context to — an
+action's outcome, who showed up, what was decided — open
+`CALENDAR-PAST.md` and **append a short tail** to that moved line
+referencing `[[memory/YYYY-MM-DD.md]]`. Past entries become more useful
+as snapshots when they point back at the day's notes. This part is a
+judgment call and stays manual.
+
+Today's events (with end-date == today) stay in `CALENDAR.md` until the
+day is over. Format / parser-contract is identical in both files; see
+[../CALENDAR-RULES.md](../CALENDAR-RULES.md).
+
+### Script behavior reference
+
+- Operates only inside `## One-off events by month`. Recurring weekly /
+  monthly / quarterly sections are skipped.
 - Decision is on **end-date** for date spans (so `2026-06-29 – 2026-07-03`
   retires under July when 2026-07-04+ arrives).
 - Drops `### Month Year` subheadings that end up empty in `CALENDAR.md`.
 - New month sections in `CALENDAR-PAST.md` are inserted chronologically.
 - Idempotent: when nothing is expired, both files are left byte-identical
   (no spurious whitespace churn).
-- The `[[memory/YYYY-MM-DD.md]]`-tail enrichments on moved lines are a manual
-  judgment call; the script intentionally does not touch the line body.
+- The `[[memory/YYYY-MM-DD.md]]`-tail enrichments on moved lines are a
+  manual judgment call; the script intentionally does not touch the
+  line body.
 
 Tests: `uv run pytest scripts/test_retire_calendar.py`.
 
