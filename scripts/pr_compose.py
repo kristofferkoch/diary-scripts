@@ -787,29 +787,57 @@ def _future_candidates(candidates: list[dict],
 
 def _render_memory_section(writer: dict, today: date | None = None) -> tuple[str, str]:
     """Build (heading, body) for the daily-memory-file diff. Prepends the
-    earliest future date to the heading so the chronological structure
-    of the daily file is preserved; appends a Datoer block listing all
-    future candidates with overlap markers. Both deterministic — no
-    model call. Returns the writer's existing heading/body unchanged
-    if there are no future candidates."""
+    earliest future date to the heading so the daily file groups by
+    date naturally. Body is the writer's narrative untouched — the
+    structured calendar list lives in CALENDAR.md (inserted by
+    `_insert_calendar_events`), not the memory file."""
     heading = writer["memory_heading"]
     body = writer["memory_body"]
     future = sorted(
         _future_candidates(writer.get("calendar_candidates") or [], today),
         key=lambda c: c["date"],
     )
-    if not future:
-        return heading, body
-
-    heading = f"{future[0]['date']} — {heading}"
-    lines = ["", "**Datoer:**", ""]
-    for c in future:
-        marker = " _(allerede i CALENDAR.md)_" if c.get("already_in_calendar") else ""
-        title = c.get("title") or ""
-        sep = f" — {title}" if title else ""
-        lines.append(f"- **{c['date']}**{sep}{marker}")
-    body = body.rstrip() + "\n" + "\n".join(lines) + "\n"
+    if future:
+        heading = f"{future[0]['date']} — {heading}"
     return heading, body
+
+
+def _calendar_event_line(candidate: dict, thread_id: str) -> str:
+    """Format one future candidate as a CALENDAR.md parseable event line
+    per CALENDAR-RULES.md. The (Kilde: thread:...) tail gives the
+    reviewer + future-me a direct link back to the source mail."""
+    date_str = candidate["date"]
+    title = candidate.get("title") or "(uten tittel)"
+    return f"- **{date_str}** — {title}. (Kilde: mail thread:{thread_id}.)\n"
+
+
+def _insert_calendar_events(candidates: list[dict], calendar_path: Path,
+                            thread_id: str,
+                            today: date | None = None) -> int:
+    """Merge future candidates into CALENDAR.md under their month
+    sections. Returns count of events inserted. Idempotent w.r.t.
+    file-on-disk shape — uses retire_calendar's parser so the file
+    stays well-formed for the daily sjekk-flow.
+
+    All future candidates are inserted regardless of `already_in_calendar`
+    — overlap markers in the PR description tell the reviewer which
+    might be duplicates. Missing-from-diff is unrecoverable; redundant-
+    in-diff is one delete."""
+    from scripts.retire_calendar import parse as _parse_cal, ensure_section, MONTHS_EN
+    future = _future_candidates(candidates, today)
+    if not future:
+        return 0
+    doc = _parse_cal(calendar_path.read_text())
+    inserted = 0
+    for c in sorted(future, key=lambda x: x["date"]):
+        start, _end = _parse_candidate_date(c["date"])
+        if start is None:
+            continue
+        section = ensure_section(doc, MONTHS_EN[start.month - 1], start.year)
+        section.insert_event_sorted(_calendar_event_line(c, thread_id))
+        inserted += 1
+    calendar_path.write_text(doc.render())
+    return inserted
 
 
 def make_branch_name(keyword: str, today: date | None = None,
@@ -932,9 +960,17 @@ def file_pr_for_message(
     pat = _bot_pat()
     worktree_path = Path(tempfile.mkdtemp(prefix="prcomp-"))
     try:
+        # Branch from origin/master, not local master. The user's local
+        # work-in-progress (unpushed commits) shouldn't ride along in
+        # bot PRs — that conflates two streams. Fetch first so origin
+        # ref is current; it's a no-op when nothing changed.
+        subprocess.run(
+            ["git", "-C", str(repo_root), "fetch", "--quiet", "origin", "master"],
+            check=True, capture_output=True, text=True,
+        )
         subprocess.run(
             ["git", "-C", str(repo_root), "worktree", "add", "-b", branch,
-             str(worktree_path), "master"],
+             str(worktree_path), "origin/master"],
             check=True, capture_output=True, text=True,
         )
 
@@ -948,8 +984,16 @@ def file_pr_for_message(
         )
         memory_path.write_text(new_content)
 
+        files_to_add = [str(memory_rel)]
+        calendar_rel = Path("CALENDAR.md")
+        n_events = _insert_calendar_events(
+            candidates, worktree_path / calendar_rel, thread_id, today,
+        )
+        if n_events:
+            files_to_add.append(str(calendar_rel))
+
         subprocess.run(
-            ["git", "-C", str(worktree_path), "add", str(memory_rel)],
+            ["git", "-C", str(worktree_path), "add"] + files_to_add,
             check=True,
         )
         commit_msg = (

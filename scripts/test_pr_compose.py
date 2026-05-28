@@ -596,7 +596,10 @@ def test_render_memory_section_prepends_earliest_future_date_to_heading() -> Non
     assert heading == "2026-06-10 — Sommerfest Spiker'n"
 
 
-def test_render_memory_section_appends_datoer_block() -> None:
+def test_render_memory_section_body_passthrough() -> None:
+    """Memory body is the writer's narrative untouched. Structured event
+    list lives in CALENDAR.md now (via _insert_calendar_events), not
+    duplicated in the memory file as a Datoer block."""
     from datetime import date as _d
     from scripts.pr_compose import _render_memory_section
     writer = {
@@ -605,20 +608,16 @@ def test_render_memory_section_appends_datoer_block() -> None:
         "calendar_candidates": [
             {"date": "2026-06-10", "title": "Sommerfest", "already_in_calendar": True,
              "evidence": "10. juni"},
-            {"date": "2026-06-15", "title": "RSVP-frist", "already_in_calendar": False,
-             "evidence": "innen 15.6"},
         ],
     }
     _, body = _render_memory_section(writer, today=_d(2026, 5, 28))
-    assert "**Datoer:**" in body
-    assert "- **2026-06-10** — Sommerfest _(allerede i CALENDAR.md)_" in body
-    assert "- **2026-06-15** — RSVP-frist" in body
-    assert "_(allerede i CALENDAR.md)_" not in body.split("RSVP-frist")[1]  # marker only on overlap
+    assert body == "Velkommen.\n"  # unchanged
+    assert "Datoer:" not in body
 
 
-def test_render_memory_section_filters_past_dates() -> None:
+def test_render_memory_section_filters_past_dates_from_heading() -> None:
     """Pia/Examplefund-style mails reference past transaction dates — those
-    shouldn't pollute the heading or Datoer block."""
+    shouldn't pollute the heading either."""
     from datetime import date as _d
     from scripts.pr_compose import _render_memory_section
     writer = {
@@ -626,27 +625,142 @@ def test_render_memory_section_filters_past_dates() -> None:
         "memory_body": "Skattepapirer.\n",
         "calendar_candidates": [
             {"date": "2025-04-01", "title": "Kjøp", "evidence": "..."},
-            {"date": "2025-10-30", "title": "Realisasjon", "evidence": "..."},
         ],
     }
-    heading, body = _render_memory_section(writer, today=_d(2026, 5, 28))
+    heading, _ = _render_memory_section(writer, today=_d(2026, 5, 28))
     assert heading == "User Holding AS - 2025"  # untouched, no future dates
-    assert "**Datoer:**" not in body  # no future dates to list
 
 
-def test_render_memory_section_handles_empty_title() -> None:
-    """Pia-style candidates often have empty titles (model returned null);
-    the renderer should still produce a readable bullet."""
+# ---------- writer: _calendar_event_line / _insert_calendar_events ----------
+
+def test_calendar_event_line_basic() -> None:
+    from scripts.pr_compose import _calendar_event_line
+    line = _calendar_event_line(
+        {"date": "2026-06-03", "title": "Gulvet primes"},
+        thread_id="deadbeef",
+    )
+    assert line == "- **2026-06-03** — Gulvet primes. (Kilde: mail thread:deadbeef.)\n"
+
+
+def test_calendar_event_line_parses_back_to_original_date() -> None:
+    """The emitted line must satisfy retire_calendar's parser contract —
+    that's the same parser the daily sjekk-flow + webvisning use."""
+    import datetime as _dt
+    from scripts.pr_compose import _calendar_event_line
+    from scripts.retire_calendar import event_dates
+    line = _calendar_event_line(
+        {"date": "2026-06-03", "title": "Gulvet primes"}, thread_id="x",
+    )
+    assert event_dates(line) == (_dt.date(2026, 6, 3), _dt.date(2026, 6, 3))
+
+
+def test_calendar_event_line_empty_title_uses_placeholder() -> None:
+    """Pia-style null titles must still produce a parseable line — the
+    parser keys on the date format, not the title text."""
+    from scripts.pr_compose import _calendar_event_line
+    from scripts.retire_calendar import event_dates
+    line = _calendar_event_line(
+        {"date": "2026-06-03", "title": ""}, thread_id="x",
+    )
+    assert "(uten tittel)" in line
+    assert event_dates(line) is not None
+
+
+def test_insert_calendar_events_creates_month_section(tmp_path) -> None:
+    """No June section yet → ensure_section creates one chronologically."""
     from datetime import date as _d
-    from scripts.pr_compose import _render_memory_section
-    writer = {
-        "memory_heading": "x",
-        "memory_body": "y\n",
-        "calendar_candidates": [{"date": "2026-06-10", "title": "", "evidence": "10/6"}],
-    }
-    _, body = _render_memory_section(writer, today=_d(2026, 5, 28))
-    assert "- **2026-06-10**" in body
-    assert "— —" not in body  # no stray double-dash from empty title
+    from scripts.pr_compose import _insert_calendar_events
+    cal = tmp_path / "CALENDAR.md"
+    cal.write_text(
+        "# Calendar\n\n"
+        "## One-off events by month\n\n"
+        "### May 2026\n\n"
+        "- **2026-05-20** — Already there.\n"
+    )
+    n = _insert_calendar_events(
+        [{"date": "2026-06-10", "title": "Ny event"}],
+        cal, thread_id="abc", today=_d(2026, 5, 28),
+    )
+    assert n == 1
+    text = cal.read_text()
+    assert "### June 2026" in text
+    assert "- **2026-06-10** — Ny event. (Kilde: mail thread:abc.)" in text
+    assert "- **2026-05-20** — Already there." in text  # existing preserved
+
+
+def test_insert_calendar_events_inserts_chronologically(tmp_path) -> None:
+    """Within a month, new events go in date order so the file stays
+    readable."""
+    from datetime import date as _d
+    from scripts.pr_compose import _insert_calendar_events
+    cal = tmp_path / "CALENDAR.md"
+    cal.write_text(
+        "# Calendar\n\n"
+        "## One-off events by month\n\n"
+        "### June 2026\n\n"
+        "- **2026-06-01** — First.\n"
+        "- **2026-06-15** — Last.\n"
+    )
+    _insert_calendar_events(
+        [{"date": "2026-06-08", "title": "Middle"}],
+        cal, thread_id="x", today=_d(2026, 5, 28),
+    )
+    lines = cal.read_text().splitlines()
+    june_lines = [ln for ln in lines if "2026-06-" in ln]
+    dates_in_order = [ln.split("**")[1] for ln in june_lines]
+    assert dates_in_order == ["2026-06-01", "2026-06-08", "2026-06-15"]
+
+
+def test_insert_calendar_events_skips_past_dates(tmp_path) -> None:
+    """Past dates (Pia's 2025-04-01 etc.) must not be inserted —
+    CALENDAR.md is the active forward calendar, past goes to
+    CALENDAR-PAST.md via retire_calendar."""
+    from datetime import date as _d
+    from scripts.pr_compose import _insert_calendar_events
+    cal = tmp_path / "CALENDAR.md"
+    cal.write_text(
+        "# Calendar\n\n## One-off events by month\n\n### May 2026\n\n- **2026-05-29** — x.\n"
+    )
+    original = cal.read_text()
+    n = _insert_calendar_events(
+        [{"date": "2025-04-01", "title": "Past transaction"}],
+        cal, thread_id="x", today=_d(2026, 5, 28),
+    )
+    assert n == 0
+    assert cal.read_text() == original  # byte-identical
+
+
+def test_insert_calendar_events_no_candidates_no_write(tmp_path) -> None:
+    """No future candidates → don't touch the file at all (idempotency
+    matters; we don't want a write-then-diff that's actually a no-op)."""
+    from datetime import date as _d
+    from scripts.pr_compose import _insert_calendar_events
+    cal = tmp_path / "CALENDAR.md"
+    cal.write_text("# Calendar\n\n## One-off events by month\n")
+    original_mtime = cal.stat().st_mtime_ns
+    n = _insert_calendar_events([], cal, thread_id="x", today=_d(2026, 5, 28))
+    assert n == 0
+    assert cal.stat().st_mtime_ns == original_mtime  # untouched
+
+
+def test_insert_calendar_events_handles_overlap_candidates(tmp_path) -> None:
+    """already_in_calendar=True candidates still get inserted —
+    overlap detection is purely advisory in the PR description. Skipping
+    here would silently drop unrelated events that just happen to share
+    a date with something else."""
+    from datetime import date as _d
+    from scripts.pr_compose import _insert_calendar_events
+    cal = tmp_path / "CALENDAR.md"
+    cal.write_text(
+        "# Calendar\n\n## One-off events by month\n\n### June 2026\n\n"
+        "- **2026-06-04 18:00** — Fotballkamp Robin.\n"
+    )
+    n = _insert_calendar_events(
+        [{"date": "2026-06-04", "title": "Avretting", "already_in_calendar": True}],
+        cal, thread_id="x", today=_d(2026, 5, 28),
+    )
+    assert n == 1
+    assert "- **2026-06-04** — Avretting" in cal.read_text()
 
 
 def test_compose_pr_falls_back_to_subject_when_title_null() -> None:
