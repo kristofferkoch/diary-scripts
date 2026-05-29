@@ -60,6 +60,19 @@ point. It's **hand-maintained** and easy to forget — the cursor has
 drifted multiple times because earlier passes wrote the daily note but
 never bumped the JSON.
 
+0. **Check when mail last synced — FIRST.** Before reading the cursor,
+   confirm the local index is current, otherwise you triage a stale
+   snapshot and miss mail that's already on the server.
+   `systemctl --user show mail-sync.service -p ExecMainExitTimestamp --value`
+   (or `systemctl --user status mail-sync.service`) shows the last run;
+   the timer fires every 15 min. If the last sync is older than that, or
+   the user says mail "just arrived", force one and wait for it to finish
+   before continuing: `systemctl --user start mail-sync.service` (blocks
+   until `mbsync` + `notmuch new` complete — look for `No new mail` /
+   `Processed N files` in the journal). Only then read the cursor. Lesson
+   2026-05-29: triaged a cruise booking, then more mail (date-change +
+   payment link) landed seconds later — re-syncing first each pass caught
+   the full thread instead of a half-state.
 1. **Read the cursor** — `uv run scripts/mailshow.py --since-cursor --headers-only`
    (or add a filter: `--since-cursor 'from:astrid'`). The script reads
    `memory/mail-state.json` itself and prints the cursor it used. Anything
