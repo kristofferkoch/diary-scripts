@@ -1,73 +1,52 @@
 #!/bin/sh
-# /mnt/us/dashboard/dashboard.sh
-# Periodically fetch a PNG and render it via eips.
+# /mnt/us/dashboard/dashboard.sh  —  THIN BOOTSTRAP
 #
-# Goals:
-#   - Be invisible. Conditional-GET (If-None-Match / ETag) skips the render
-#     entirely when the server says nothing has changed.
-#   - Don't flash. Use eips's partial-update mode by default; do a full
-#     refresh once per day after 03:00 (or on first run) to clear ghosting.
-#   - Sip battery. Between refreshes the device suspends to RAM (rtcwake on
-#     the SNVS RTC); e-ink holds the last frame at ~0 power. Without this the
-#     SoC + WiFi idle awake 24/7 and the battery dies in under a day.
+# Device-side primitives ONLY (WiFi resume + RTC suspend + fetch-and-exec).
+# All policy — what to render, the refresh cadence, maintenance/stay-awake —
+# lives in control.sh, which this loop fetches fresh from the server on every
+# wake and executes. So behaviour is changed server-side (edit control.sh in
+# the diary repo) without ever redeploying this file. This file should change
+# rarely; when it must, flip the server maintenance flag so the device stays
+# awake and is reachable for an SSH deploy (no wake-window racing).
 #
-# NOTE: the canonical copy of this script lives in the diary repo at
-# scripts/kindle_dashboard/device/dashboard.sh. Deploy to the Kindle at
-# /mnt/us/dashboard/dashboard.sh. The older exampleuser/jailbreak-kindle
-# repo on the dev host is stale (predates ETag + suspend); resync it from here.
+# Canonical copy: diary repo scripts/kindle_dashboard/device/dashboard.sh.
+# Runs under BusyBox ash. Deploy to /mnt/us/dashboard/dashboard.sh.
+#
+# SECURITY: this curl|exec's a script as root over plaintext LAN HTTP. That
+# is RCE for anyone who can serve on $BASE on the LAN — acceptable for a
+# trusted home LAN, not beyond it. The marker check below only guards against
+# executing a truncated download or an error page, not a hostile server.
+#
+# Each wake:
+#   1. wifi_up                      — re-associate wlan0 after resume
+#   2. fetch_control                — GET $BASE/control.sh, verify marker
+#   3. sh control.sh                — kiosk-kill, PNG fetch+render, and write
+#                                     the next-sleep decision to $DECISION
+#   4. suspend $DECISION seconds    — or, if it's 0, stay awake (maintenance)
+# Failures never brick the loop: a bad control fetch just renders nothing this
+# cycle and retries after $FALLBACK_INTERVAL.
 
 CONFIG=/mnt/us/dashboard/dashboard.conf
 [ -f "$CONFIG" ] && . "$CONFIG"
-
-URL="${URL:-https://example.invalid/dashboard.png}"
-KIOSK="${KIOSK:-0}"
+BASE="${BASE:-http://10.0.0.206:8801}"
+RTC="${RTC:-rtc1}"                       # SNVS RTC; rtc0 (bd71827) has no wakeup
 BOOT_RETRY="${BOOT_RETRY:-15}"
-RTC="${RTC:-rtc1}"          # SNVS RTC — rtc0 (bd71827) has no wakeup capability
-
-# Wake cadence is time-of-day dependent. The device can't be poked over the
-# network while suspended (WiFi is off), so the precipitation warning and
-# after-sjekk updates rely on the device polling often enough. We wake every
-# PEAK_INTERVAL during the rain-relevant outdoor windows (so a rain change
-# shows within that window) and OFFPEAK_INTERVAL otherwise to save battery.
-# PEAK_WINDOWS is space-separated half-open local-hour ranges "start-end".
-PEAK_INTERVAL="${PEAK_INTERVAL:-300}"        # 5 min during peak windows
-OFFPEAK_INTERVAL="${OFFPEAK_INTERVAL:-900}"  # 15 min otherwise
-PEAK_WINDOWS="${PEAK_WINDOWS:-6-9 15-20}"    # 06:00-09:00 and 15:00-20:00
-
-# next_interval — seconds to suspend until the next wake, per current hour.
-next_interval() {
-  h=$(date '+%H'); h=${h#0}; [ -z "$h" ] && h=0   # strip leading 0 (octal-safe)
-  for w in $PEAK_WINDOWS; do
-    s=${w%-*}; e=${w#*-}
-    if [ "$h" -ge "$s" ] && [ "$h" -lt "$e" ]; then
-      echo "$PEAK_INTERVAL"; return
-    fi
-  done
-  echo "$OFFPEAK_INTERVAL"
-}
-TMP=/tmp/dashboard.png
+FALLBACK_INTERVAL="${FALLBACK_INTERVAL:-900}"
+MAINT_SLEEP="${MAINT_SLEEP:-30}"
+KIOSK="${KIOSK:-1}"
+SIGN_PUBKEY="${SIGN_PUBKEY:-/mnt/us/dashboard/sign-ec.pub}"   # ECDSA P-256 PEM
+export BASE KIOSK                        # control.sh inherits these
+CONTROL=/tmp/control.sh
+DECISION=/tmp/kindle_decision
 LOG=/mnt/us/dashboard/dashboard.log
-ETAG_FILE=/mnt/us/dashboard/last.etag
-HEADERS_FILE=/tmp/dashboard.headers
-FULL_REFRESH_DONE_FILE=/mnt/us/dashboard/last-full-refresh
-FULL_REFRESH_HOUR=3
 
-log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
+log() { echo "$(date '+%F %T') [boot] $*" >> "$LOG"; }
 [ -f "$LOG" ] && { tail -n 500 "$LOG" > "$LOG.t" && mv "$LOG.t" "$LOG"; }
 mkdir -p "$(dirname "$LOG")"
-log "starting (URL=$URL peak=${PEAK_INTERVAL}s offpeak=${OFFPEAK_INTERVAL}s windows='$PEAK_WINDOWS' kiosk=$KIOSK rtc=$RTC)"
+log "bootstrap starting (base=$BASE rtc=$RTC)"
 
-kiosk_kill() {
-  [ "$KIOSK" = "1" ] || return 0
-  for svc in framework pillow statusbar webreader appmgrd; do
-    initctl stop "$svc" >/dev/null 2>&1
-  done
-}
-
-# wifi_up — re-associate wlan0 after a resume. Proven ~2 s via `wpa_cli
-# reconnect`; escalates to an interface bounce if no IP within the grace
-# window. Never blocks the loop forever — returns regardless so the next
-# fetch (and the next suspend/wake) can retry.
+# Re-associate wlan0 after a resume. ~2-3 s via wpa_cli reconnect; escalates
+# to an interface bounce if slow. Never blocks forever.
 wifi_up() {
   wpa_cli reconnect >/dev/null 2>&1
   i=0
@@ -75,7 +54,7 @@ wifi_up() {
     ifconfig wlan0 2>/dev/null | grep -q "inet addr" && return 0
     sleep 2; i=$((i+2))
   done
-  log "wlan0 slow to return — bouncing interface"
+  log "wlan0 slow — bouncing interface"
   ifconfig wlan0 down >/dev/null 2>&1; sleep 1; ifconfig wlan0 up >/dev/null 2>&1
   wpa_cli reconnect >/dev/null 2>&1
   i=0
@@ -83,122 +62,73 @@ wifi_up() {
     ifconfig wlan0 2>/dev/null | grep -q "inet addr" && return 0
     sleep 2; i=$((i+2))
   done
-  log "!! wlan0 did not return within grace window — will retry next cycle"
+  log "!! wlan0 did not return — will retry next cycle"
   return 1
 }
 
-# suspend_for SECS — suspend to RAM for SECS, waking on the SNVS RTC. The
-# e-ink image persists across suspend at ~0 power. WiFi is torn down by the
-# suspend and brought back by wifi_up() on resume. Falls back to plain sleep
-# if rtcwake fails so the loop never busy-spins.
+# Suspend to RAM for $1 seconds, waking on the SNVS RTC. E-ink holds the
+# frame at ~0 W. The power button (snvs-powerkey) also wakes early. Falls
+# back to plain sleep if rtcwake fails so the loop never busy-spins.
 suspend_for() {
   secs="$1"
   if rtcwake -d "$RTC" -m mem -s "$secs" >/dev/null 2>&1; then
     log "resumed from suspend (${secs}s)"
-    wifi_up
   else
-    log "rtcwake failed (rtc=$RTC) — sleeping ${secs}s awake instead"
+    log "rtcwake failed (rtc=$RTC) — sleeping ${secs}s awake"
     sleep "$secs"
   fi
 }
 
-# fetch — sends If-None-Match, returns:
-#   0 = new content saved to $TMP (and $ETAG_FILE updated)
-#   1 = error
-#   2 = 304 Not Modified (no render needed)
-fetch() {
-  etag=""
-  [ -f "$ETAG_FILE" ] && etag=$(cat "$ETAG_FILE")
-  rm -f "$HEADERS_FILE"
-  if [ -n "$etag" ]; then
-    status=$(curl -sSL --max-time 30 \
-                  -H "If-None-Match: $etag" \
-                  -D "$HEADERS_FILE" \
-                  -w '%{http_code}' \
-                  -o "$TMP.new" "$URL")
-  else
-    status=$(curl -sSL --max-time 30 \
-                  -D "$HEADERS_FILE" \
-                  -w '%{http_code}' \
-                  -o "$TMP.new" "$URL")
-  fi
-  rc=$?
-  if [ $rc -ne 0 ]; then
-    log "curl failed rc=$rc"
+# Fetch control.sh and AUTHENTICATE it before trusting it. The server signs
+# the exact served bytes with an ECDSA P-256 key (X-Control-Sig: base64 DER,
+# SHA-256); we verify against the public key deployed over SSH. A bad
+# network fetch, missing/forged signature, or missing marker all return 1 so
+# the bootstrap skips execution this cycle. Returns 0 only on a verified
+# script.
+fetch_control() {
+  hdr=/tmp/control.hdr; sig=/tmp/control.sig
+  rm -f "$CONTROL.new" "$hdr" "$sig"
+  curl -fsS --max-time 30 -D "$hdr" -o "$CONTROL.new" "$BASE/control.sh" 2>/dev/null || return 1
+  [ -s "$CONTROL.new" ] || return 1
+  head -1 "$CONTROL.new" | grep -q '^#!CONTROL/' || { log "control.sh missing marker — refusing"; return 1; }
+  if [ ! -f "$SIGN_PUBKEY" ]; then
+    log "!! signing pubkey $SIGN_PUBKEY missing — refusing unsigned control"
     return 1
   fi
-  case "$status" in
-    304) return 2 ;;
-    200)
-      if [ ! -s "$TMP.new" ]; then
-        log "200 but empty body"
-        return 1
-      fi
-      mv "$TMP.new" "$TMP"
-      grep -i '^etag:' "$HEADERS_FILE" \
-        | awk '{print $2}' | tr -d '\r' > "$ETAG_FILE"
-      return 0
-      ;;
-    *)
-      log "fetch unexpected status=$status"
-      return 1
-      ;;
-  esac
-}
-
-needs_full_refresh() {
-  today=$(date '+%Y-%m-%d')
-  if [ ! -f "$FULL_REFRESH_DONE_FILE" ]; then
-    return 0
-  fi
-  last=$(cat "$FULL_REFRESH_DONE_FILE")
-  if [ "$last" = "$today" ]; then
+  grep -i '^x-control-sig:' "$hdr" | awk '{print $2}' | tr -d '\r' | openssl base64 -d -A > "$sig" 2>/dev/null
+  [ -s "$sig" ] || { log "!! no X-Control-Sig header — refusing"; return 1; }
+  if ! openssl dgst -sha256 -verify "$SIGN_PUBKEY" -signature "$sig" "$CONTROL.new" >/dev/null 2>&1; then
+    log "!! control.sh signature verify FAILED — refusing"
     return 1
   fi
-  hour=$(date '+%H')
-  if [ "$hour" -ge "$FULL_REFRESH_HOUR" ] 2>/dev/null; then
-    return 0
-  fi
-  return 1
+  mv "$CONTROL.new" "$CONTROL"
+  return 0
 }
 
-render() {
-  if needs_full_refresh; then
-    eips -c >/dev/null 2>&1
-    eips -g "$1" -f >/dev/null 2>&1
-    date '+%Y-%m-%d' > "$FULL_REFRESH_DONE_FILE"
-    log "render (full)"
-  else
-    eips -g "$1" >/dev/null 2>&1
-    log "render (partial)"
-  fi
-}
-
-first_ok=0
+booted=0
 while :; do
-  kiosk_kill
-  fetch
-  rc=$?
-  case "$rc" in
-    0)
-      render "$TMP"
-      log "OK $(wc -c < "$TMP") bytes"
-      first_ok=1
-      ;;
-    2)
-      log "unchanged (304)"
-      first_ok=1
-      ;;
-    *)
-      log "ERROR fetch failed url=$URL"
-      ;;
-  esac
-  lipc-set-prop com.lab126.powerd flIntensity 0 >/dev/null 2>&1
-  if [ "$first_ok" = "0" ]; then
-    # Still booting / WiFi associating (cold assoc takes 4-6 min). Stay awake
-    # with cheap retries until the first successful fetch.
-    sleep "$BOOT_RETRY"
+  wifi_up
+  rm -f "$DECISION"
+  if fetch_control; then
+    sh "$CONTROL"            # renders + writes $DECISION
+    booted=1
   else
-    suspend_for "$(next_interval)"
+    log "control fetch failed (base=$BASE)"
+  fi
+
+  if [ "$booted" = "0" ]; then
+    # Never fetched successfully yet (boot / WiFi still associating, 4-6 min
+    # cold). Stay awake and retry quickly rather than suspend.
+    sleep "$BOOT_RETRY"
+    continue
+  fi
+
+  secs=$(cat "$DECISION" 2>/dev/null)
+  case "$secs" in ''|*[!0-9]*) secs="$FALLBACK_INTERVAL" ;; esac
+  if [ "$secs" = "0" ]; then
+    log "maintenance — staying awake (${MAINT_SLEEP}s tick)"
+    sleep "$MAINT_SLEEP"
+  else
+    suspend_for "$secs"
   fi
 done

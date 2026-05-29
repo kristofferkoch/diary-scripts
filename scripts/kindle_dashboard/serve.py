@@ -1,9 +1,11 @@
 """FastAPI HTTP server for the Kindle dashboard.
 
 Endpoints:
-    GET /              - HTML preview, embeds the PNG (handy on a phone).
-    GET /dashboard.png - the live PNG the Kindle polls.
-    GET /healthz       - liveness, used by caddy + manual checks.
+    GET /                    - HTML preview, embeds the PNG (handy on a phone).
+    GET /dashboard.png       - the live PNG the Kindle polls.
+    GET /control.sh          - signed device control script (X-Control-Sig).
+    GET /control/maintenance - "1"/"0": should the device stay awake?
+    GET /healthz             - liveness, used by caddy + manual checks.
 
 Binding:
     Listens on 0.0.0.0:8801 so the Kindle (LAN, no tailnet) can reach it.
@@ -17,11 +19,13 @@ already on the family's shared calendar. LAN bind is intentional.
 from __future__ import annotations
 
 import asyncio
+import base64
 import datetime as _dt
 import hashlib
 import json
 import logging
 import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +38,71 @@ from . import render, view
 log = logging.getLogger("kindle_dashboard")
 
 app = FastAPI(title="kindle_dashboard", docs_url=None, redoc_url=None)
+
+# --- device control plane ---------------------------------------------------
+#
+# control.sh is fetched + executed by the wall Kindle on every wake (see
+# device/dashboard.sh). We serve the script body with an ECDSA P-256
+# SHA-256 signature in the X-Control-Sig header; the device verifies it
+# against the public key deployed over SSH before running anything, so the
+# curl|exec is authenticated rather than trusted-because-LAN. Edit control.sh
+# in the repo and it goes live on the device's next wake.
+#
+# The private key lives OUTSIDE the repo (it's a credential). Override with
+# $KINDLE_SIGN_KEY; default ~/.config/kindle-dashboard/sign-ec.key.
+# Maintenance: touch $KINDLE_MAINT_FLAG (default the repo MAINTENANCE file)
+# to make the device stay awake on its next wake — a reachable window for
+# SSH deploys without racing the ~10 s suspend cycle. rm it to resume normal
+# suspend.
+_CONTROL_PATH = Path(__file__).parent / "control.sh"
+_SIGN_KEY = Path(
+    os.environ.get("KINDLE_SIGN_KEY", Path.home() / ".config/kindle-dashboard/sign-ec.key")
+)
+_MAINT_FLAG = Path(os.environ.get("KINDLE_MAINT_FLAG", Path(__file__).parent / "MAINTENANCE"))
+
+
+def _sign_control(data: bytes) -> str | None:
+    """ECDSA-SHA256 sign `data`, return base64 DER. None on any failure."""
+    if not _SIGN_KEY.exists():
+        log.error("signing key missing at %s — control.sh served UNSIGNED", _SIGN_KEY)
+        return None
+    try:
+        p = subprocess.run(
+            ["openssl", "dgst", "-sha256", "-sign", str(_SIGN_KEY)],
+            input=data,
+            capture_output=True,
+            timeout=10,
+        )
+    except Exception:
+        log.exception("openssl sign invocation failed")
+        return None
+    if p.returncode != 0:
+        log.error("openssl sign rc=%s stderr=%r", p.returncode, p.stderr[:200])
+        return None
+    return base64.b64encode(p.stdout).decode("ascii")
+
+
+@app.get("/control.sh")
+def control_sh() -> Response:
+    """Serve the signed device control script (text + X-Control-Sig header)."""
+    try:
+        body = _CONTROL_PATH.read_bytes()
+    except FileNotFoundError:
+        return Response(status_code=404, content=b"# control.sh missing\n",
+                        media_type="text/plain")
+    headers = {"Cache-Control": "no-store"}
+    sig = _sign_control(body)
+    if sig is not None:
+        headers["X-Control-Sig"] = sig
+    return Response(content=body, media_type="text/x-shellscript", headers=headers)
+
+
+@app.get("/control/maintenance")
+def control_maintenance() -> Response:
+    """1 if a maintenance window is requested (device should stay awake), else 0."""
+    val = b"1\n" if _MAINT_FLAG.exists() else b"0\n"
+    return Response(content=val, media_type="text/plain",
+                    headers={"Cache-Control": "no-store"})
 
 _TEMPLATES = Environment(
     loader=FileSystemLoader(Path(__file__).parent / "templates"),
