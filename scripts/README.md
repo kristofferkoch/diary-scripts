@@ -334,10 +334,24 @@ last time we wrote a digest".
    Prints a one-line `new records: total=N, by_kind={...}` summary on
    stderr; appends new records to `memory/spond/YYYY-MM-DD.jsonl`.
    Idempotent — re-running with no new activity is a no-op.
-2. **Triage** — `uv run scripts/spondshow.py --since-cursor
+2. **Triage new records** — `uv run scripts/spondshow.py --since-cursor
    --headers-only` for a one-line summary per record; drop
    `--headers-only` to see full JSON bodies. Filter with `--kind
    chat|event|post` or pin to `--chat <id>` / `--event <id>`.
+   Events are tracked by a **content key** (`event_activity_key`), so an
+   RSVP change, reschedule, or cancellation on an already-seen event
+   re-emits and shows up here — set `$SPOND_RSVP_MEMBER_ID` (exported in
+   user's shell) so the key folds in the tracked member's own response.
+   If it's unset, `spond_sync.py` prints a `!!` warning and only
+   reschedule/cancellation are caught, not RSVP. (Before 2026-05-29
+   events used a flat id-only seen-set that swallowed RSVP changes
+   entirely — see `test_spond_sync.py` for the regression.)
+2b. **Belt-and-suspenders: list upcoming events each pass** — `uv run
+   scripts/spondshow.py --kind event --future --headers-only` and
+   reconcile every `[?]`/`[✓]`/`[✗]` RSVP marker against `CALENDAR.md`. A
+   marker that disagrees with the calendar (or a calendar line still
+   saying "RSVP: svar?" for an event user has since answered) is the
+   signal to update. Catches anything the cursor logic misses.
 3. **Distil into the daily note** — for *actionable* items
    (kampendringer, oppmøtefrister, betalingskrav, foreldredugnad), add a
    `## Spond` section to today's `memory/YYYY-MM-DD.md`. Posts from the
