@@ -37,6 +37,7 @@ def build_context(*, now: _dt.datetime | None = None) -> dict[str, Any]:
 
     ctx: dict[str, Any] = {
         "today_label": _nb_date(today),
+        "week": today.isocalendar().week,
         "rendered_at": now.strftime("%H:%M"),
         "build_tag": now.strftime("%Y-%m-%d %H:%M"),
         "days": [],

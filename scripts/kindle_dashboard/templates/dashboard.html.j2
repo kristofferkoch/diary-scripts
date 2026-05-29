@@ -25,6 +25,8 @@
   header h1 { margin: 0; font-size: 92px; font-weight: 800; letter-spacing: -1px; }
   header .now { font-size: 56px; font-weight: 700;
                 font-variant-numeric: tabular-nums; }
+  header .week { font-size: 56px; font-weight: 700;
+                 font-variant-numeric: tabular-nums; }
 
   main {
     display: grid;
@@ -241,6 +243,7 @@
 
   <header>
     <h1>{{ today_label }}</h1>
+    <span class="week">Uke {{ week }}</span>
   </header>
 
   <main>
