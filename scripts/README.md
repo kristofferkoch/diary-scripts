@@ -449,6 +449,37 @@ Today's events (with end-date == today) stay in `CALENDAR.md` until the
 day is over. Format / parser-contract is identical in both files; see
 [../CALENDAR-RULES.md](../CALENDAR-RULES.md).
 
+### Force a Kindle refresh — last step of any sjekk that changed the display
+
+The wall Kindle renders the [kindle_dashboard](#kindle_dashboard--wall-display-png-generator)
+PNG, whose calendar and spond blocks are scraped live from `CALENDAR.md`
+and `memory/spond/*.jsonl`. The dashboard *generator* picks up edits on
+its next request automatically — but the **device** only re-fetches on
+its hourly poll, or when the precipitation watcher pokes it (rain only).
+So a sjekk that added/retired a calendar line or changed Spond RSVP state
+won't show on the wall for up to an hour unless you force it:
+
+```bash
+ssh kindle 'initctl restart dashboard'
+```
+
+Do this at the **end** of the sjekk, after all CALENDAR.md / spond
+changes are committed (the generator reads the files fresh, so no
+`kindle-dashboard` service restart is needed — just poke the device).
+Skip it only when the pass changed nothing the dashboard renders
+(mail-only triage, finance, etc.). Lesson 2026-05-29: poked the Kindle
+mid-sjekk *before* adding the next day's training to CALENDAR.md, so the
+wall display stayed stale until re-poked.
+
+**This poke should become program logic, not an LLM step.** The manual
+`ssh` above is a stopgap. Once the workspace moves to a proper dev/prod
+split, the refresh belongs in code: extend the watcher (or a thin
+git/file hook) to poke the Kindle whenever `CALENDAR.md` or
+`memory/spond/*.jsonl` actually change — the same fire-and-forget
+`_poke_kindle()` the precipitation watcher already uses, just triggered
+by content drift instead of rain. The model shouldn't be the thing that
+remembers to refresh a wall display; deterministic logic should.
+
 ### Script behavior reference
 
 - Operates only inside `## One-off events by month`. Recurring weekly /
