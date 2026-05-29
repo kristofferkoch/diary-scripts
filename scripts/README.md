@@ -479,10 +479,22 @@ ssh kindle 'initctl restart dashboard'
 Do this at the **end** of the sjekk, after all CALENDAR.md / spond
 changes are committed (the generator reads the files fresh, so no
 `kindle-dashboard` service restart is needed — just poke the device).
-Skip it only when the pass changed nothing the dashboard renders
-(mail-only triage, finance, etc.). Lesson 2026-05-29: poked the Kindle
-mid-sjekk *before* adding the next day's training to CALENDAR.md, so the
-wall display stayed stale until re-poked.
+
+**Only poke when the change is actually visible on the wall.** The agenda
+block (`kindle_dashboard/data.py` → `calendar_block`, `days_ahead=3`)
+renders **today + the next 3 days** — so refresh only when an
+added/retired/edited CALENDAR.md line (or a Spond RSVP change) falls
+within `today..today+3`. A change to an event further out is invisible on
+the agenda and **does not warrant a poke**. (The month-grid busy-dots
+cover the whole current month, but they're low-signal — don't refresh
+just for a dot.) Skip the poke entirely for mail-only triage, finance,
+or any pass that touched nothing the dashboard renders.
+
+Lesson 2026-05-29: poked the Kindle mid-sjekk *before* adding the next
+day's training to CALENDAR.md, so the wall display stayed stale until
+re-poked. Same day, 2nd pass: poked after adding only far-future lines
+(cruise 21.07, sommeravslutning 09.06) — unnecessary, nothing in the
+today..+3 window changed.
 
 **This poke should become program logic, not an LLM step.** The manual
 `ssh` above is a stopgap. Once the workspace moves to a proper dev/prod
