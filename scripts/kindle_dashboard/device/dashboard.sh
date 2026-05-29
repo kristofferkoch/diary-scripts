@@ -20,10 +20,31 @@ CONFIG=/mnt/us/dashboard/dashboard.conf
 [ -f "$CONFIG" ] && . "$CONFIG"
 
 URL="${URL:-https://example.invalid/dashboard.png}"
-INTERVAL="${INTERVAL:-3600}"
 KIOSK="${KIOSK:-0}"
 BOOT_RETRY="${BOOT_RETRY:-15}"
 RTC="${RTC:-rtc1}"          # SNVS RTC — rtc0 (bd71827) has no wakeup capability
+
+# Wake cadence is time-of-day dependent. The device can't be poked over the
+# network while suspended (WiFi is off), so the precipitation warning and
+# after-sjekk updates rely on the device polling often enough. We wake every
+# PEAK_INTERVAL during the rain-relevant outdoor windows (so a rain change
+# shows within that window) and OFFPEAK_INTERVAL otherwise to save battery.
+# PEAK_WINDOWS is space-separated half-open local-hour ranges "start-end".
+PEAK_INTERVAL="${PEAK_INTERVAL:-300}"        # 5 min during peak windows
+OFFPEAK_INTERVAL="${OFFPEAK_INTERVAL:-900}"  # 15 min otherwise
+PEAK_WINDOWS="${PEAK_WINDOWS:-6-9 15-20}"    # 06:00-09:00 and 15:00-20:00
+
+# next_interval — seconds to suspend until the next wake, per current hour.
+next_interval() {
+  h=$(date '+%H'); h=${h#0}; [ -z "$h" ] && h=0   # strip leading 0 (octal-safe)
+  for w in $PEAK_WINDOWS; do
+    s=${w%-*}; e=${w#*-}
+    if [ "$h" -ge "$s" ] && [ "$h" -lt "$e" ]; then
+      echo "$PEAK_INTERVAL"; return
+    fi
+  done
+  echo "$OFFPEAK_INTERVAL"
+}
 TMP=/tmp/dashboard.png
 LOG=/mnt/us/dashboard/dashboard.log
 ETAG_FILE=/mnt/us/dashboard/last.etag
@@ -34,7 +55,7 @@ FULL_REFRESH_HOUR=3
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 [ -f "$LOG" ] && { tail -n 500 "$LOG" > "$LOG.t" && mv "$LOG.t" "$LOG"; }
 mkdir -p "$(dirname "$LOG")"
-log "starting (URL=$URL interval=${INTERVAL}s kiosk=$KIOSK rtc=$RTC)"
+log "starting (URL=$URL peak=${PEAK_INTERVAL}s offpeak=${OFFPEAK_INTERVAL}s windows='$PEAK_WINDOWS' kiosk=$KIOSK rtc=$RTC)"
 
 kiosk_kill() {
   [ "$KIOSK" = "1" ] || return 0
@@ -178,6 +199,6 @@ while :; do
     # with cheap retries until the first successful fetch.
     sleep "$BOOT_RETRY"
   else
-    suspend_for "$INTERVAL"
+    suspend_for "$(next_interval)"
   fi
 done

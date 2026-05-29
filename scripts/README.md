@@ -467,20 +467,28 @@ day is over. Format / parser-contract is identical in both files; see
 The wall Kindle renders the [kindle_dashboard](#kindle_dashboard--wall-display-png-generator)
 PNG, whose calendar and spond blocks are scraped live from `CALENDAR.md`
 and `memory/spond/*.jsonl`. The dashboard *generator* picks up edits on
-its next request automatically — but the **device** only re-fetches on
-its hourly poll, or when the precipitation watcher pokes it (rain only).
-So a sjekk that added/retired a calendar line or changed Spond RSVP state
-won't show on the wall for up to an hour unless you force it:
+its next request automatically — but the **device re-fetches only on its
+own scheduled wake**.
 
-```bash
-ssh kindle 'initctl restart dashboard'
-```
+**As of 2026-05-29 the device suspends to RAM between refreshes** (battery
+fix — see [KINDLE.md](../KINDLE.md)). While suspended its WiFi is off, so
+**`ssh kindle 'initctl restart dashboard'` usually fails with "No route to
+host" — the poke can't reach a sleeping device.** Don't rely on it. Two
+things follow for the sjekk:
 
-Do this at the **end** of the sjekk, after all CALENDAR.md / spond
-changes are committed (the generator reads the files fresh, so no
-`kindle-dashboard` service restart is needed — just poke the device).
+- **Just commit and let it poll.** A change to the today..+3 agenda
+  appears on the next scheduled wake: **≤15 min** off-peak, **≤5 min**
+  during the peak windows (06:00–09:00, 15:00–20:00). For a sjekk that's
+  almost always fine — no action needed.
+- **Need it on the wall *now*?** Press the Kindle's **power button** (a
+  short press) — `snvs-powerkey` wakes it from suspend and the loop
+  re-fetches + re-renders within seconds. That's the only reliable
+  on-demand refresh; the SSH poke is best-effort (lands only if you happen
+  to catch the ~10 s awake window). Deploying device changes from
+  server has the same problem — see the "deploy on next wake"
+  catcher pattern used on 2026-05-29.
 
-**Only poke when the change is actually visible on the wall.** The agenda
+**Only bother at all when the change is actually visible on the wall.** The agenda
 block (`kindle_dashboard/data.py` → `calendar_block`, `days_ahead=3`)
 renders **today + the next 3 days** — so refresh only when an
 added/retired/edited CALENDAR.md line (or a Spond RSVP change) falls
@@ -496,14 +504,15 @@ re-poked. Same day, 2nd pass: poked after adding only far-future lines
 (cruise 21.07, sommeravslutning 09.06) — unnecessary, nothing in the
 today..+3 window changed.
 
-**This poke should become program logic, not an LLM step.** The manual
-`ssh` above is a stopgap. Once the workspace moves to a proper dev/prod
-split, the refresh belongs in code: extend the watcher (or a thin
-git/file hook) to poke the Kindle whenever `CALENDAR.md` or
-`memory/spond/*.jsonl` actually change — the same fire-and-forget
-`_poke_kindle()` the precipitation watcher already uses, just triggered
-by content drift instead of rain. The model shouldn't be the thing that
-remembers to refresh a wall display; deterministic logic should.
+**Pushing to the device is now largely obsolete — the device pulls.**
+Earlier plans here were to have a git/file hook poke the Kindle on
+`CALENDAR.md` / `memory/spond/*.jsonl` change (the watcher's
+`_poke_kindle()` pattern). Suspend kills that: you can't push to a
+sleeping device. The device's own ≤15 min / ≤5 min poll is the mechanism
+now, and the power button covers the rare "show it this instant" case.
+The only push still worth wiring would be a wake-capable channel (BLE,
+WoWLAN) — not worth it for a wall calendar. Leave the LLM out of it:
+commit the change and let the device poll.
 
 ### Script behavior reference
 

@@ -1,5 +1,15 @@
 """Background watcher: nudge the wall Kindle when precipitation changes.
 
+NOTE (2026-05-29): the Kindle now suspends to RAM between refreshes
+(WiFi off while asleep), so this SSH poke only lands during the device's
+brief awake window — most pokes hit a sleeping device and fail (logged,
+harmless). The real precipitation path is now the device's own polling:
+its dashboard loop wakes every 5 min during the outdoor windows
+(06:00–09:00, 15:00–20:00) and pulls the PNG, which already carries the
+rain warning. This watcher is kept as best-effort (it still helps in the
+rare case the poke lands while awake) but is no longer the primary
+mechanism. See KINDLE.md → "Dashboard loop" / "Battery".
+
 Runs as an asyncio task inside the FastAPI app (see serve.py). Polls
 yr.no's nowcast every POLL_SECONDS via the shared cache in data.py, and
 calls `ssh kindle 'initctl restart dashboard'` only when the change
