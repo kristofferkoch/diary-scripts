@@ -35,6 +35,14 @@ PEAK_WINDOWS="6-9 15-20"          # half-open local-hour ranges (rain-watch wind
 
 log() { echo "$(date '+%F %T') [ctrl] $*" >> "$LOG"; }
 
+# --- battery telemetry (logged every wake so "when was it unplugged / how's
+#     the charge" is answerable from dashboard.log, which lives on flash).
+#     bd71827 is moonshine's PMIC (see KINDLE.md); sysfs reads, no daemon dep. ---
+batt_cap=$(cat /sys/class/power_supply/bd71827_bat/capacity 2>/dev/null)
+batt_st=$(cat /sys/class/power_supply/bd71827_bat/status 2>/dev/null)
+ac_on=$(cat /sys/class/power_supply/bd71827_ac/online 2>/dev/null)
+echo "$(date '+%F %T') [batt] ${batt_cap:-?}% ${batt_st:-?} ac=${ac_on:-?}" >> "$LOG"
+
 # --- maintenance? a server flag forces stay-awake so we can SSH in calmly ---
 maint=$(curl -fsS --max-time 10 "$BASE/control/maintenance" 2>/dev/null | tr -d '\r\n ')
 if [ "$maint" = "1" ]; then
