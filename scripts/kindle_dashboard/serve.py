@@ -60,6 +60,29 @@ _SIGN_KEY = Path(
 )
 _MAINT_FLAG = Path(os.environ.get("KINDLE_MAINT_FLAG", Path(__file__).parent / "MAINTENANCE"))
 
+# Battery telemetry: the wall Kindle sends its charge state as X-Batt-* headers
+# on each /dashboard.png fetch; we append a line here. This log lives on
+# server (real disk, no trim) so "when was it unplugged?" stays
+# answerable indefinitely — unlike the device's own /var/log, which is tmpfs
+# and overwrites a charger-disconnect event within ~30 min. Override with
+# $KINDLE_BATT_LOG. ~40 B/line, ~96 lines/day at off-peak cadence ⇒ negligible.
+_BATT_LOG = Path(
+    os.environ.get("KINDLE_BATT_LOG", Path.home() / ".local/state/kindle-dashboard/battery.log")
+)
+
+
+def _log_battery(cap: str | None, status: str | None, ac: str | None) -> None:
+    """Append one battery telemetry line (server-stamped local time). Never raises."""
+    if cap is None and status is None and ac is None:
+        return  # not a device fetch (e.g. phone preview) — nothing to log
+    try:
+        _BATT_LOG.parent.mkdir(parents=True, exist_ok=True)
+        ts = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
+        with _BATT_LOG.open("a", encoding="utf-8") as fh:
+            fh.write(f"{ts}\t{cap or '?'}%\t{status or '?'}\tac={ac or '?'}\n")
+    except Exception:
+        log.exception("battery telemetry write failed")
+
 
 def _sign_control(data: bytes) -> str | None:
     """ECDSA-SHA256 sign `data`, return base64 DER. None on any failure."""
@@ -146,8 +169,12 @@ def healthz() -> dict[str, str]:
 @app.get("/dashboard.png")
 async def dashboard_png(
     if_none_match: str | None = Header(default=None, alias="if-none-match"),
+    x_batt_cap: str | None = Header(default=None, alias="x-batt-cap"),
+    x_batt_status: str | None = Header(default=None, alias="x-batt-status"),
+    x_batt_ac: str | None = Header(default=None, alias="x-batt-ac"),
 ) -> Response:
     """Return the current dashboard PNG with conditional-GET support."""
+    _log_battery(x_batt_cap, x_batt_status, x_batt_ac)  # device piggybacks charge state here
     try:
         png, etag = await _render_current()
     except Exception:

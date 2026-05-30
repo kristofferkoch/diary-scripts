@@ -35,13 +35,17 @@ PEAK_WINDOWS="6-9 15-20"          # half-open local-hour ranges (rain-watch wind
 
 log() { echo "$(date '+%F %T') [ctrl] $*" >> "$LOG"; }
 
-# --- battery telemetry (logged every wake so "when was it unplugged / how's
-#     the charge" is answerable from dashboard.log, which lives on flash).
-#     bd71827 is moonshine's PMIC (see KINDLE.md); sysfs reads, no daemon dep. ---
+# --- battery telemetry: read now, reported to server via X-Batt-*
+#     headers on the dashboard.png fetch below (the server writes the durable
+#     log on real disk). The device's own /var/log is tmpfs and overwrites a
+#     charger-unplug event within ~30 min, so on-device logging can't answer
+#     "when was it unplugged" after the fact. bd71827 = moonshine's PMIC.
+#     Status spaces → '_' ("Not charging" → "Not_charging") so the value stays
+#     a single header token under the unquoted $BATT_HDRS word-split. ---
 batt_cap=$(cat /sys/class/power_supply/bd71827_bat/capacity 2>/dev/null)
-batt_st=$(cat /sys/class/power_supply/bd71827_bat/status 2>/dev/null)
+batt_st=$(cat /sys/class/power_supply/bd71827_bat/status 2>/dev/null | tr ' ' '_')
 ac_on=$(cat /sys/class/power_supply/bd71827_ac/online 2>/dev/null)
-echo "$(date '+%F %T') [batt] ${batt_cap:-?}% ${batt_st:-?} ac=${ac_on:-?}" >> "$LOG"
+BATT_HDRS="-H X-Batt-Cap:${batt_cap:-?} -H X-Batt-Status:${batt_st:-?} -H X-Batt-Ac:${ac_on:-?}"
 
 # --- maintenance? a server flag forces stay-awake so we can SSH in calmly ---
 maint=$(curl -fsS --max-time 10 "$BASE/control/maintenance" 2>/dev/null | tr -d '\r\n ')
@@ -61,9 +65,9 @@ fi
 etag=""; [ -f "$ETAG_FILE" ] && etag=$(cat "$ETAG_FILE")
 rm -f "$HEADERS"
 if [ -n "$etag" ]; then
-  status=$(curl -sSL --max-time 30 -H "If-None-Match: $etag" -D "$HEADERS" -w '%{http_code}' -o "$TMP.new" "$BASE/dashboard.png" 2>/dev/null)
+  status=$(curl -sSL --max-time 30 $BATT_HDRS -H "If-None-Match: $etag" -D "$HEADERS" -w '%{http_code}' -o "$TMP.new" "$BASE/dashboard.png" 2>/dev/null)
 else
-  status=$(curl -sSL --max-time 30 -D "$HEADERS" -w '%{http_code}' -o "$TMP.new" "$BASE/dashboard.png" 2>/dev/null)
+  status=$(curl -sSL --max-time 30 $BATT_HDRS -D "$HEADERS" -w '%{http_code}' -o "$TMP.new" "$BASE/dashboard.png" 2>/dev/null)
 fi
 case "$status" in
   304) log "unchanged (304)" ;;
