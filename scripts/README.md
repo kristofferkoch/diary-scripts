@@ -377,6 +377,41 @@ last time we wrote a digest".
 
 ---
 
+## Notes queue — `notes.py`
+
+Part of the daily **sjekk-flow**. The `/notes/` page on server
+(`https://server.example.ts.net/mail/notes/`, reachable from the
+"Notater" topbar link) is a capture inbox: the user types free-text
+reminders — "things I don't want to forget" — into a textarea and they
+land in the `notes_queue` Postgres table (migration
+`migrations/011_notes_queue.sql`). The page lists pending notes
+newest-first with inline **edit** and **delete**. The webapp side is
+`mail_reader/notes.py` (CRUD) + routes in `mail_reader/server.py`.
+
+The check round **digests** the queue:
+
+```bash
+uv run scripts/notes.py            # list pending notes (default)
+uv run scripts/notes.py list --all # include already-done notes
+uv run scripts/notes.py add "text" # add a note from the terminal
+uv run scripts/notes.py done 42    # mark note 42 handled — drops off the page
+uv run scripts/notes.py rm 42      # hard-delete note 42
+```
+
+SOP: run `notes.py` with no args. For each pending note, do the real
+work it implies — file a `CALENDAR.md` entry, update a topic file, add a
+daily-note section, open a Spond reply, etc. — then `done <id>` it so it
+stops showing on the page but stays in the table as a record of what was
+captured. Use `rm` only for genuine junk (test rows, duplicates). If a
+note is ambiguous, surface it to the user rather than guessing. Notes
+are free-text from a phone on the go: expect terse, lower-case,
+half-sentences.
+
+Tests: `uv run pytest mail_reader/test_notes.py` (skips if the mailvec DB
+is unreachable).
+
+---
+
 ## Finance — `finance_ingest.py`
 
 Summarise a Bulder Bank CSV export and cross-reference it with the embedded

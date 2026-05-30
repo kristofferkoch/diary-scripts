@@ -26,6 +26,7 @@ from fastapi.templating import Jinja2Templates
 from . import agenda as agenda_mod
 from . import calendar_md as calendar_mod
 from . import db, inbox as inbox_mod, message as message_mod, related as related_mod
+from . import notes as notes_mod
 from . import entities as entities_mod
 from . import summarize as summarize_mod
 from . import workers as workers_mod
@@ -305,6 +306,81 @@ def get_summary_fragment(request: Request, message_id: str):
             "action": state["action_required"],
         },
     )
+
+
+# --- notes queue -----------------------------------------------------------
+# A capture inbox for "things I don't want to forget", digested by the daily
+# sjekk. The page is a textarea + a list of pending notes with inline edit /
+# delete. Form bodies are parsed by hand (urlencoded) so we avoid pulling in
+# python-multipart — same dependency-avoidance as the agenda-dismiss endpoint.
+
+
+async def _form_field(request: Request, name: str) -> str:
+    raw = await request.body()
+    parsed = urllib.parse.parse_qs(raw.decode("utf-8"), keep_blank_values=True)
+    values = parsed.get(name)
+    return values[0] if values else ""
+
+
+@app.get("/notes/", response_class=HTMLResponse)
+def get_notes(request: Request):
+    with db.connect() as conn:
+        notes = notes_mod.list_pending(conn)
+    return TEMPLATES.TemplateResponse(request, "notes.html", {"notes": notes})
+
+
+@app.post("/notes/", response_class=HTMLResponse)
+async def post_note(request: Request):
+    """Add a note. Returns the new note's <li> for HTMX to prepend."""
+    body = await _form_field(request, "body")
+    with db.connect() as conn:
+        try:
+            note = notes_mod.add(conn, body)
+        except ValueError:
+            raise HTTPException(400, "empty note")
+    return TEMPLATES.TemplateResponse(request, "_note.html", {"note": note})
+
+
+@app.get("/notes/{note_id:int}", response_class=HTMLResponse)
+def get_note(request: Request, note_id: int):
+    """Display fragment for one note — used to cancel an inline edit."""
+    with db.connect() as conn:
+        note = notes_mod.get(conn, note_id)
+    if note is None:
+        raise HTTPException(404, "note not found")
+    return TEMPLATES.TemplateResponse(request, "_note.html", {"note": note})
+
+
+@app.get("/notes/{note_id:int}/edit", response_class=HTMLResponse)
+def get_note_edit(request: Request, note_id: int):
+    with db.connect() as conn:
+        note = notes_mod.get(conn, note_id)
+    if note is None:
+        raise HTTPException(404, "note not found")
+    return TEMPLATES.TemplateResponse(request, "_note_edit.html", {"note": note})
+
+
+@app.post("/notes/{note_id:int}", response_class=HTMLResponse)
+async def post_note_update(request: Request, note_id: int):
+    body = await _form_field(request, "body")
+    with db.connect() as conn:
+        try:
+            note = notes_mod.update_body(conn, note_id, body)
+        except ValueError:
+            raise HTTPException(400, "empty note")
+        except KeyError:
+            raise HTTPException(404, "note not found")
+    return TEMPLATES.TemplateResponse(request, "_note.html", {"note": note})
+
+
+@app.post("/notes/{note_id:int}/delete", response_class=HTMLResponse)
+def post_note_delete(note_id: int):
+    with db.connect() as conn:
+        try:
+            notes_mod.delete(conn, note_id)
+        except KeyError:
+            raise HTTPException(404, "note not found")
+    return HTMLResponse("")
 
 
 def main() -> None:

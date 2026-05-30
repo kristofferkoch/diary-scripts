@@ -33,6 +33,18 @@
       </span>
       <span>Kalender</span>
     </a>
+    <a href="{{ url_for('get_notes') }}" class="navlink" aria-label="Notater">
+      <span class="mark" aria-hidden="true">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+             stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 2.5 H12 A1 1 0 0 1 13 3.5 V13.5 A1 1 0 0 1 12 14.5 H4 A1 1 0 0 1 3 13.5 V3.5 A1 1 0 0 1 4 2.5 Z"/>
+          <path d="M5.5 6 H10.5"/>
+          <path d="M5.5 8.5 H10.5"/>
+          <path d="M5.5 11 H8.5"/>
+        </svg>
+      </span>
+      <span>Notater</span>
+    </a>
     <span class="queue-slot"
           hx-get="{{ url_for('get_queue_indicator') }}"
           hx-trigger="load, every 5s"

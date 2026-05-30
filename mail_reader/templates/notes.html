@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Notater{% endblock %}
+{% block content %}
+<div class="inbox-head">
+  <h1>Notater</h1>
+  {% if notes %}<span class="count">{{ notes|length }} i kø</span>{% endif %}
+</div>
+
+{# Capture box. Posts the textarea to /notes/; the server returns the new
+   note's <li> which HTMX prepends to the list. after-request resets the
+   form (clears the textarea) and refocuses it for rapid entry. #}
+<form class="note-form"
+      hx-post="{{ url_for('post_note') }}"
+      hx-target="#note-list"
+      hx-swap="afterbegin"
+      hx-on::after-request="if(event.detail.successful){this.reset();this.querySelector('textarea').focus();var e=document.getElementById('note-empty');if(e)e.remove();}">
+  <textarea name="body" class="note-input" rows="3"
+            placeholder="Skriv noe du ikke vil glemme – tas med i neste sjekk…"
+            autofocus required></textarea>
+  <div class="note-form-actions">
+    <button type="submit" class="btn-primary">Legg i kø</button>
+  </div>
+</form>
+
+<ul class="note-list" id="note-list">
+{% for note in notes %}
+  {% include "_note.html" %}
+{% endfor %}
+</ul>
+{% if not notes %}
+<p class="empty" id="note-empty">Køen er tom.</p>
+{% endif %}
+{% endblock %}

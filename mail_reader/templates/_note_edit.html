@@ -1,0 +1,18 @@
+{# Inline edit form for one note. Replaces the note's <li> (outerHTML).
+   Save POSTs the textarea back to /notes/{id} and swaps in the refreshed
+   display <li>. Cancel re-fetches the display fragment unchanged. #}
+<li class="note note-editing" id="note-{{ note.id }}">
+  <form class="note-edit-form"
+        hx-post="{{ url_for('post_note_update', note_id=note.id) }}"
+        hx-target="closest li"
+        hx-swap="outerHTML">
+    <textarea name="body" class="note-input" rows="3" required autofocus>{{ note.body }}</textarea>
+    <div class="note-form-actions">
+      <button type="submit" class="btn-primary">Lagre</button>
+      <button type="button" class="note-btn"
+              hx-get="{{ url_for('get_note', note_id=note.id) }}"
+              hx-target="closest li"
+              hx-swap="outerHTML">Avbryt</button>
+    </div>
+  </form>
+</li>

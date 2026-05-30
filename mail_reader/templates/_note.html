@@ -1,0 +1,22 @@
+{# One queued note. Display mode: body + timestamp + edit/delete buttons.
+   Edit swaps this <li>'s inner content for the edit form (_note_edit.html).
+   Delete removes the whole <li>. Both target `closest li` so the buttons
+   work identically whether the note was server-rendered or just prepended
+   by the capture form. #}
+<li class="note" id="note-{{ note.id }}">
+  <div class="note-body">{{ note.body }}</div>
+  <div class="note-foot">
+    <span class="note-when">{{ note.created_at | short_date }}{% if note.updated_at != note.created_at %} · endret{% endif %}</span>
+    <span class="note-actions">
+      <button type="button" class="note-btn"
+              hx-get="{{ url_for('get_note_edit', note_id=note.id) }}"
+              hx-target="closest li"
+              hx-swap="outerHTML">Endre</button>
+      <button type="button" class="note-btn note-btn-del"
+              hx-post="{{ url_for('post_note_delete', note_id=note.id) }}"
+              hx-target="closest li"
+              hx-swap="outerHTML swap:140ms"
+              hx-confirm="Slette dette notatet?">Slett</button>
+    </span>
+  </div>
+</li>

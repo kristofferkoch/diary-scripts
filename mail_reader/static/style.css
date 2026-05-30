@@ -1314,3 +1314,98 @@ li.cal-event-allday .cal-event-time {
     font-size: 0.92rem;
   }
 }
+
+/* --------------------------------------------------------------------------
+   Notes queue (/notes/) — capture box + pending list
+   -------------------------------------------------------------------------- */
+.note-form {
+  margin: 0 0 var(--s-5);
+}
+.note-input {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  line-height: 1.5;
+  color: var(--ink);
+  background: var(--bg-elev);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  padding: var(--s-3);
+  resize: vertical;
+  box-shadow: var(--shadow-sm);
+}
+.note-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+.note-form-actions {
+  display: flex;
+  gap: var(--s-2);
+  align-items: center;
+  margin-top: var(--s-2);
+}
+.btn-primary {
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--bg-elev);
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: var(--s-2) var(--s-4);
+  cursor: pointer;
+}
+.btn-primary:hover { background: var(--link); }
+
+.note-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.note {
+  background: var(--bg-elev);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  padding: var(--s-3) var(--s-4);
+  box-shadow: var(--shadow-sm);
+}
+.note-body {
+  color: var(--ink);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.note-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  margin-top: var(--s-2);
+}
+.note-when {
+  font-size: 0.8rem;
+  color: var(--faint);
+}
+.note-actions {
+  display: flex;
+  gap: var(--s-1);
+}
+.note-btn {
+  font-family: var(--font-sans);
+  font-size: 0.8rem;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-sm);
+  padding: 2px var(--s-2);
+  cursor: pointer;
+}
+.note-btn:hover { color: var(--ink-strong); border-color: var(--ink-strong); }
+.note-btn-del:hover { color: var(--accent); border-color: var(--accent); }
+.note-editing { border-color: var(--accent-soft); }
+.note-edit-form .note-form-actions { margin-top: var(--s-2); }
