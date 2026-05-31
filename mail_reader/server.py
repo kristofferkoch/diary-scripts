@@ -27,6 +27,7 @@ from . import agenda as agenda_mod
 from . import calendar_md as calendar_mod
 from . import db, inbox as inbox_mod, message as message_mod, related as related_mod
 from . import notes as notes_mod
+from . import shopping as shopping_mod
 from . import entities as entities_mod
 from . import summarize as summarize_mod
 from . import workers as workers_mod
@@ -380,6 +381,125 @@ def post_note_delete(note_id: int):
             notes_mod.delete(conn, note_id)
         except KeyError:
             raise HTTPException(404, "note not found")
+    return HTMLResponse("")
+
+
+# --- shopping list ---------------------------------------------------------
+# A standing, categorised checklist worked through in the store. Items group
+# by category (Netthandel last); a checkbox tap toggles `checked` and greys
+# the row in place. Checks persist and are reversible here; the sjekk routine
+# sweeps bought items out with `scripts/shopping.py sweep`. Same hand-parsed
+# urlencoded form bodies as the notes endpoints (no python-multipart).
+
+
+async def _form(request: Request) -> dict[str, str]:
+    raw = await request.body()
+    parsed = urllib.parse.parse_qs(raw.decode("utf-8"), keep_blank_values=True)
+    return {k: v[0] for k, v in parsed.items()}
+
+
+def _shopping_ctx(conn) -> dict:
+    """Template context shared by the page and every list-fragment response."""
+    items = shopping_mod.list_items(conn)
+    return {
+        "groups": shopping_mod.grouped(items),
+        "any_checked": any(i["checked"] for i in items),
+        "categories": shopping_mod.CATEGORIES,
+        "default_category": shopping_mod.DEFAULT_CATEGORY,
+    }
+
+
+@app.get("/shopping/", response_class=HTMLResponse)
+def get_shopping(request: Request):
+    with db.connect() as conn:
+        ctx = _shopping_ctx(conn)
+    return TEMPLATES.TemplateResponse(request, "shopping.html", ctx)
+
+
+@app.post("/shopping/", response_class=HTMLResponse)
+async def post_shopping_item(request: Request):
+    """Add an item, then re-render the whole list so it lands in its group."""
+    form = await _form(request)
+    with db.connect() as conn:
+        try:
+            shopping_mod.add(
+                conn, form.get("name", ""),
+                form.get("category", shopping_mod.DEFAULT_CATEGORY),
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        ctx = _shopping_ctx(conn)
+    return TEMPLATES.TemplateResponse(request, "_shopping_list.html", ctx)
+
+
+@app.post("/shopping/uncheck-all", response_class=HTMLResponse)
+def post_shopping_uncheck_all(request: Request):
+    with db.connect() as conn:
+        shopping_mod.uncheck_all(conn)
+        ctx = _shopping_ctx(conn)
+    return TEMPLATES.TemplateResponse(request, "_shopping_list.html", ctx)
+
+
+@app.get("/shopping/{item_id:int}", response_class=HTMLResponse)
+def get_shopping_item(request: Request, item_id: int):
+    """Display fragment for one item — used to cancel an inline edit."""
+    with db.connect() as conn:
+        item = shopping_mod.get(conn, item_id)
+    if item is None:
+        raise HTTPException(404, "item not found")
+    return TEMPLATES.TemplateResponse(request, "_shopping_item.html", {"item": item})
+
+
+@app.get("/shopping/{item_id:int}/edit", response_class=HTMLResponse)
+def get_shopping_item_edit(request: Request, item_id: int):
+    with db.connect() as conn:
+        item = shopping_mod.get(conn, item_id)
+    if item is None:
+        raise HTTPException(404, "item not found")
+    return TEMPLATES.TemplateResponse(
+        request, "_shopping_item_edit.html",
+        {"item": item, "categories": shopping_mod.CATEGORIES},
+    )
+
+
+@app.post("/shopping/{item_id:int}", response_class=HTMLResponse)
+async def post_shopping_item_update(request: Request, item_id: int):
+    """Save an edit (name + category), then re-render the whole list since
+    the category may have moved the item to another group."""
+    form = await _form(request)
+    with db.connect() as conn:
+        try:
+            shopping_mod.update(
+                conn, item_id,
+                name=form.get("name", ""),
+                category=form.get("category", shopping_mod.DEFAULT_CATEGORY),
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except KeyError:
+            raise HTTPException(404, "item not found")
+        ctx = _shopping_ctx(conn)
+    return TEMPLATES.TemplateResponse(request, "_shopping_list.html", ctx)
+
+
+@app.post("/shopping/{item_id:int}/toggle", response_class=HTMLResponse)
+def post_shopping_toggle(request: Request, item_id: int):
+    """Flip the checkbox; swap just this <li> (greyed, in place)."""
+    with db.connect() as conn:
+        try:
+            item = shopping_mod.toggle(conn, item_id)
+        except KeyError:
+            raise HTTPException(404, "item not found")
+    return TEMPLATES.TemplateResponse(request, "_shopping_item.html", {"item": item})
+
+
+@app.post("/shopping/{item_id:int}/delete", response_class=HTMLResponse)
+def post_shopping_item_delete(item_id: int):
+    with db.connect() as conn:
+        try:
+            shopping_mod.delete(conn, item_id)
+        except KeyError:
+            raise HTTPException(404, "item not found")
     return HTMLResponse("")
 
 

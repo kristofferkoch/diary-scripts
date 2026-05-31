@@ -1,0 +1,24 @@
+{# The whole grouped list — re-rendered as a unit on add / edit / uncheck-all
+   (those can move an item between category groups). A single checkbox toggle
+   swaps only its own <li> (see _shopping_item.html) and never gets here. #}
+<div id="shopping-list" class="shop-list">
+{% for category, items in groups %}
+  <section class="shop-cat">
+    <h2 class="shop-cat-head">{{ category }}</h2>
+    <ul class="shop-items">
+    {% for item in items %}{% include "_shopping_item.html" %}{% endfor %}
+    </ul>
+  </section>
+{% else %}
+  <p class="empty">Lista er tom.</p>
+{% endfor %}
+{% if any_checked %}
+  <form class="shop-uncheck"
+        hx-post="{{ url_for('post_shopping_uncheck_all') }}"
+        hx-target="#shopping-list"
+        hx-swap="outerHTML"
+        hx-confirm="Fjerne alle kryss?">
+    <button type="submit" class="note-btn">Nullstill alle kryss</button>
+  </form>
+{% endif %}
+</div>

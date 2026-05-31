@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Handleliste{% endblock %}
+{% block content %}
+<div class="inbox-head">
+  <h1>Handleliste</h1>
+</div>
+
+{# Add box. Posts name + category to /shopping/; the server re-renders the
+   whole #shopping-list region so the new item lands in its category group.
+   after-request clears the name field and refocuses it (category selection
+   is kept, so adding several items in one aisle is one tap each). #}
+<form class="shop-form"
+      hx-post="{{ url_for('post_shopping_item') }}"
+      hx-target="#shopping-list"
+      hx-swap="outerHTML"
+      hx-on::after-request="if(event.detail.successful){var n=this.querySelector('input[name=name]');n.value='';n.focus();}">
+  <input type="text" name="name" class="shop-input shop-add-input"
+         placeholder="Legg til vare…" autocomplete="off" autofocus required>
+  <div class="shop-form-row">
+    <select name="category" class="shop-cat-select">
+      {% for c in categories %}
+      <option value="{{ c }}"{% if c == default_category %} selected{% endif %}>{{ c }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit" class="btn-primary">Legg til</button>
+  </div>
+</form>
+
+{% include "_shopping_list.html" %}
+{% endblock %}

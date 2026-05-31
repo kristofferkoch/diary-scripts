@@ -1409,3 +1409,149 @@ li.cal-event-allday .cal-event-time {
 .note-btn-del:hover { color: var(--accent); border-color: var(--accent); }
 .note-editing { border-color: var(--accent-soft); }
 .note-edit-form .note-form-actions { margin-top: var(--s-2); }
+
+/* --------------------------------------------------------------------------
+   Shopping list (/shopping/) — add box + categorised checklist
+   -------------------------------------------------------------------------- */
+.shop-form {
+  margin: 0 0 var(--s-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.shop-input {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  line-height: 1.5;
+  color: var(--ink);
+  background: var(--bg-elev);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  padding: var(--s-3);
+  box-shadow: var(--shadow-sm);
+}
+.shop-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+.shop-form-row {
+  display: flex;
+  gap: var(--s-2);
+  align-items: center;
+}
+.shop-cat-select {
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+  color: var(--ink);
+  background: var(--bg-elev);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--s-2);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.shop-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-5);
+}
+.shop-cat-head {
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 var(--s-2);
+  padding-bottom: var(--s-1);
+  border-bottom: 1px solid var(--rule);
+}
+.shop-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+.shop-item {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  background: var(--bg-elev);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+}
+/* The checkbox is a real tap target on a phone — generous hit area. */
+.shop-check {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--s-1);
+  margin: calc(-1 * var(--s-1));
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.shop-box {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--bg-elev);
+  background: transparent;
+  border: 2px solid var(--rule-strong);
+  border-radius: var(--radius-sm);
+}
+.shop-name {
+  flex: 1 1 auto;
+  color: var(--ink);
+  line-height: 1.4;
+  word-break: break-word;
+}
+.shop-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: var(--s-1);
+}
+/* Checked: greyed + struck, kept in place. */
+.shop-item-checked {
+  opacity: 0.55;
+}
+.shop-item-checked .shop-box {
+  color: var(--bg-elev);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.shop-item-checked .shop-name {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+
+.shop-editing {
+  border-color: var(--accent-soft);
+}
+.shop-edit-form {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.shop-edit-actions {
+  display: flex;
+  gap: var(--s-2);
+  align-items: center;
+}
+.shop-uncheck {
+  margin-top: var(--s-2);
+}

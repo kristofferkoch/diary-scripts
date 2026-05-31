@@ -45,6 +45,17 @@
       </span>
       <span>Notater</span>
     </a>
+    <a href="{{ url_for('get_shopping') }}" class="navlink" aria-label="Handleliste">
+      <span class="mark" aria-hidden="true">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+             stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M2 2.5 H3.6 L5 10.5 H12.4 L13.6 4.5 H4.2"/>
+          <circle cx="6" cy="13" r="0.9"/>
+          <circle cx="11.5" cy="13" r="0.9"/>
+        </svg>
+      </span>
+      <span>Handle</span>
+    </a>
     <span class="queue-slot"
           hx-get="{{ url_for('get_queue_indicator') }}"
           hx-trigger="load, every 5s"

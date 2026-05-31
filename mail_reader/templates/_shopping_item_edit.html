@@ -1,0 +1,24 @@
+{# Inline edit for one item. Save re-renders the whole list (#shopping-list)
+   because the category may change and the item must move groups. Cancel
+   re-fetches just this <li>. #}
+<li class="shop-item shop-editing" id="shop-item-{{ item.id }}">
+  <form class="shop-edit-form"
+        hx-post="{{ url_for('post_shopping_item_update', item_id=item.id) }}"
+        hx-target="#shopping-list"
+        hx-swap="outerHTML">
+    <input type="text" name="name" class="shop-input" value="{{ item.name }}"
+           autocomplete="off" required>
+    <div class="shop-edit-actions">
+      <select name="category" class="shop-cat-select">
+        {% for c in categories %}
+        <option value="{{ c }}"{% if c == item.category %} selected{% endif %}>{{ c }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit" class="btn-primary">Lagre</button>
+      <button type="button" class="note-btn"
+              hx-get="{{ url_for('get_shopping_item', item_id=item.id) }}"
+              hx-target="closest li"
+              hx-swap="outerHTML">Avbryt</button>
+    </div>
+  </form>
+</li>

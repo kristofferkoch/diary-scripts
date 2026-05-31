@@ -412,6 +412,50 @@ is unreachable).
 
 ---
 
+## Shopping list — `shopping.py`
+
+Part of the **sjekk-flow**. The `/shopping/` page on server
+(`https://server.example.ts.net/mail/shopping/`, "Handle" in the
+topbar) is a standing, categorised checklist the user works through in the
+store. Items live in the `shopping_items` Postgres table (migration
+`migrations/012_shopping_list.sql`); the webapp side is
+`mail_reader/shopping.py` (CRUD) + routes in `mail_reader/server.py` +
+`templates/shopping*.html`.
+
+**Categories** are a fixed, ordered list defined in `mail_reader/shopping.py`
+(`CATEGORIES`): Frukt & grønt · Kjøl & meieri · Tørrvare & pålegg · Frys ·
+Husholdning · Annet · **Netthandel** (always last, so the in-store
+categories come first and online-order items sit at the bottom). The list
+is **not** a DB CHECK constraint — reorder/extend it in Python without a
+migration. The module validates category on every write.
+
+**Checkbox lifecycle.** Ticking an item sets `checked` (it greys out and
+stays in place on the page); checks **persist and are reversible** on the
+web. They are **not** auto-removed — the **sjekk** garbage-collects bought
+items:
+
+```bash
+uv run scripts/shopping.py                 # list, grouped by category
+uv run scripts/shopping.py add "Bananer" --cat frukt   # category by prefix
+uv run scripts/shopping.py check 42        # tick (bought); uncheck to undo
+uv run scripts/shopping.py mv 42 frys      # move to another category
+uv run scripts/shopping.py rename 42 "..."  # rename
+uv run scripts/shopping.py rm 42           # hard-delete
+uv run scripts/shopping.py uncheck-all     # clear all checks (fresh trip)
+uv run scripts/shopping.py sweep           # delete checked items — THE SJEKK STEP
+```
+
+SOP each sjekk: run `uv run scripts/shopping.py sweep` to remove what the
+user ticked off since the last pass (it prints what it removed). A notes-
+queue item that's really a purchase ("kjøp gråblyanter") → `shopping.py add`
+it, then `done` the note. `--cat` accepts a case-insensitive prefix of any
+canonical category (`frys`, `kjøl`, `nett`).
+
+Tests: `uv run pytest mail_reader/test_shopping.py` (skips if the mailvec DB
+is unreachable).
+
+---
+
 ## Finance — `finance_ingest.py`
 
 Summarise a Bulder Bank CSV export and cross-reference it with the embedded

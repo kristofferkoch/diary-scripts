@@ -1,0 +1,26 @@
+{# One shopping-list item: checkbox + name + edit/delete. The checkbox posts
+   a toggle and swaps just this <li> (checked items grey out but keep their
+   place). Edit/delete target `closest li`; edit's save re-renders the whole
+   list (category may change). #}
+<li class="shop-item{% if item.checked %} shop-item-checked{% endif %}" id="shop-item-{{ item.id }}">
+  <button type="button" class="shop-check" role="checkbox"
+          aria-checked="{{ 'true' if item.checked else 'false' }}"
+          aria-label="{{ item.name }}"
+          hx-post="{{ url_for('post_shopping_toggle', item_id=item.id) }}"
+          hx-target="closest li"
+          hx-swap="outerHTML">
+    <span class="shop-box" aria-hidden="true">{% if item.checked %}✓{% endif %}</span>
+  </button>
+  <span class="shop-name">{{ item.name }}</span>
+  <span class="shop-actions">
+    <button type="button" class="note-btn"
+            hx-get="{{ url_for('get_shopping_item_edit', item_id=item.id) }}"
+            hx-target="closest li"
+            hx-swap="outerHTML">Endre</button>
+    <button type="button" class="note-btn note-btn-del"
+            hx-post="{{ url_for('post_shopping_item_delete', item_id=item.id) }}"
+            hx-target="closest li"
+            hx-swap="outerHTML swap:140ms"
+            hx-confirm="Fjerne {{ item.name }}?">Slett</button>
+  </span>
+</li>
