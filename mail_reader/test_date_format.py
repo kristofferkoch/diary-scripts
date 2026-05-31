@@ -27,6 +27,25 @@ def test_short_date_returns_empty_for_none():
     assert short_date(None) == ""
 
 
+def test_short_date_uses_norwegian_month_names():
+    """Regression (user note 2026-05-31, notes page): months must render
+    Norwegian regardless of process locale — 'mai' not 'may', 'okt' not
+    'oct', 'des' not 'dec'. The old code used strftime('%b'), which honours
+    the (typically C/en) process locale and got these three wrong."""
+    today = datetime(2026, 5, 22)
+    assert short_date(datetime(2026, 5, 31), today=today) == "31. mai"
+    assert short_date(datetime(2026, 10, 3), today=today) == "03. okt"
+    assert short_date(datetime(2026, 12, 24), today=today) == "24. des"
+    # other-year path carries the Norwegian month too
+    assert short_date(datetime(2024, 5, 1), today=today) == "01. mai 2024"
+
+
+def test_relative_day_far_out_uses_norwegian_month():
+    """The >14-day branch also went through strftime('%b'); pin it to 'mai'."""
+    today = date(2026, 4, 1)
+    assert relative_day(date(2026, 5, 20), today=today) == "20. mai"
+
+
 def test_short_date_uses_real_today_by_default():
     """Sanity: without an explicit `today`, the filter uses the actual
     calendar — last year's date should include the year."""

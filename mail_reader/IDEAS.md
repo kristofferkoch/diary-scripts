@@ -9,6 +9,26 @@ Format: `## YYYY-MM-DD — short title` headings, newest at top. Tag author with
 
 ---
 
+## 2026-05-31 — notater: bilde-opplasting (user)
+
+> "Legg til mulighet for å ta eller laste opp bilde på notatsiden. (firefox på android)"
+
+Notes-capture-siden (`/mail/notes/`) tar bare fri-tekst i dag. user vil kunne
+**ta/laste opp et bilde** fra mobil (Firefox Android) sammen med — eller i stedet
+for — teksten. Implikasjoner: `<input type="file" accept="image/*" capture>` i
+capture-formen, en lagringsplass for vedlegg (disk under `mail_reader/` eller en
+`notes_attachments`-tabell + bytes i postgres), og rendering av thumbnail i
+`_note.html`. Bør tåle at notat har bilde men tom tekst. Kilde: notes-queue #27.
+
+## 2026-05-31 — notater: vis klokkeslett (user)
+
+> "Legg til klokkeslett på notat siden."
+
+`_note.html` viser i dag bare dato (`short_date`, f.eks. «31. mai»). user vil ha
+**klokkeslett** med — nyttig når flere notater fanges samme dag. Enkel endring:
+egen `short_datetime`-filter (eller utvid fot-linja med `%H:%M`). Kilde:
+notes-queue #26.
+
 ## 2026-05-23 — tier-2 escalation flag → second-level agent (user)
 
 > "Tier 2 should recommend launching another high-level model (with

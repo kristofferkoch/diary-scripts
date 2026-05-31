@@ -11,22 +11,29 @@ agenda strip: "i dag", "i morgen", "tor" (within current week), or
 style); kept in the same module so all date-rendering rules live in
 one place.
 
-Locale: month abbreviations come from `strftime('%b')`, which honours
-the process locale. Norwegian and English share the same 3-letter
-abbreviation for most months, so leaving the locale alone is fine.
+Locale: month abbreviations are taken from an explicit Norwegian table
+(`_NO_MONTHS`), **not** `strftime('%b')`. The process locale is typically
+C/en, which renders "may"/"oct"/"dec" instead of the Norwegian
+"mai"/"okt"/"des" — wrong on a Norwegian page (notes page bug, user
+2026-05-31). Hard-coding the table makes rendering locale-independent.
 """
 from __future__ import annotations
 
 from datetime import date, datetime
+
+# Norwegian 3-letter month abbreviations, 1-indexed (index 0 unused).
+_NO_MONTHS = ["", "jan", "feb", "mar", "apr", "mai", "jun",
+              "jul", "aug", "sep", "okt", "nov", "des"]
 
 
 def short_date(dt: datetime | None, *, today: datetime | None = None) -> str:
     if dt is None:
         return ""
     now = today if today is not None else datetime.now()
+    mon = _NO_MONTHS[dt.month]
     if dt.year == now.year:
-        return dt.strftime("%d. %b").lower()
-    return dt.strftime("%d. %b %Y").lower()
+        return f"{dt.day:02d}. {mon}"
+    return f"{dt.day:02d}. {mon} {dt.year}"
 
 
 _NO_WEEKDAYS = ["man", "tir", "ons", "tor", "fre", "lør", "søn"]
@@ -56,4 +63,4 @@ def relative_day(d: date, *, today: date | None = None) -> str:
         return _NO_WEEKDAYS[d.weekday()]
     if 0 < delta < 14:
         return f"{_NO_WEEKDAYS[d.weekday()]} {d.day}"
-    return d.strftime("%d. %b").lower().lstrip("0")
+    return f"{d.day}. {_NO_MONTHS[d.month]}"
