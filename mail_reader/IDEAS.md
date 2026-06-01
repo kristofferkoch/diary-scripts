@@ -9,6 +9,33 @@ Format: `## YYYY-MM-DD — short title` headings, newest at top. Tag author with
 
 ---
 
+## 2026-06-01 — notat-foto: GPS som signal (user)
+
+> "gps should not be stripped, but used as a signal."
+
+Photo notes (the bilde-opplasting feature below) now **preserve** the EXIF —
+GPS included — on the stored web image rather than stripping it
+(`mail_reader/note_images.py`). The lat/lon a phone stamps on a photo is a
+useful signal: *where* a note was captured. Things we could do with it once
+we lean in:
+
+- **Reverse-geocode** the coordinates to a place name and fold it into the
+  note's text / the future VLM description ("foto tatt ved Eksempelveien 3B" /
+  "…ved Rema Olsvik"). Local-only geocoder or a cached lookup — no need to
+  phone out per note.
+- **Stamp it into `note_attachments`** as structured columns (e.g.
+  `gps_lat`, `gps_lon`, or a `geo POINT`) at upload time, parsed from the
+  EXIF we already keep — cheaper than re-parsing the JPEG each read, and
+  queryable ("notater tatt i nærheten av X").
+- **Surface on the page**: a tiny "📍 sted" chip linking to a map, or group
+  notes by location.
+- **Sjekk hint**: a grocery photo snapped at a store, a parking-spot photo
+  at an airport — location disambiguates terse captures.
+
+For now we just stop discarding it; extraction/use is future work. Caveat:
+not every photo has GPS (screenshots, location-off, stripped by the share
+sheet), so anything built on this must treat it as optional.
+
 ## 2026-05-31 — notater: bilde-opplasting (user) — ✅ IMPLEMENTERT 2026-06-01
 
 > "Legg til mulighet for å ta eller laste opp bilde på notatsiden. (firefox på android)"
@@ -17,7 +44,8 @@ Format: `## YYYY-MM-DD — short title` headings, newest at top. Tag author with
 BYTEA i postgres, pluss reserverte `description`/`description_model`/`described_at`
 -kolonner for en senere vision-modell-pass (qwen2.5vl) som tolker bildet.
 `mail_reader/note_images.py` gjør Pillow-prosessering: EXIF-orienter → nedskaler
-til ≤1600px (thumbnail ≤480px) → re-encode JPEG (stripper GPS/EXIF). Capture-formen
+til ≤1600px (thumbnail ≤480px) → re-encode JPEG (beholder GPS/EXIF som signal —
+se "GPS som signal" over). Capture-formen
 er multipart med `<input type=file accept=image/* capture>`; et notat kan ha bilde,
 tekst eller begge — bildeløst-tekst og tekstløst-bilde er begge gyldige. Thumbnail
 vises i `_note.html`, full størrelse ved klikk (`/notes/attachment/{id}`). Sjekk-CLI:

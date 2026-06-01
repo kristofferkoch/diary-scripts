@@ -4,8 +4,13 @@ The /notes/ page lets the user attach a photo from a phone (Firefox
 Android). Phone photos are large (several MB, multi-thousand pixels) and
 often carry an EXIF orientation tag plus location metadata. This module
 turns raw uploaded bytes into two web-friendly JPEGs — a downscaled
-"web" image and a small "thumbnail" — with orientation baked in and all
-other EXIF (incl. GPS) dropped.
+"web" image and a small "thumbnail".
+
+Orientation is baked into the pixels (and the now-redundant Orientation
+tag normalized away). The rest of the EXIF — crucially GPS — is
+deliberately PRESERVED on the web image: a note's photo location is a
+useful signal ("where was this taken"), not noise to strip. See the
+"GPS as a signal" item in IDEAS.md for what we might do with it.
 
 Pure and DB-free by design: it takes bytes and returns bytes, so it
 unit-tests without Postgres. Storage lives in `notes.py`; the route
@@ -61,15 +66,19 @@ def _to_rgb(img: Image.Image) -> Image.Image:
     return img.convert("RGB")
 
 
-def _encode_jpeg(img: Image.Image) -> bytes:
+def _encode_jpeg(img: Image.Image, exif: Image.Exif | None = None) -> bytes:
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=JPEG_QUALITY, optimize=True)
+    if exif is not None:
+        img.save(buf, format="JPEG", quality=JPEG_QUALITY, optimize=True, exif=exif)
+    else:
+        img.save(buf, format="JPEG", quality=JPEG_QUALITY, optimize=True)
     return buf.getvalue()
 
 
 def process(raw: bytes) -> ProcessedImage:
-    """Decode `raw`, apply EXIF orientation, strip metadata, and produce a
-    downscaled web JPEG plus a thumbnail JPEG.
+    """Decode `raw`, bake in EXIF orientation, and produce a downscaled web
+    JPEG plus a thumbnail JPEG. GPS / remaining EXIF is preserved on the web
+    image (it's a signal); the thumbnail is a clean derivative.
 
     Raises NotAnImage if the bytes aren't a decodable image.
     """
@@ -81,9 +90,11 @@ def process(raw: bytes) -> ProcessedImage:
     except (UnidentifiedImageError, OSError, ValueError) as exc:
         raise NotAnImage(str(exc)) from exc
 
-    # Bake in the camera's EXIF orientation, then drop all EXIF by going
-    # through a fresh RGB image (privacy: GPS tags don't survive).
+    # Bake in the camera's orientation. exif_transpose rotates the pixels and
+    # drops the now-redundant Orientation tag, but keeps the rest of the EXIF
+    # (GPS included) on the returned image — that's what we carry forward.
     img = ImageOps.exif_transpose(img)
+    exif = img.getexif()
     img = _to_rgb(img)
 
     web = img.copy()
@@ -93,7 +104,7 @@ def process(raw: bytes) -> ProcessedImage:
 
     return ProcessedImage(
         mime_type=MIME_TYPE,
-        image_bytes=_encode_jpeg(web),
+        image_bytes=_encode_jpeg(web, exif=exif or None),
         thumb_bytes=_encode_jpeg(thumb),
         width=web.width,
         height=web.height,

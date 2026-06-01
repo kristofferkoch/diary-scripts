@@ -68,10 +68,40 @@ def test_process_applies_exif_orientation():
     assert (out.width, out.height) == (100, 200)
 
 
-def test_process_strips_gps_metadata():
-    out = ni.process(_jpeg((100, 100)))
+def test_process_preserves_gps_on_web_image():
+    # GPS is a signal we keep (see IDEAS.md "GPS as a signal"). A photo with
+    # location should still carry it after processing.
+    base = Image.new("RGB", (300, 200), "green")
+    exif = base.getexif()
+    gps = exif.get_ifd(0x8825)
+    gps[1] = "N"; gps[2] = (59.0, 55.0, 23.0)  # latitude
+    gps[3] = "E"; gps[4] = (10.0, 45.0, 12.3)  # longitude
+    buf = io.BytesIO()
+    base.save(buf, format="JPEG", exif=exif)
+
+    out = ni.process(buf.getvalue())
     with Image.open(io.BytesIO(out.image_bytes)) as im:
-        assert not dict(im.getexif())  # no EXIF survives re-encode
+        kept = im.getexif().get_ifd(0x8825)
+        assert kept.get(1) == "N" and kept.get(2) == (59.0, 55.0, 23.0)
+        assert kept.get(3) == "E"
+
+
+def test_process_normalizes_orientation_tag_but_keeps_other_exif():
+    # The Orientation tag is baked into pixels and removed; unrelated EXIF
+    # (here: a Make tag) rides along.
+    base = Image.new("RGB", (200, 100), "blue")
+    exif = base.getexif()
+    exif[0x0112] = 6           # Orientation -> baked in, then dropped
+    exif[0x010F] = "TestCam"   # Make -> preserved
+    buf = io.BytesIO()
+    base.save(buf, format="JPEG", exif=exif)
+
+    out = ni.process(buf.getvalue())
+    assert (out.width, out.height) == (100, 200)  # rotated
+    with Image.open(io.BytesIO(out.image_bytes)) as im:
+        e = im.getexif()
+        assert e.get(0x0112) in (None, 1)        # orientation normalized away
+        assert e.get(0x010F) == "TestCam"        # other EXIF preserved
 
 
 def test_process_rejects_non_image():

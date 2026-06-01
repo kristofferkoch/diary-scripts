@@ -391,7 +391,8 @@ newest-first with inline **edit** and **delete**. The webapp side is
 **Photo notes.** The capture form also takes a picture (`<input
 type=file accept=image/* capture>` — on a phone it offers "take photo"
 directly). The image is processed by `mail_reader/note_images.py` (Pillow:
-EXIF-orient → downscale to ≤1600px → re-encode JPEG, stripping GPS/EXIF)
+EXIF-orient → downscale to ≤1600px → re-encode JPEG, preserving GPS/EXIF
+as a signal — see "GPS as a signal" in `mail_reader/IDEAS.md`)
 and stored as web + thumbnail BYTEA in the `note_attachments` table
 (migration `migrations/013_note_attachments.sql`). A note may carry a
 photo, text, or both — an image-only note (blank text) is valid. The list
