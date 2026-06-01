@@ -13,6 +13,7 @@ import psycopg
 import pytest
 
 from mail_reader import notes
+from mail_reader.note_images import ProcessedImage
 
 
 PG_DSN = os.environ.get("PG_DSN", "dbname=mailvec")
@@ -125,3 +126,89 @@ def test_delete_removes_and_missing_raises(conn):
 
 def test_get_returns_none_for_missing(conn):
     assert notes.get(conn, 2_000_000_003) is None
+
+
+# --- attachments -----------------------------------------------------------
+
+
+def _img(tag: bytes = b"") -> ProcessedImage:
+    return ProcessedImage(
+        mime_type="image/jpeg",
+        image_bytes=b"WEB" + tag,
+        thumb_bytes=b"THUMB" + tag,
+        width=800,
+        height=600,
+    )
+
+
+def test_add_allows_empty_body_only_when_asked(conn):
+    note = notes.add(conn, f"  {MARKER}  ", allow_empty=True)
+    assert note["body"] == MARKER  # marker survives so cleanup reaps it
+    # an image-only note can be truly blank when allow_empty is set
+    blank = notes.add(conn, "   ", allow_empty=True)
+    try:
+        assert blank["body"] == ""
+    finally:
+        notes.delete(conn, blank["id"])
+    # …but the default still rejects an empty body
+    with pytest.raises(ValueError):
+        notes.add(conn, "   ")
+
+
+def test_add_attachment_stores_and_serves_blobs(conn):
+    note = _mk(conn, "med bilde")
+    att_id = notes.add_attachment(conn, note["id"], _img(b"-A"))
+    assert att_id > 0
+
+    full = notes.get_attachment_blob(conn, att_id)
+    thumb = notes.get_attachment_blob(conn, att_id, thumb=True)
+    assert full == ("image/jpeg", b"WEB-A")
+    assert thumb == ("image/jpeg", b"THUMB-A")
+
+    meta = notes.get_attachment(conn, att_id)
+    assert meta["note_id"] == note["id"]
+    assert (meta["width"], meta["height"]) == (800, 600)
+    assert meta["description"] is None and meta["described_at"] is None
+
+
+def test_get_attachment_blob_missing_returns_none(conn):
+    assert notes.get_attachment_blob(conn, 2_000_000_004) is None
+
+
+def test_attachment_id_surfaced_in_get_and_list(conn):
+    note = _mk(conn, "synlig vedlegg")
+    assert notes.get(conn, note["id"])["attachment_id"] is None  # none yet
+    att_id = notes.add_attachment(conn, note["id"], _img())
+    assert notes.get(conn, note["id"])["attachment_id"] == att_id
+    listed = {n["id"]: n for n in notes.list_pending(conn)}
+    assert listed[note["id"]]["attachment_id"] == att_id
+
+
+def test_image_only_note_has_blank_body_and_attachment(conn):
+    note = notes.add(conn, "", allow_empty=True)
+    try:
+        att_id = notes.add_attachment(conn, note["id"], _img())
+        fetched = notes.get(conn, note["id"])
+        assert fetched["body"] == ""
+        assert fetched["attachment_id"] == att_id
+    finally:
+        notes.delete(conn, note["id"])
+
+
+def test_set_description_versions_with_model_and_time(conn):
+    note = _mk(conn, "beskriv meg")
+    att_id = notes.add_attachment(conn, note["id"], _img())
+    notes.set_description(conn, att_id, "et bilde av en katt", "qwen2.5vl:7b")
+    meta = notes.get_attachment(conn, att_id)
+    assert meta["description"] == "et bilde av en katt"
+    assert meta["description_model"] == "qwen2.5vl:7b"
+    assert meta["described_at"] is not None
+    with pytest.raises(KeyError):
+        notes.set_description(conn, 2_000_000_005, "x", "m")
+
+
+def test_deleting_note_cascades_attachment(conn):
+    note = _mk(conn, "slett med bilde")
+    att_id = notes.add_attachment(conn, note["id"], _img())
+    notes.delete(conn, note["id"])
+    assert notes.get_attachment_blob(conn, att_id) is None

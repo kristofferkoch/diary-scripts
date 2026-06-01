@@ -9,16 +9,20 @@ Format: `## YYYY-MM-DD — short title` headings, newest at top. Tag author with
 
 ---
 
-## 2026-05-31 — notater: bilde-opplasting (user)
+## 2026-05-31 — notater: bilde-opplasting (user) — ✅ IMPLEMENTERT 2026-06-01
 
 > "Legg til mulighet for å ta eller laste opp bilde på notatsiden. (firefox på android)"
 
-Notes-capture-siden (`/mail/notes/`) tar bare fri-tekst i dag. user vil kunne
-**ta/laste opp et bilde** fra mobil (Firefox Android) sammen med — eller i stedet
-for — teksten. Implikasjoner: `<input type="file" accept="image/*" capture>` i
-capture-formen, en lagringsplass for vedlegg (disk under `mail_reader/` eller en
-`notes_attachments`-tabell + bytes i postgres), og rendering av thumbnail i
-`_note.html`. Bør tåle at notat har bilde men tom tekst. Kilde: notes-queue #27.
+**Landet.** `note_attachments`-tabell (migration 013) lagrer web+thumbnail som
+BYTEA i postgres, pluss reserverte `description`/`description_model`/`described_at`
+-kolonner for en senere vision-modell-pass (qwen2.5vl) som tolker bildet.
+`mail_reader/note_images.py` gjør Pillow-prosessering: EXIF-orienter → nedskaler
+til ≤1600px (thumbnail ≤480px) → re-encode JPEG (stripper GPS/EXIF). Capture-formen
+er multipart med `<input type=file accept=image/* capture>`; et notat kan ha bilde,
+tekst eller begge — bildeløst-tekst og tekstløst-bilde er begge gyldige. Thumbnail
+vises i `_note.html`, full størrelse ved klikk (`/notes/attachment/{id}`). Sjekk-CLI:
+listingen flagger `📎 bilde (vedlegg #N)`, og `notes.py image N <fil>` dumper bildet
+så det kan åpnes. Se `scripts/README.md` → "Notes queue — notes.py".
 
 ## 2026-05-31 — notater: vis klokkeslett (user)
 

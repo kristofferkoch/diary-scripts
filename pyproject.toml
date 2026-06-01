@@ -8,6 +8,7 @@ dependencies = [
     "mail-parser-reply>=1.0",
     # mail_reader webapp
     "fastapi>=0.115",
+    "python-multipart>=0.0.9",  # multipart/form-data for the /notes/ photo upload
     "uvicorn[standard]>=0.32",
     "jinja2>=3.1",
     "nh3>=0.2",

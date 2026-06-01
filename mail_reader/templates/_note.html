@@ -4,7 +4,15 @@
    work identically whether the note was server-rendered or just prepended
    by the capture form. #}
 <li class="note" id="note-{{ note.id }}">
-  <div class="note-body">{{ note.body }}</div>
+  {% if note.body %}<div class="note-body">{{ note.body }}</div>{% endif %}
+  {% if note.attachment_id %}
+  {# Thumbnail in the list; tap opens the full-size image. Both are served
+     from /notes/attachment/{id}. loading=lazy keeps a long queue cheap. #}
+  <a class="note-photo" href="{{ url_for('get_note_attachment', attachment_id=note.attachment_id) }}" target="_blank" rel="noopener">
+    <img src="{{ url_for('get_note_attachment_thumb', attachment_id=note.attachment_id) }}"
+         alt="Vedlagt bilde" loading="lazy">
+  </a>
+  {% endif %}
   <div class="note-foot">
     <span class="note-when">{{ note.created_at | short_date }}{% if note.updated_at != note.created_at %} · endret{% endif %}</span>
     <span class="note-actions">

@@ -18,14 +18,15 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import cast
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from . import agenda as agenda_mod
 from . import calendar_md as calendar_mod
 from . import db, inbox as inbox_mod, message as message_mod, related as related_mod
+from . import note_images as note_images_mod
 from . import notes as notes_mod
 from . import shopping as shopping_mod
 from . import entities as entities_mod
@@ -331,15 +332,61 @@ def get_notes(request: Request):
 
 
 @app.post("/notes/", response_class=HTMLResponse)
-async def post_note(request: Request):
-    """Add a note. Returns the new note's <li> for HTMX to prepend."""
-    body = await _form_field(request, "body")
+async def post_note(
+    request: Request,
+    body: str = Form(""),
+    image: UploadFile | None = File(None),
+):
+    """Add a note, optionally with a photo. Returns the new note's <li> for
+    HTMX to prepend.
+
+    The capture form is multipart (it carries a file input), so this is the
+    one notes endpoint that uses python-multipart rather than the hand-parsed
+    urlencoded helper. A note may carry text, an image, or both — an
+    image-only note (blank text) is valid. Bad image bytes fail loudly with
+    400 before any row is written."""
+    raw = await image.read() if image is not None and image.filename else b""
+    processed = None
+    if raw:
+        try:
+            processed = note_images_mod.process(raw)
+        except note_images_mod.NotAnImage:
+            raise HTTPException(400, "ugyldig bildefil")
     with db.connect() as conn:
         try:
-            note = notes_mod.add(conn, body)
+            note = notes_mod.add(conn, body, allow_empty=processed is not None)
         except ValueError:
             raise HTTPException(400, "empty note")
+        if processed is not None:
+            notes_mod.add_attachment(conn, note["id"], processed)
+            note = notes_mod.get(conn, note["id"])
     return TEMPLATES.TemplateResponse(request, "_note.html", {"note": note})
+
+
+@app.get("/notes/attachment/{attachment_id:int}")
+def get_note_attachment(attachment_id: int):
+    """Full web-size image for a note attachment. Content is immutable for a
+    given id, so it caches hard."""
+    return _serve_attachment(attachment_id, thumb=False)
+
+
+@app.get("/notes/attachment/{attachment_id:int}/thumb")
+def get_note_attachment_thumb(attachment_id: int):
+    """Small thumbnail for the note list."""
+    return _serve_attachment(attachment_id, thumb=True)
+
+
+def _serve_attachment(attachment_id: int, *, thumb: bool) -> Response:
+    with db.connect() as conn:
+        blob = notes_mod.get_attachment_blob(conn, attachment_id, thumb=thumb)
+    if blob is None:
+        raise HTTPException(404, "attachment not found")
+    mime_type, data = blob
+    return Response(
+        content=data,
+        media_type=mime_type,
+        headers={"Cache-Control": "private, max-age=31536000, immutable"},
+    )
 
 
 @app.get("/notes/{note_id:int}", response_class=HTMLResponse)

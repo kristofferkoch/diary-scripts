@@ -388,6 +388,18 @@ land in the `notes_queue` Postgres table (migration
 newest-first with inline **edit** and **delete**. The webapp side is
 `mail_reader/notes.py` (CRUD) + routes in `mail_reader/server.py`.
 
+**Photo notes.** The capture form also takes a picture (`<input
+type=file accept=image/* capture>` — on a phone it offers "take photo"
+directly). The image is processed by `mail_reader/note_images.py` (Pillow:
+EXIF-orient → downscale to ≤1600px → re-encode JPEG, stripping GPS/EXIF)
+and stored as web + thumbnail BYTEA in the `note_attachments` table
+(migration `migrations/013_note_attachments.sql`). A note may carry a
+photo, text, or both — an image-only note (blank text) is valid. The list
+renders the thumbnail; tapping opens the full image. The table also has
+`description` / `description_model` / `described_at` columns reserved for
+a future vision-model pass (e.g. qwen2.5vl) to describe each photo (the
+"image attachment summaries" item in `mail_reader/IDEAS.md`).
+
 The check round **digests** the queue:
 
 ```bash
@@ -396,19 +408,23 @@ uv run scripts/notes.py list --all # include already-done notes
 uv run scripts/notes.py add "text" # add a note from the terminal
 uv run scripts/notes.py done 42    # mark note 42 handled — drops off the page
 uv run scripts/notes.py rm 42      # hard-delete note 42
+uv run scripts/notes.py image 7    # dump attachment #7's image to a file to view
 ```
 
 SOP: run `notes.py` with no args. For each pending note, do the real
 work it implies — file a `CALENDAR.md` entry, update a topic file, add a
 daily-note section, open a Spond reply, etc. — then `done <id>` it so it
 stops showing on the page but stays in the table as a record of what was
-captured. Use `rm` only for genuine junk (test rows, duplicates). If a
-note is ambiguous, surface it to the user rather than guessing. Notes
-are free-text from a phone on the go: expect terse, lower-case,
-half-sentences.
+captured. A note flagged `📎 bilde (vedlegg #N)` carries a photo: until a
+description exists, `notes.py image N <file>` writes the image out so you
+can open/read it before acting. Use `rm` only for genuine junk (test
+rows, duplicates). If a note is ambiguous, surface it to the user rather
+than guessing. Notes are free-text from a phone on the go: expect terse,
+lower-case, half-sentences.
 
-Tests: `uv run pytest mail_reader/test_notes.py` (skips if the mailvec DB
-is unreachable).
+Tests: `uv run pytest mail_reader/test_notes.py mail_reader/test_note_images.py`
+(the notes CRUD tests skip if the mailvec DB is unreachable; the image
+tests are DB-free).
 
 ---
 

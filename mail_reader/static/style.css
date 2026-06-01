@@ -1410,6 +1410,44 @@ li.cal-event-allday .cal-event-time {
 .note-editing { border-color: var(--accent-soft); }
 .note-edit-form .note-form-actions { margin-top: var(--s-2); }
 
+/* Photo attach control in the capture form — a label wrapping a hidden
+   file input, styled like the secondary note buttons. */
+.note-photo-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--s-2) var(--s-3);
+  cursor: pointer;
+  max-width: 60%;
+}
+.note-photo-btn:hover { color: var(--ink-strong); border-color: var(--ink-strong); }
+.note-photo-btn svg { flex: none; }
+.note-photo-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Attached-image thumbnail in a note's <li>. */
+.note-photo {
+  display: block;
+  margin: var(--s-2) 0 0;
+}
+.note-photo img {
+  display: block;
+  max-width: 100%;
+  max-height: 240px;
+  width: auto;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--rule);
+}
+
 /* --------------------------------------------------------------------------
    Shopping list (/shopping/) — add box + categorised checklist
    -------------------------------------------------------------------------- */

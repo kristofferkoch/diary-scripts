@@ -6,19 +6,36 @@
   {% if notes %}<span class="count">{{ notes|length }} i kø</span>{% endif %}
 </div>
 
-{# Capture box. Posts the textarea to /notes/; the server returns the new
-   note's <li> which HTMX prepends to the list. after-request resets the
-   form (clears the textarea) and refocuses it for rapid entry. #}
+{# Capture box. Posts the textarea (and optional photo) to /notes/; the server
+   returns the new note's <li> which HTMX prepends to the list. The form is
+   multipart (hx-encoding) so the file input is sent as binary. after-request
+   resets the form (clears text + file input) and refocuses for rapid entry.
+   Text is NOT required here — an image-only note is valid; the submit button's
+   onclick blocks a send with neither text nor photo. #}
 <form class="note-form"
       hx-post="{{ url_for('post_note') }}"
+      hx-encoding="multipart/form-data"
       hx-target="#note-list"
       hx-swap="afterbegin"
       hx-on::after-request="if(event.detail.successful){this.reset();this.querySelector('textarea').focus();var e=document.getElementById('note-empty');if(e)e.remove();}">
   <textarea name="body" class="note-input" rows="3"
             placeholder="Skriv noe du ikke vil glemme – tas med i neste sjekk…"
-            autofocus required></textarea>
+            autofocus></textarea>
   <div class="note-form-actions">
-    <button type="submit" class="btn-primary">Legg i kø</button>
+    {# accept+capture lets a phone offer "take photo" directly; on desktop it
+       falls back to a normal file picker. #}
+    <label class="note-photo-btn">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+           stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M2 5.5 A1 1 0 0 1 3 4.5 H4.8 L5.8 3 H10.2 L11.2 4.5 H13 A1 1 0 0 1 14 5.5 V12 A1 1 0 0 1 13 13 H3 A1 1 0 0 1 2 12 Z"/>
+        <circle cx="8" cy="8.5" r="2.4"/>
+      </svg>
+      <span class="note-photo-name">Bilde</span>
+      <input type="file" name="image" accept="image/*" capture="environment" hidden
+             onchange="this.closest('label').querySelector('.note-photo-name').textContent=this.files.length?this.files[0].name:'Bilde';">
+    </label>
+    <button type="submit" class="btn-primary"
+            onclick="var f=this.form;if(!f.body.value.trim()&&!f.image.files.length){f.querySelector('textarea').focus();return false;}">Legg i kø</button>
   </div>
 </form>
 
