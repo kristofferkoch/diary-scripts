@@ -69,7 +69,7 @@ SAMPLE_CSV = textwrap.dedent("""\
     Dato;Beløp;Originalt Beløp;Original Valuta;Til konto;Til kontonummer;Fra konto;Fra kontonummer;Type;Tekst;KID;Hovedkategori;Underkategori
     2026-04-01;-198,15;-198,15;NOK;;6030.05.00288;BULDER BRUKSKONTO;3610.54.55385;Efaktura;NORDEA LIV AS;070520932297;Hus og hjem;Forsikring
     2026-04-02;-2278,00;-2278,00;NOK;;1234.56.78901;BULDER BRUKSKONTO;3610.54.55385;Efaktura;Tibber Norge As;111111111;Hus og hjem;Strøm
-    2026-04-25;48268,00;48268,00;NOK;BULDER BRUKSKONTO;3610.54.55385;;;Lønn;Fra: EXAMPLECORP AS;;Inntekter;Lønn
+    2026-04-25;45000,00;45000,00;NOK;BULDER BRUKSKONTO;3610.54.55385;;;Lønn;Fra: EXAMPLECORP AS;;Inntekter;Lønn
     2026-04-30;-70000,00;-70000,00;NOK;;9999.99.99999;BULDER RAMMELÅN;1111.11.11111;Betaling;;;Hus og hjem;Lån
     2026-05-02;-198,15;-198,15;NOK;;6030.05.00288;BULDER BRUKSKONTO;3610.54.55385;Efaktura;NORDEA LIV AS;070520932298;Hus og hjem;Forsikring
     2026-05-02;-2278,00;-2278,00;NOK;;1234.56.78901;BULDER BRUKSKONTO;3610.54.55385;Efaktura;Tibber Norge As;111111112;Hus og hjem;Strøm
@@ -112,9 +112,9 @@ def test_date_range():
 def test_per_month_totals():
     txns = parse_csv_text(SAMPLE_CSV)
     months = per_month_totals(txns)
-    assert months["2026-04"]["inn"] == Decimal("48268.00")
+    assert months["2026-04"]["inn"] == Decimal("45000.00")
     assert months["2026-04"]["ut"] == Decimal("-72476.15")
-    assert months["2026-04"]["netto"] == Decimal("-24208.15")
+    assert months["2026-04"]["netto"] == Decimal("-27476.15")
     assert "2026-05" in months
 
 
@@ -166,7 +166,7 @@ def test_recurring_outflows_sorted_by_total_desc():
 def test_large_transactions_default_threshold():
     txns = parse_csv_text(SAMPLE_CSV)
     big = large_transactions(txns)
-    # ≥20k: -70k Lån, -92990 Apple, +48268 Lønn
+    # ≥20k: -70k Lån, -92990 Apple, +45000 Lønn
     assert len(big) == 3
     assert big[0].tekst == "Apple"  # largest |Beløp|
 
