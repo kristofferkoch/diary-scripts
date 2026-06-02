@@ -256,9 +256,13 @@ def month_grid(today: _dt.date) -> dict[str, Any]:
     Returns:
         {"name": "Mai 2026",
          "weeks": [[cell, cell, ..., cell], ...]}
-    each cell: {"day": int, "in_month": bool, "is_today": bool, "has_events": bool}
+    each cell: {"day": int, "in_month": bool, "is_today": bool,
+                "has_events": bool, "event_count": int}
+    where event_count is the number of one-off events on the day, capped at 3
+    (so the template renders one dot per event, up to three).
     """
     import calendar as _cal
+    from collections import Counter
 
     try:
         text = CALENDAR_MD.read_text()
@@ -266,11 +270,12 @@ def month_grid(today: _dt.date) -> dict[str, Any]:
     except FileNotFoundError:
         events = []
 
-    busy: set[_dt.date] = set()
+    # Count events per day. A multi-day span counts once for each day it covers.
+    busy: Counter[_dt.date] = Counter()
     for ev in events:
         d = ev["start"]
         while d <= ev["end"]:
-            busy.add(d)
+            busy[d] += 1
             d += _dt.timedelta(days=1)
 
     # Monday-first month grid spanning whatever weeks cover the 1st..last.
@@ -287,6 +292,9 @@ def month_grid(today: _dt.date) -> dict[str, Any]:
                     "in_month": cur.month == today.month,
                     "is_today": cur == today,
                     "has_events": cur in busy and cur.month == today.month,
+                    "event_count": min(busy.get(cur, 0), 3)
+                    if cur.month == today.month
+                    else 0,
                 }
             )
             cur += _dt.timedelta(days=1)

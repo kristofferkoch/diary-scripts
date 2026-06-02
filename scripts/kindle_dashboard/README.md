@@ -40,8 +40,8 @@ PIL rotate −90° → mode "L" → save optimized PNG. Coercion lives in
 ## What's on the screen
 
 - Big date header ("Torsdag 28. mai") + current time
-- Left column: mini-month grid (today highlighted, days with events get a dot)
-  + agenda for today + tomorrow
+- Left column: mini-month grid (today highlighted, busy days get one dot per
+  one-off event, capped at three) + agenda for today + tomorrow
 - Right column: yr.no weather (today + 3 days) + Spond unanswered RSVPs
 - Footer: sunrise/sunset + last update time
 

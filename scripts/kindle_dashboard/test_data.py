@@ -72,3 +72,24 @@ def test_calendar_block_no_recurring_on_other_weekday(tmp_path, monkeypatch):
     wednesday = _dt.date(2026, 6, 3)
     block = data.calendar_block(wednesday, days_ahead=0)
     assert all("Svømming" not in ev["text"] for ev in block[0]["events"])
+
+
+def test_month_grid_counts_events_per_day(tmp_path, monkeypatch):
+    """Busy-day dots scale with event count, capped at 3."""
+    cal = tmp_path / "CALENDAR.md"
+    cal.write_text(
+        "## One-off events by month\n\n"
+        "- **2026-06-02 09:00** — **A** — x\n"
+        "- **2026-06-02 12:00** — **B** — y\n"
+        "- **2026-06-02 17:00** — **C** — z\n"
+        "- **2026-06-02 19:00** — **D** — w\n"   # 4 events on the 2nd -> capped at 3
+        "- **2026-06-05 10:00** — **E** — q\n"   # single event
+    )
+    monkeypatch.setattr(data, "CALENDAR_MD", cal)
+    grid = data.month_grid(_dt.date(2026, 6, 1))
+    by_day = {c["day"]: c for week in grid["weeks"] for c in week if c["in_month"]}
+    assert by_day[2]["event_count"] == 3        # 4 events, capped at 3
+    assert by_day[2]["has_events"] is True
+    assert by_day[5]["event_count"] == 1
+    assert by_day[3]["event_count"] == 0
+    assert by_day[3]["has_events"] is False

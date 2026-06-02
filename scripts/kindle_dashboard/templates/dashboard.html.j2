@@ -87,14 +87,14 @@
     border-radius: 4px;
     font-weight: 800;
   }
-  table.month-grid td.busy::after {
-    content: "●";
+  table.month-grid td .dots {
     position: absolute;
     left: 50%; bottom: 0;
     transform: translateX(-50%);
-    font-size: 12px; line-height: 1;
+    font-size: 11px; line-height: 1; letter-spacing: 2px;
+    white-space: nowrap;
   }
-  table.month-grid td.today.busy::after { color: #fff; }
+  table.month-grid td.today .dots { color: #fff; }
 
   .agenda { overflow: hidden; }
   .agenda h3 {
@@ -264,6 +264,7 @@
                   {% for cell in week %}
                     <td class="{% if not cell.in_month %}out{% endif %} {% if cell.is_today %}today{% endif %} {% if cell.has_events %}busy{% endif %}">
                       <span class="num">{{ cell.day }}</span>
+                      {% if cell.event_count %}<span class="dots">{{ "●" * cell.event_count }}</span>{% endif %}
                     </td>
                   {% endfor %}
                 </tr>
