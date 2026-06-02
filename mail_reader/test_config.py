@@ -84,6 +84,39 @@ def test_cfg_path_default_when_absent(with_config):
     assert config.cfg_path("important_senders", fallback) == fallback
 
 
+def test_host_urls_come_from_config(with_config, monkeypatch: pytest.MonkeyPatch):
+    """Regression for 2026-06-02: the host must be read from `hosts.*`, not a
+    hardcoded `gpu-host` default that silently leaked when $OLLAMA_URL was unset."""
+    monkeypatch.delenv("OLLAMA_URL", raising=False)
+    monkeypatch.delenv("MLX_BASE", raising=False)
+    monkeypatch.delenv("NUEXTRACT_BASE", raising=False)
+    with_config(
+        """
+        [hosts]
+        llm = "studio.example:11434"
+        mlx = "studio.example:8080"
+        nuextract = "studio.example:8081"
+        """
+    )
+    assert config.ollama_url() == "http://studio.example:11434"
+    assert config.mlx_url() == "http://studio.example:8080"
+    assert config.nuextract_url() == "http://studio.example:8081"
+
+
+def test_host_url_env_overrides_config(with_config, monkeypatch: pytest.MonkeyPatch):
+    with_config('[hosts]\nllm = "studio.example:11434"\n')
+    monkeypatch.setenv("OLLAMA_URL", "http://override:9999/")
+    assert config.ollama_url() == "http://override:9999"  # env wins, trailing / trimmed
+
+
+def test_host_url_falls_back_to_placeholder_when_unconfigured(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("OLLAMA_URL", raising=False)
+    monkeypatch.delenv("DIARY_CONFIG", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/nonexistent-xdg-dir")
+    config.reload()
+    assert config.ollama_url() == "http://gpu-host:11434"
+
+
 def test_explicit_missing_config_raises(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("DIARY_CONFIG", "/no/such/config.toml")
     config.reload()

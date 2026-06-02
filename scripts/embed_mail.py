@@ -58,6 +58,8 @@ from typing import TypedDict
 
 import psycopg
 
+from mail_reader.config import ollama_url
+
 
 # `from` is a Python keyword, so use TypedDict's functional syntax to keep the
 # dict key matching the email header name exactly.
@@ -96,7 +98,7 @@ except Exception:
 ME = [a.strip() for a in os.environ.get(
     "ME_ADDRS", "user@example.com").split(",") if a.strip()]
 PG_DSN = os.environ.get("PG_DSN", "dbname=mailvec")
-OLLAMA = os.environ.get("OLLAMA_URL", "http://gpu-host:11434").rstrip("/")
+OLLAMA = ollama_url()  # $OLLAMA_URL → config hosts.llm (see config.ollama_url)
 MODEL = os.environ.get("EMBED_MODEL", "bge-m3:latest")
 BATCH_CHUNKS = int(os.environ.get("EMBED_BATCH", "32"))
 

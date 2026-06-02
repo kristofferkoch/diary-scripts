@@ -35,9 +35,10 @@ from typing import TypedDict
 import psycopg
 
 from . import db, extract, priority
+from .config import ollama_url
 
 
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://gpu-host:11434").rstrip("/")
+OLLAMA_URL = ollama_url()  # $OLLAMA_URL → config hosts.llm (see config.ollama_url)
 
 # Bump when the prompt changes; rows at older versions are preserved and
 # surfaced as `done_stale` while a new version regen runs.

@@ -16,8 +16,10 @@ import urllib.request
 
 import psycopg
 
+from mail_reader.config import ollama_url
+
 PG_DSN = os.environ.get("PG_DSN", "dbname=mailvec")
-OLLAMA = os.environ.get("OLLAMA_URL", "http://gpu-host:11434").rstrip("/")
+OLLAMA = ollama_url()  # $OLLAMA_URL → config hosts.llm (see config.ollama_url)
 MODEL = os.environ.get("EMBED_MODEL", "bge-m3:latest")
 
 

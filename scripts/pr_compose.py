@@ -69,7 +69,7 @@ import httpx
 # notmuch search, raw fetch, HTML→text). Per feedback-use-mail-tools:
 # don't roll your own MIME extraction — extend mailshow.py if anything
 # is missing.
-from mail_reader.config import workspace_root
+from mail_reader.config import mlx_url, nuextract_url, workspace_root
 from scripts.mailshow import (
     cursor_query,
     fetch_raw,
@@ -81,8 +81,8 @@ from scripts.mailshow import (
 
 # ---------- Config
 
-MLX_BASE = os.environ.get("MLX_BASE", "http://gpu-host:8080")
-NUEXTRACT_BASE = os.environ.get("NUEXTRACT_BASE", "http://gpu-host:8081")
+MLX_BASE = mlx_url()              # $MLX_BASE → config hosts.mlx
+NUEXTRACT_BASE = nuextract_url()  # $NUEXTRACT_BASE → config hosts.nuextract
 
 # Two-tier model setup, two servers.
 #

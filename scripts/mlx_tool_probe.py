@@ -30,20 +30,20 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
 from pathlib import Path
 
 import httpx
 
+from mail_reader.config import mlx_url
 from scripts.pr_compose import (
     BODY_MAX_CHARS, NUEXTRACT_BASE, WRITER_MODEL, WRITER_SCHEMA,
     _latest_msg_in_thread, _strip_code_fence, _tool_get_calendar_events,
     _writer_payload, canonicalize_for_llm, load_mail,
 )
 
-MLX_BASE = os.environ.get("MLX_BASE", "http://gpu-host:8080")
+MLX_BASE = mlx_url()  # $MLX_BASE → config hosts.mlx
 DEFAULT_MODEL = "mlx-community/Qwen3.6-35B-A3B-4bit-DWQ"
 MAX_ROUNDS = 5
 

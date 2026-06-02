@@ -121,3 +121,33 @@ def cfg_path(dotted: str, default: Path) -> Path:
             # symlinked into the diary workspace).
             p = base.resolve().parent / p
     return p
+
+
+def _host_url(env_var: str, dotted: str, default_hostport: str) -> str:
+    """Build ``http://host:port`` from an env override or a ``hosts.*`` config key.
+
+    The host MUST be sourced from config, not just a hardcoded default. When
+    this code moved to the public ``diary-scripts`` submodule the real hosts
+    were wiped to ``gpu-host`` placeholders; consumers read only their env var
+    (``$OLLAMA_URL`` etc.), so once that var stopped being exported the dead
+    placeholder leaked through, DNS failed, and the 15-min embed pipeline went
+    down silently for hours (2026-06-02). Reading the ``hosts.*`` config key
+    here closes that gap; the env var still wins for ad-hoc overrides.
+    """
+    return (os.environ.get(env_var)
+            or f"http://{cfg(dotted, default_hostport)}").rstrip("/")
+
+
+def ollama_url() -> str:
+    """Ollama embedding/chat server, e.g. ``http://gpu-host:11434``."""
+    return _host_url("OLLAMA_URL", "hosts.llm", "gpu-host:11434")
+
+
+def mlx_url() -> str:
+    """pr_compose MLX server (classifier/writer), e.g. ``http://gpu-host:8080``."""
+    return _host_url("MLX_BASE", "hosts.mlx", "gpu-host:8080")
+
+
+def nuextract_url() -> str:
+    """pr_compose NuExtract extractor server, e.g. ``http://gpu-host:8081``."""
+    return _host_url("NUEXTRACT_BASE", "hosts.nuextract", "gpu-host:8081")
