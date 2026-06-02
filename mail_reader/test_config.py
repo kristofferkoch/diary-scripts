@@ -53,7 +53,23 @@ def test_inline_table_member_ids(with_config):
 def test_cfg_path_relative_resolves_against_config_dir(with_config):
     p = with_config('important_senders = "senders.txt"\n')
     got = config.cfg_path("important_senders", Path("/fallback/senders.txt"))
-    assert got == p.parent / "senders.txt"
+    assert got == p.resolve().parent / "senders.txt"
+
+
+def test_cfg_path_relative_resolves_through_symlink(tmp_path, monkeypatch):
+    real_dir = tmp_path / "diary" / "config"
+    real_dir.mkdir(parents=True)
+    real = real_dir / "config.toml"
+    real.write_text('important_senders = "senders.txt"\n')
+    link_dir = tmp_path / ".config" / "diary"
+    link_dir.mkdir(parents=True)
+    link = link_dir / "config.toml"
+    link.symlink_to(real)
+    monkeypatch.setenv("DIARY_CONFIG", str(link))
+    config.reload()
+    got = config.cfg_path("important_senders", Path("/fallback/senders.txt"))
+    assert got == real_dir / "senders.txt"   # next to the real file, not the link
+    config.reload()
 
 
 def test_cfg_path_absolute_is_untouched(with_config):

@@ -85,5 +85,8 @@ def cfg_path(dotted: str, default: Path) -> Path:
     if not p.is_absolute():
         base = _config_path()
         if base is not None:
-            p = base.parent / p
+            # resolve() so a relative value lands next to the *real* config
+            # file even when reached through a symlink (e.g. the XDG slot
+            # symlinked into the diary workspace).
+            p = base.resolve().parent / p
     return p
