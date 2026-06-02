@@ -32,7 +32,7 @@ from . import shopping as shopping_mod
 from . import entities as entities_mod
 from . import summarize as summarize_mod
 from . import workers as workers_mod
-from .date_format import relative_day, short_date
+from .date_format import relative_day, short_date, short_datetime
 from .thread_id import ThreadId
 
 
@@ -47,6 +47,7 @@ _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 HERE = Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=str(HERE / "templates"))
 TEMPLATES.env.filters["short_date"] = short_date
+TEMPLATES.env.filters["short_datetime"] = short_datetime
 TEMPLATES.env.filters["relative_day"] = relative_day
 
 

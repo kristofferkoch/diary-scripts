@@ -233,10 +233,20 @@ def _parse_iso(s: str) -> _dt.datetime:
 
 
 def _short_when(d: _dt.datetime) -> str:
-    """Compact Norwegian "Tor 12/6 17:30" — small enough for one line."""
+    """Compact Norwegian "Tor 12.6 17:30" — small enough for one line.
+
+    Norwegian writes dates with dots (12.6), not slashes (12/6). Asserting
+    on the separator keeps the doctest independent of the system timezone
+    that ``astimezone()`` resolves against.
+
+    >>> "/" in _short_when(_dt.datetime(2026, 6, 12, 17, 30, tzinfo=_dt.UTC))
+    False
+    >>> _short_when(_dt.datetime(2026, 6, 12, 17, 30, tzinfo=_dt.UTC)).count(".")
+    1
+    """
     local = d.astimezone()
     wday = ["Man", "Tir", "Ons", "Tor", "Fre", "Lør", "Søn"][local.weekday()]
-    return f"{wday} {local.day}/{local.month} {local.strftime('%H:%M')}"
+    return f"{wday} {local.day}.{local.month} {local.strftime('%H:%M')}"
 
 
 def spond_block() -> list[dict[str, str]]:

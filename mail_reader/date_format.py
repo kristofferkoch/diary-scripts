@@ -36,6 +36,24 @@ def short_date(dt: datetime | None, *, today: datetime | None = None) -> str:
     return f"{dt.day:02d}. {mon} {dt.year}"
 
 
+def short_datetime(dt: datetime | None, *, today: datetime | None = None) -> str:
+    """`short_date` plus a Norwegian-style time.
+
+    Used on the notes page where several notes are often captured the same
+    day and the date alone can't tell them apart (user, notes-queue #26).
+
+    >>> short_datetime(datetime(2026, 5, 31, 14, 7), today=datetime(2026, 5, 22))
+    '31. mai 14:07'
+    >>> short_datetime(datetime(2026, 5, 31, 7, 30), today=datetime(2026, 5, 22))
+    '31. mai 07:30'
+    >>> short_datetime(None)
+    ''
+    """
+    if dt is None:
+        return ""
+    return f"{short_date(dt, today=today)} {dt.hour:02d}:{dt.minute:02d}"
+
+
 _NO_WEEKDAYS = ["man", "tir", "ons", "tor", "fre", "lør", "søn"]
 _NO_WEEKDAYS_FULL = ["mandag", "tirsdag", "onsdag", "torsdag", "fredag", "lørdag", "søndag"]
 

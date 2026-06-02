@@ -52,14 +52,14 @@ vises i `_note.html`, full størrelse ved klikk (`/notes/attachment/{id}`). Sjek
 listingen flagger `📎 bilde (vedlegg #N)`, og `notes.py image N <fil>` dumper bildet
 så det kan åpnes. Se `scripts/README.md` → "Notes queue — notes.py".
 
-## 2026-05-31 — notater: vis klokkeslett (user)
+## 2026-05-31 — notater: vis klokkeslett (user) ✅ LANDET 2026-06-02
 
 > "Legg til klokkeslett på notat siden."
 
-`_note.html` viser i dag bare dato (`short_date`, f.eks. «31. mai»). user vil ha
-**klokkeslett** med — nyttig når flere notater fanges samme dag. Enkel endring:
-egen `short_datetime`-filter (eller utvid fot-linja med `%H:%M`). Kilde:
-notes-queue #26.
+`_note.html` viste før bare dato (`short_date`, f.eks. «31. mai»). user ville ha
+**klokkeslett** med — nyttig når flere notater fanges samme dag. Løst med ny
+`short_datetime`-filter i `date_format.py` («31. mai 14:07», doctestet),
+registrert i `server.py` og brukt i `_note.html`. Kilde: notes-queue #26.
 
 ## 2026-05-23 — tier-2 escalation flag → second-level agent (user)
 

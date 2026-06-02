@@ -22,6 +22,22 @@ from datetime import date, time, timedelta
 from pathlib import Path
 
 import markdown as md_lib
+from markdown.extensions import Extension
+from markdown.inlinepatterns import SimpleTagInlineProcessor
+
+
+class _StrikethroughExtension(Extension):
+    """GFM-style ``~~strikethrough~~`` → ``<del>``.
+
+    Python-Markdown core (incl. the ``extra`` bundle) has no strikethrough,
+    so ``~~velg fliser~~`` in CALENDAR.md rendered as literal tildes. The
+    "Åpne oppgaver" task block uses it to cross off done items.
+    """
+
+    def extendMarkdown(self, md):
+        md.inlinePatterns.register(
+            SimpleTagInlineProcessor(r"(~{2})(.+?)~{2}", "del"), "del", 175
+        )
 
 
 _ISO = r"\d{4}-\d{2}-\d{2}"
@@ -121,7 +137,7 @@ def render_markdown(path: Path) -> str:
         text = text[idx + 1:]  # +1 skips the leading newline
     return md_lib.markdown(
         text,
-        extensions=["extra", "sane_lists", "tables"],
+        extensions=["extra", "sane_lists", "tables", _StrikethroughExtension()],
         output_format="html",
     )
 

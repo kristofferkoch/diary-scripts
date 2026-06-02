@@ -11,11 +11,21 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
-from mail_reader.calendar_md import parse_calendar
+from mail_reader.calendar_md import parse_calendar, render_markdown
 
 
 def test_missing_file_returns_empty():
     assert parse_calendar(Path("/does/not/exist.md")) == []
+
+
+def test_strikethrough_renders_del(tmp_path):
+    """`~~text~~` in CALENDAR.md must render as <del>, not literal tildes.
+    Regression for the 'Åpne oppgaver' done-item crossout (note #102)."""
+    p = tmp_path / "CAL.md"
+    p.write_text("## H\n\n- ~~velg fliser~~ ✅ ferdig\n", encoding="utf-8")
+    html = render_markdown(p)
+    assert "<del>velg fliser</del>" in html
+    assert "~~" not in html
 
 
 def test_parse_real_repo_files_smoke():

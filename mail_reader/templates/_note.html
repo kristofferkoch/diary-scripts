@@ -14,7 +14,7 @@
   </a>
   {% endif %}
   <div class="note-foot">
-    <span class="note-when">{{ note.created_at | short_date }}{% if note.updated_at != note.created_at %} · endret{% endif %}</span>
+    <span class="note-when">{{ note.created_at | short_datetime }}{% if note.updated_at != note.created_at %} · endret{% endif %}</span>
     <span class="note-actions">
       <button type="button" class="note-btn"
               hx-get="{{ url_for('get_note_edit', note_id=note.id) }}"
