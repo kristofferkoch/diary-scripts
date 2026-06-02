@@ -37,10 +37,7 @@ from pathlib import Path
 
 import httpx
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
-from scripts.pr_compose import (  # noqa: E402
+from scripts.pr_compose import (
     BODY_MAX_CHARS, NUEXTRACT_BASE, WRITER_MODEL, WRITER_SCHEMA,
     _latest_msg_in_thread, _strip_code_fence, _tool_get_calendar_events,
     _writer_payload, canonicalize_for_llm, load_mail,

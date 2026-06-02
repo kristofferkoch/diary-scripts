@@ -23,6 +23,29 @@ dependencies = [
     "astral>=3.2",
 ]
 
+# Console entry points — run as `uv run <name>` (no more `uv run scripts/foo.py`),
+# which also puts the package on sys.path so no module needs a __file__ shim.
+[project.scripts]
+mailshow          = "scripts.mailshow:main"
+search-mail       = "scripts.search_mail:main"
+embed-mail        = "scripts.embed_mail:main"
+archive-inbox     = "scripts.archive_inbox:main"
+notmuch-sync-tags = "scripts.notmuch_sync_tags:main"
+spond-sync        = "scripts.spond_sync:main"
+spondshow         = "scripts.spondshow:main"
+finance-ingest    = "scripts.finance_ingest:main"
+retire-calendar   = "scripts.retire_calendar:main"
+notes             = "scripts.notes:main"
+shopping          = "scripts.shopping:main"
+kindle-dashboard  = "scripts.kindle_dashboard.serve:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["scripts", "mail_reader"]
+
 [dependency-groups]
 dev = [
     "pytest>=8",

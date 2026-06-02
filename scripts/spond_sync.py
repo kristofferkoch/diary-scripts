@@ -52,7 +52,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+from mail_reader.config import workspace_root
+
+PROJECT_ROOT = workspace_root()
 STATE_PATH = PROJECT_ROOT / "memory" / "spond-state.json"
 OUT_DIR = PROJECT_ROOT / "memory" / "spond"
 DEFAULT_PASSWORD_CMD = "pass show spond/user"
@@ -281,7 +283,7 @@ async def run_once(
     return sum(counts.values()), records, counts
 
 
-def main(argv: list[str]) -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )

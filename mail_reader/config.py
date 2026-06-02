@@ -52,8 +52,39 @@ def _data() -> dict[str, Any]:
 
 
 def reload() -> None:
-    """Drop the cached parse (used by tests after changing the env)."""
+    """Drop the cached parse + workspace root (used by tests after changing env)."""
     _data.cache_clear()
+    workspace_root.cache_clear()
+
+
+@lru_cache(maxsize=1)
+def workspace_root() -> Path:
+    """The diary DATA root — where ``CALENDAR.md``, ``memory/`` and the topic
+    files live. **Single source of truth.**
+
+    Modules must call this instead of deriving the root by walking their own
+    ``__file__`` up a couple of levels: that silently returns the wrong
+    directory the moment the code is relocated — e.g. mounted as a git
+    submodule one level deeper — because it depends on *where the module
+    sits*, not on where the data is.
+
+    Resolution order:
+        1. config ``paths.project``
+        2. ``$DIARY_ROOT``
+        3. nearest ancestor of the CWD that contains ``CALENDAR.md`` (dev convenience)
+        4. the CWD
+    """
+    val = cfg("paths.project", None)
+    if val:
+        return Path(val).expanduser()
+    env = os.environ.get("DIARY_ROOT")
+    if env:
+        return Path(env).expanduser()
+    cwd = Path.cwd()
+    for base in (cwd, *cwd.parents):
+        if (base / "CALENDAR.md").exists():
+            return base
+    return cwd
 
 
 def cfg(dotted: str, default: Any) -> Any:

@@ -34,7 +34,7 @@ def vec_lit(v):
     return "[" + ",".join(f"{x:.6f}" for x in v) + "]"
 
 
-def main(argv):
+def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("query")

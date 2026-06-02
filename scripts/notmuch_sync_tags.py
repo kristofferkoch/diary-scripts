@@ -34,6 +34,8 @@ import pathlib
 import subprocess
 import sys
 
+from mail_reader.config import workspace_root
+
 # Each rule: (folder name, tag to add, tags to remove if present)
 RULES: list[tuple[str, str, tuple[str, ...]]] = [
     ("INBOX",   "inbox",   ()),
@@ -44,8 +46,7 @@ RULES: list[tuple[str, str, tuple[str, ...]]] = [
     ("Trash",   "trash",   ("inbox",)),
 ]
 
-WORKSPACE = pathlib.Path(__file__).resolve().parent.parent
-BACKUP_DIR = WORKSPACE / "memory" / "notmuch-dumps"
+BACKUP_DIR = workspace_root() / "memory" / "notmuch-dumps"
 
 MAILDIR_ROOT = pathlib.Path.home() / "Mail" / "Proton"
 
@@ -182,7 +183,7 @@ def print_plan(rows: list[dict]) -> None:
               f"+{r['add_tag']} ({r['to_add']} needed)        {rm}")
 
 
-def main(argv: list[str]) -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--apply", action="store_true", help="Actually modify tags. Default is dry-run.")
     ap.add_argument("--quiet", action="store_true", help="Suppress per-rule output (for cron/hook).")

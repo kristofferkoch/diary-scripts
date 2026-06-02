@@ -32,11 +32,12 @@ from . import shopping as shopping_mod
 from . import entities as entities_mod
 from . import summarize as summarize_mod
 from . import workers as workers_mod
+from .config import workspace_root
 from .date_format import relative_day, short_date, short_datetime
 from .thread_id import ThreadId
 
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = workspace_root()
 CALENDAR_MD = REPO_ROOT / "CALENDAR.md"
 CALENDAR_PAST_MD = REPO_ROOT / "CALENDAR-PAST.md"
 

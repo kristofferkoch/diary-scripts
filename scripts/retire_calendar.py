@@ -33,7 +33,9 @@ import re
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+from mail_reader.config import workspace_root
+
+ROOT = workspace_root()
 SRC_DEFAULT = ROOT / "CALENDAR.md"
 DST_DEFAULT = ROOT / "CALENDAR-PAST.md"
 

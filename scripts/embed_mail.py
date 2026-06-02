@@ -579,7 +579,7 @@ def process(conn: psycopg.Connection, tier: int, limit: int | None, verbose: boo
         print(f"[tier {tier}] done={done} skipped={skipped} failed={failed} "
               f"elapsed={(time.time()-t0)/60:.1f} min", file=sys.stderr)
 
-def main(argv: list[str]) -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--tier", type=int, choices=[1, 2, 3, 4, 5, 6])

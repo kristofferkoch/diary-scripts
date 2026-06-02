@@ -49,16 +49,6 @@ import sys
 from collections import defaultdict
 from decimal import Decimal
 
-# When invoked as `uv run scripts/finance_ingest.py`, only the script's
-# directory is on sys.path. Tests + other entry points run from the project
-# root and get the full layout for free, but the CLI form needs help to find
-# the sibling `mail_reader/` and `scripts/` packages.
-_HERE = pathlib.Path(__file__).resolve()
-_ROOT = _HERE.parent.parent
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
-
-
 CSV_COLUMNS = (
     "Dato", "Beløp", "Originalt Beløp", "Original Valuta",
     "Til konto", "Til kontonummer", "Fra konto", "Fra kontonummer",
@@ -541,7 +531,6 @@ def latest_csv_from_mail(into: pathlib.Path) -> pathlib.Path:
 
     Returns the path to the extracted CSV. Raises if none found.
     """
-    repo = pathlib.Path(__file__).resolve().parent.parent
     res = subprocess.run(
         ["notmuch", "search", "--output=threads", "--limit=1", SUBJECT_QUERY],
         check=True, capture_output=True, text=True,
@@ -550,9 +539,9 @@ def latest_csv_from_mail(into: pathlib.Path) -> pathlib.Path:
     if not thread:
         raise RuntimeError(f"No mail matching {SUBJECT_QUERY!r}")
     into.parent.mkdir(parents=True, exist_ok=True)
+    # `mailshow` is a sibling console entry point (same venv → on PATH).
     subprocess.run(
-        ["uv", "run", str(repo / "scripts" / "mailshow.py"),
-         thread, "--attachments", str(into.parent)],
+        ["mailshow", thread, "--attachments", str(into.parent)],
         check=True, capture_output=True, text=True,
     )
     # mailshow saves with the original attachment filename

@@ -156,6 +156,55 @@ wheels = [
 ]
 
 [[package]]
+name = "diary-scripts"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "astral" },
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "jinja2" },
+    { name = "mail-parser-reply" },
+    { name = "markdown" },
+    { name = "nh3" },
+    { name = "pillow" },
+    { name = "playwright" },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "python-multipart" },
+    { name = "spond" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ty" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "astral", specifier = ">=3.2" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "jinja2", specifier = ">=3.1" },
+    { name = "mail-parser-reply", specifier = ">=1.0" },
+    { name = "markdown", specifier = ">=3.6" },
+    { name = "nh3", specifier = ">=0.2" },
+    { name = "pillow", specifier = ">=11" },
+    { name = "playwright", specifier = ">=1.49" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
+    { name = "python-multipart", specifier = ">=0.0.9" },
+    { name = "spond", specifier = ">=1.2" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8" },
+    { name = "ty", specifier = ">=0.0.38" },
+]
+
+[[package]]
 name = "fastapi"
 version = "0.136.1"
 source = { registry = "https://pypi.org/simple" }
@@ -466,55 +515,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/af/4c/fc2f9ed208a3801a319f59b5fea03cdc20cf3bd8af14be930d3a8de01224/nh3-0.3.5-cp38-abi3-win32.whl", hash = "sha256:559e4c73b689e9a7aa97ac9760b1bc488038d7c1a575aa4ab5a0e19ee9630c0f", size = 611445, upload-time = "2026-04-25T10:44:12.317Z" },
     { url = "https://files.pythonhosted.org/packages/db/1a/e4c9b5e2ae13e6092c9ec16d8ca30646cb01fcdea245f36c5b08fd21fbd5/nh3-0.3.5-cp38-abi3-win_amd64.whl", hash = "sha256:45e6a65dc88a300a2e3502cb9c8e6d1d6b831d6fba7470643333609c6aab1f30", size = 626502, upload-time = "2026-04-25T10:44:13.682Z" },
     { url = "https://files.pythonhosted.org/packages/80/7c/19cd0671d1ba2762fb388fc149697d20d0568ccfeef833b11280a619e526/nh3-0.3.5-cp38-abi3-win_arm64.whl", hash = "sha256:8f85285700a18e9f3fc5bff41fe573fa84f81542ef13b48a89f9fecca0474d3b", size = 611069, upload-time = "2026-04-25T10:44:14.934Z" },
-]
-
-[[package]]
-name = "diary-scripts"
-version = "0.1.0"
-source = { virtual = "." }
-dependencies = [
-    { name = "astral" },
-    { name = "fastapi" },
-    { name = "httpx" },
-    { name = "jinja2" },
-    { name = "mail-parser-reply" },
-    { name = "markdown" },
-    { name = "nh3" },
-    { name = "pillow" },
-    { name = "playwright" },
-    { name = "psycopg", extra = ["binary"] },
-    { name = "python-multipart" },
-    { name = "spond" },
-    { name = "uvicorn", extra = ["standard"] },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ty" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "astral", specifier = ">=3.2" },
-    { name = "fastapi", specifier = ">=0.115" },
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "jinja2", specifier = ">=3.1" },
-    { name = "mail-parser-reply", specifier = ">=1.0" },
-    { name = "markdown", specifier = ">=3.6" },
-    { name = "nh3", specifier = ">=0.2" },
-    { name = "pillow", specifier = ">=11" },
-    { name = "playwright", specifier = ">=1.49" },
-    { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
-    { name = "python-multipart", specifier = ">=0.0.9" },
-    { name = "spond", specifier = ">=1.2" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=8" },
-    { name = "ty", specifier = ">=0.0.38" },
 ]
 
 [[package]]

@@ -36,9 +36,12 @@ import shutil
 import subprocess
 import sys
 
-WORKSPACE = pathlib.Path(__file__).resolve().parent.parent
-DEFAULT_RULES = WORKSPACE / "scripts" / "archive_inbox_rules.json"
-LOG_DIR = WORKSPACE / "memory" / "mail"
+from mail_reader.config import workspace_root
+
+# Rules file ships with the code (sibling of this module); logs go to the
+# workspace data dir.
+DEFAULT_RULES = pathlib.Path(__file__).resolve().parent / "archive_inbox_rules.json"
+LOG_DIR = workspace_root() / "memory" / "mail"
 MAIL_ROOT = pathlib.Path.home() / "Mail" / "Proton"
 INBOX_DIR = MAIL_ROOT / "INBOX"
 ARCHIVE_DIR = MAIL_ROOT / "Archive"
@@ -106,7 +109,7 @@ def log(entry: dict) -> None:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-def main(argv: list[str]) -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--rules", default=str(DEFAULT_RULES), help="Path to rules JSON.")
     ap.add_argument("--apply", action="store_true", help="Actually move files. Default is dry-run.")

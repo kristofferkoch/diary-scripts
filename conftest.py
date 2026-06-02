@@ -12,6 +12,10 @@ that need a config (mail_reader/test_config.py) set DIARY_CONFIG themselves
 via monkeypatch + config.reload().
 """
 import os
+from pathlib import Path
 
 os.environ.pop("DIARY_CONFIG", None)
 os.environ["XDG_CONFIG_HOME"] = "/nonexistent-diary-xdg-for-tests"
+# Pin the workspace root to this repo dir so workspace_root() is deterministic
+# in tests and never autodetects a real CALENDAR.md on the dev machine.
+os.environ.setdefault("DIARY_ROOT", str(Path(__file__).resolve().parent))

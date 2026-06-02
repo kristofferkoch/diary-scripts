@@ -69,10 +69,8 @@ import httpx
 # notmuch search, raw fetch, HTML→text). Per feedback-use-mail-tools:
 # don't roll your own MIME extraction — extend mailshow.py if anything
 # is missing.
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
-from scripts.mailshow import (  # noqa: E402
+from mail_reader.config import workspace_root
+from scripts.mailshow import (
     cursor_query,
     fetch_raw,
     html_to_text,
@@ -428,7 +426,7 @@ def _tool_get_calendar_events(start_date: str, end_date: str,
     if start > end:
         return json.dumps({"error": "start_date after end_date"})
 
-    root = repo_root or Path(__file__).resolve().parent.parent
+    root = repo_root or workspace_root()
     events: list[dict[str, str]] = []
     for fname in ("CALENDAR.md", "CALENDAR-PAST.md"):
         path = root / fname
@@ -991,7 +989,7 @@ def file_pr_for_message(
     the proposed memory section, commits as the bot, pushes via embedded-PAT
     URL, opens a PR via `gh pr create`. Worktree is removed in `finally`."""
     today = today or date.today()
-    repo_root = repo_root or Path(__file__).resolve().parent.parent
+    repo_root = repo_root or workspace_root()
     branch = make_branch_name(writer["branch_keyword"], today)
 
     candidates = writer.get("calendar_candidates") or []

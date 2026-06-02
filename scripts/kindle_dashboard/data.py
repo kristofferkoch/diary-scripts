@@ -18,15 +18,14 @@ import re
 from pathlib import Path
 from typing import Any
 
-from mail_reader.config import cfg
+from mail_reader.config import cfg, workspace_root
 
 # Household first names the dashboard recognises in calendar titles.
 FAMILY_MEMBERS: tuple[str, ...] = tuple(cfg("family.members", ("Robin", "Bjorn", "Carl")))
 
 # ---------- paths -----------------------------------------------------------
 
-# scripts/kindle_dashboard/data.py → diary repo root is two levels up.
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+REPO_ROOT = workspace_root()
 CALENDAR_MD = REPO_ROOT / "CALENDAR.md"
 
 # ---------- calendar -------------------------------------------------------

@@ -29,7 +29,9 @@ from datetime import datetime, timezone
 from email.policy import default as email_default
 from pathlib import Path
 
-MAIL_STATE_PATH = Path(__file__).resolve().parent.parent / "memory" / "mail-state.json"
+from mail_reader.config import workspace_root
+
+MAIL_STATE_PATH = workspace_root() / "memory" / "mail-state.json"
 
 
 def load_cursor(state_path: Path = MAIL_STATE_PATH) -> datetime:
@@ -56,13 +58,6 @@ def cursor_query(cursor: datetime, extra: str | None) -> str:
     if extra:
         return f"({base}) and ({extra})"
     return base
-
-# When invoked as `python scripts/mailshow.py`, sys.path[0] is `scripts/` and
-# `from scripts.embed_mail …` fails. Inject the project root so the same import
-# works both as a script and as a `scripts.mailshow` module (e.g. in pytest).
-_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
-if _PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, _PROJECT_ROOT)
 
 from scripts.embed_mail import iter_attachments  # noqa: E402
 
@@ -223,7 +218,7 @@ def render_message(
     return "\n".join(lines)
 
 
-def main(argv: list[str]) -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("query", nargs="?",
                     help="A notmuch query (id:..., thread:..., or any search expression). "
