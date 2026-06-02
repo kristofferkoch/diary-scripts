@@ -136,6 +136,120 @@ def parse_calendar(text: str) -> list[dict[str, Any]]:
     return events
 
 
+# Recurring-weekly section --------------------------------------------------
+#
+# The `## Recurring weekly` section nests one slot per indented bullet under a
+# top-level activity bullet:
+#     - **Fotballtrening Hans** (KFUM ...):
+#       - **Mandager 17.15–18.45** — Treningsfelt B2
+#       - **Lørdager 10.30–12.00** — Kunstgresset
+# We expand these into concrete days so weekly activities (training, swimming)
+# show in the agenda alongside the dated one-off events.
+
+_NB_WEEKDAY_INDEX = {
+    "mandag": 0, "tirsdag": 1, "onsdag": 2, "torsdag": 3,
+    "fredag": 4, "lørdag": 5, "søndag": 6,
+}
+
+# Top-level activity bullet: `- **Title** ...` (no indent).
+_RECUR_TITLE_RE = re.compile(r"^-\s+\*\*(?P<title>[^*]+?)\*\*")
+
+# Indented slot bullet: `  - **<Weekday> HH.MM[–HH.MM]** — <location>`.
+_RECUR_SLOT_RE = re.compile(
+    r"""
+    ^\s+-\s+\*\*
+    (?P<wday>[A-Za-zæøåÆØÅ]+)
+    \s+
+    (?P<t1>\d{1,2}[.:]\d{2})
+    (?:\s*[–-]\s*(?P<t2>\d{1,2}[.:]\d{2}))?
+    \*\*
+    \s*—\s*
+    (?P<loc>.+?)
+    \s*$
+    """,
+    re.VERBOSE,
+)
+
+
+def _weekday_index(word: str) -> int | None:
+    """Map a Norwegian weekday name (singular or plural) to Mon=0..Sun=6.
+
+    >>> _weekday_index("Mandager")
+    0
+    >>> _weekday_index("lørdag")
+    5
+    >>> _weekday_index("Tirsdager")
+    1
+    >>> _weekday_index("bogus") is None
+    True
+    """
+    w = word.strip().lower()
+    if w.endswith("er"):
+        w = w[:-2]
+    return _NB_WEEKDAY_INDEX.get(w)
+
+
+def _norm_time(t: str) -> str:
+    """Normalise 'H.MM' / 'HH:MM' to zero-padded 'HH:MM'.
+
+    >>> _norm_time("17.15")
+    '17:15'
+    >>> _norm_time("9:05")
+    '09:05'
+    """
+    h, m = re.split(r"[.:]", t)
+    return f"{int(h):02d}:{m}"
+
+
+def _section(text: str, heading: str) -> str:
+    """Return the body of a `## <heading>` section (up to the next `## `)."""
+    out: list[str] = []
+    in_sec = False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            if in_sec:
+                break
+            in_sec = line[3:].strip().casefold() == heading.casefold()
+            continue
+        if in_sec:
+            out.append(line)
+    return "\n".join(out)
+
+
+def parse_recurring_weekly(text: str) -> list[dict[str, Any]]:
+    """Extract weekly-recurring slots from the `## Recurring weekly` section.
+
+    Returns one record per slot:
+        {"weekday": int (Mon=0), "time": str, "title": str, "who": str}
+
+    Only the `## Recurring weekly` section is read — the monthly/quarterly
+    maintenance sections are deliberately excluded (ops reminders, not family
+    agenda). Prose sub-bullets (e.g. "Kilde: …") and unparseable weekdays are
+    skipped.
+    """
+    records: list[dict[str, Any]] = []
+    current_title = ""
+    for line in _section(text, "Recurring weekly").splitlines():
+        slot = _RECUR_SLOT_RE.match(line)
+        if slot:
+            wd = _weekday_index(slot.group("wday"))
+            if wd is None or not current_title:
+                continue
+            t1, t2 = slot.group("t1"), slot.group("t2")
+            time = f"{_norm_time(t1)}–{_norm_time(t2)}" if t2 else _norm_time(t1)
+            records.append({
+                "weekday": wd,
+                "time": time,
+                "title": current_title,
+                "who": _who(current_title),
+            })
+            continue
+        title = _RECUR_TITLE_RE.match(line)
+        if title:
+            current_title = title.group("title").strip()
+    return records
+
+
 def month_grid(today: _dt.date) -> dict[str, Any]:
     """6-week grid covering the current month, with today + busy-day markers.
 
@@ -200,6 +314,7 @@ def calendar_block(today: _dt.date, *, days_ahead: int = 3) -> list[dict[str, An
     except FileNotFoundError:
         return []
     all_events = parse_calendar(text)
+    recurring = parse_recurring_weekly(text)
 
     by_day: list[dict[str, Any]] = []
     for i in range(days_ahead + 1):
@@ -208,6 +323,11 @@ def calendar_block(today: _dt.date, *, days_ahead: int = 3) -> list[dict[str, An
             {"time": ev["time"], "who": ev["who"], "text": ev["title"]}
             for ev in all_events
             if ev["start"] <= d <= ev["end"]
+        ]
+        items += [
+            {"time": r["time"], "who": r["who"], "text": r["title"]}
+            for r in recurring
+            if r["weekday"] == d.weekday()
         ]
         # Sort: timed events by start time, all-day to the bottom.
         items.sort(
