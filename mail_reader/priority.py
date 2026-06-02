@@ -22,6 +22,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from .config import cfg_path
+
 HIGH = 3
 DEFAULT = 2
 LOW = 1
@@ -68,7 +70,9 @@ _NOISE_DOMAINS = frozenset({
 })
 
 
-_IMPORTANT_PATH = Path(__file__).with_name("important_senders.txt")
+# Real list lives in the private config dir; falls back to the sanitized
+# sidecar shipped with the repo.
+_IMPORTANT_PATH = cfg_path("important_senders", Path(__file__).with_name("important_senders.txt"))
 
 
 def _load_important() -> list[re.Pattern[str]]:

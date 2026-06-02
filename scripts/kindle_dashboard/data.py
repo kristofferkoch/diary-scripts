@@ -18,6 +18,11 @@ import re
 from pathlib import Path
 from typing import Any
 
+from mail_reader.config import cfg
+
+# Household first names the dashboard recognises in calendar titles.
+FAMILY_MEMBERS: tuple[str, ...] = tuple(cfg("family.members", ("Robin", "Bjorn", "Carl")))
+
 # ---------- paths -----------------------------------------------------------
 
 # scripts/kindle_dashboard/data.py → diary repo root is two levels up.
@@ -69,7 +74,7 @@ def _who(title: str) -> str:
     # Light heuristic — names that show up as whole words.
     text = title
     found = []
-    for name in ("Robin", "Bjorn", "Carl"):
+    for name in FAMILY_MEMBERS:
         if re.search(rf"\b{name}\b", text):
             found.append(name[0])  # initials
     return "/".join(found)
@@ -221,9 +226,10 @@ SPOND_DIR = REPO_ROOT / "memory" / "spond"
 # member-id → short display label. Add more here as IDs are discovered for
 # other kids / clubs. The dashboard surfaces *unanswered* RSVPs for any of
 # these IDs across all future events.
-SPOND_MEMBER_IDS: dict[str, str] = {
-    "0123456789ABCDEF0123456789ABCDEF": "H",  # Robin, Eksempel-IL G-lag (per scripts/README.md)
-}
+SPOND_MEMBER_IDS: dict[str, str] = cfg(
+    "spond.member_ids",
+    {"0123456789ABCDEF0123456789ABCDEF": "H"},  # placeholder; real ids in private config
+)
 
 
 def _parse_iso(s: str) -> _dt.datetime:
@@ -311,10 +317,10 @@ def spond_block() -> list[dict[str, str]]:
 
 # ---------- weather (yr.no / api.met.no) -----------------------------------
 
-# Eksempelveien 3B, Eksempelaasen, Oslo — approx.
-WEATHER_LAT = 59.913
-WEATHER_LON = 10.752
-WEATHER_UA = "server-kindle-dashboard/0.1 user@example.com"
+# Home coordinates + yr.no User-Agent — overridden by private config.
+WEATHER_LAT = cfg("weather.lat", 59.913)
+WEATHER_LON = cfg("weather.lon", 10.752)
+WEATHER_UA = cfg("weather.ua", "diary-kindle-dashboard/0.1 user@example.com")
 WEATHER_TTL_SECONDS = 1800  # 30 min; well under yr.no's typical Expires.
 
 _weather_cache: dict[str, Any] = {"fetched_at": None, "payload": None}
