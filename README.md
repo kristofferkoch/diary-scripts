@@ -22,23 +22,42 @@ Postgres + [pgvector](https://github.com/pgvector/pgvector), and a local LLM.
 | `scripts/` | CLI helpers: mail embedding pipeline, notmuch tag sync, inbox auto-archive, mail/Spond viewers, calendar retirement, notes & shopping queues, a per-mail GitHub-PR composer, and the Kindle wall-dashboard generator. Start at [`scripts/README.md`](scripts/README.md). |
 | `mail_reader/` | A FastAPI web app: inbox summaries, structured extraction, agenda/calendar views, a notes capture page, and priority scoring. See [`mail_reader/DESIGN.md`](mail_reader/DESIGN.md) and [`mail_reader/IDEAS.md`](mail_reader/IDEAS.md). |
 | `migrations/` | Postgres schema (pgvector, attachments, summaries, queues, notes, shopping). |
-| `pyproject.toml` / `uv.lock` | The [uv](https://docs.astral.sh/uv/) project that ties it together. |
+| `pyproject.toml` / `uv.lock` | The [uv](https://docs.astral.sh/uv/) project that ties it together. Includes `[build-system]` (hatchling) and `[project.scripts]` console entry points. |
 
 ## Running
 
-Everything runs under [uv](https://docs.astral.sh/uv/) — no manual venv needed:
+Everything runs under [uv](https://docs.astral.sh/uv/) — no manual venv needed.
+
+The package exposes console entry points, so you invoke tools by name rather
+than by path:
 
 ```bash
-uv run scripts/<name>.py …            # any helper script
-uv run pytest scripts/ mail_reader/   # the test suite (474 tests, all green)
+uv run mailshow                        # view a mail message
+uv run notes                           # notes queue
+uv run shopping                        # shopping list
+uv run search-mail                     # full-text / semantic mail search
+uv run embed-mail                      # embed new messages into pgvector
+uv run archive-inbox                   # auto-archive processed inbox
+uv run notmuch-sync-tags               # sync notmuch tags to/from Postgres
+uv run spond-sync                      # sync Spond events
+uv run spondshow                       # view Spond data
+uv run finance-ingest                  # ingest bank/finance exports
+uv run retire-calendar                 # retire past calendar entries
+uv run kindle-dashboard                # regenerate Kindle wall display
+uv run python -m mail_reader.server    # start the FastAPI web app
+uv run pytest scripts/ mail_reader/   # the test suite (486 tests, all green)
 ```
+
+**Configuration.** The code reads real deployment values from a private TOML
+file, looked up via the `DIARY_CONFIG` environment variable or the default path
+`~/.config/diary/config.toml`. Placeholder defaults are baked in, so everything
+compiles and the tests pass without any config file present. To adapt to your
+own setup, create a config file and override the relevant keys (mail store path,
+Postgres DSN, LLM server URL, workspace root, etc.).
 
 The scripts assume a local environment (a notmuch mail store, a Postgres
 instance, a local LLM server) that isn't included here — they're published to
-read and adapt, not to run turnkey. Hostnames, paths, and addresses in the code
-are placeholders; real deployment values are kept as configuration outside this
-repo. Substitute your own (most are already read from environment variables —
-e.g. `OLLAMA_URL`).
+read and adapt, not to run turnkey.
 
 ## License
 

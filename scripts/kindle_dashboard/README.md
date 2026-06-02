@@ -18,7 +18,7 @@ templates/dashboard.html.j2    The layout (1448×1072 landscape, then rotated)
 
 | URL                                                             | Reachable from         |
 |-----------------------------------------------------------------|------------------------|
-| `http://10.0.0.206:8801/dashboard.png`                          | Kindle on LAN          |
+| `http://192.0.2.10:8801/dashboard.png`                          | Kindle on LAN          |
 | `https://server.example.ts.net/kindle/`                | Phone over tailnet     |
 | `http://127.0.0.1:8801/dashboard.png`                           | this host              |
 
@@ -49,20 +49,65 @@ Data sources:
 - Calendar → `CALENDAR.md` (per `CALENDAR-RULES.md`)
 - Spond → `memory/spond/*.jsonl`, latest record per event id, filtered to
   future events where a known member-id is in `unansweredIds`. Member-ids
-  in `data.SPOND_MEMBER_IDS` — add more as discovered.
+  come from `config/local.toml` `[spond] member_ids`; `data.py` has a
+  placeholder default.
 - Weather → `api.met.no/weatherapi/locationforecast/2.0/compact`,
-  cached 30 min in process.
-- Sunrise/sunset → `astral`, computed locally (no network).
+  cached 30 min in process. Coordinates from `config/local.toml`
+  `[weather] lat`/`lon`; `data.py` has placeholder defaults.
+- Sunrise/sunset → `astral`, computed locally (no network), using the
+  same coordinates as weather.
+- Family names used for calendar event labelling come from
+  `config/local.toml` `[family] members`; `data.py` defaults to
+  `["Robin", "Bjorn", "Carl"]`.
+
+## Config
+
+Site-specific values (coordinates, family first-names, Spond member-ids)
+are kept in the **private** `config/local.toml` in the diary workspace,
+outside this public submodule. The code reads them via
+`mail_reader.config.cfg()` / `workspace_root()` — do **not** hardcode
+real values in `data.py`.
+
+Relevant TOML keys:
+
+```toml
+[weather]
+lat = 59.913     # decimal degrees
+lon = 10.752
+ua  = "diary-kindle-dashboard/0.1 user@example.com"
+
+[family]
+members = ["Robin", "Bjorn", "Carl"]   # first names for calendar labelling
+
+[spond]
+# member-id (32-char hex) → short display label shown on the dashboard.
+# Discover new IDs from memory/spond/*.jsonl when a new club is added.
+member_ids = { "0123456789ABCDEF0123456789ABCDEF" = "H" }
+```
+
+`data.py` ships placeholder defaults for all three so the server starts
+even without a local.toml (useful in CI / fresh checkouts), but weather
+will point at a generic location and Spond will never match.
 
 ## Running locally
 
+Commands run from inside the `diary-scripts/` submodule directory.
+
 ```bash
 # Dev: just start the server, hit http://127.0.0.1:8801/
+cd ~/diary/diary-scripts
 uv run --frozen --no-sync python -m scripts.kindle_dashboard.serve
+
+# Alternatively, use the console entry point:
+uv run --project ~/diary/diary-scripts kindle-dashboard
 
 # Quick render check (no Kindle in the loop)
 curl -s http://127.0.0.1:8801/dashboard.png > /tmp/dash.png
 ```
+
+The private config must be discoverable: set `DIARY_CONFIG` to point at
+`config/local.toml` in the diary workspace (see §Config above), or run
+from a directory where `mail_reader.config.workspace_root()` can locate it.
 
 ## Production
 
@@ -72,6 +117,11 @@ Systemd user unit (`~/.config/systemd/user/kindle-dashboard.service`):
 systemctl --user {start,stop,restart,status} kindle-dashboard
 journalctl --user -u kindle-dashboard -f
 ```
+
+The unit sets `WorkingDirectory=%h/diary/diary-scripts` and
+`Environment=DIARY_CONFIG=%h/diary/config/local.toml` so that
+`mail_reader.config` picks up the private config (coordinates, family
+names, Spond member-ids) at startup.
 
 `loginctl enable-linger user` keeps the user-bus up after logout, so the
 unit survives reboots. (Already on; the mail_reader unit needs it too.)
@@ -84,7 +134,7 @@ From any host that has the kindle SSH key (server has it under
 
 ```bash
 ssh kindle "cat > /mnt/us/dashboard/dashboard.conf" <<'EOF'
-URL="http://10.0.0.206:8801/dashboard.png"
+URL="http://192.0.2.10:8801/dashboard.png"
 INTERVAL=3600
 KIOSK=1
 ROTATE=0

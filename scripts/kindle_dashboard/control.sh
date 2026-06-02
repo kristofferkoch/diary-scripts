@@ -18,7 +18,7 @@
 # for maintenance) to $DECISION (/tmp/kindle_decision). Anything else and
 # the bootstrap falls back to a safe default.
 
-BASE="${BASE:-http://10.0.0.206:8801}"
+BASE="${BASE:-http://192.0.2.10:8801}"
 KIOSK="${KIOSK:-1}"
 DECISION=/tmp/kindle_decision
 LOG=/mnt/us/dashboard/dashboard.log

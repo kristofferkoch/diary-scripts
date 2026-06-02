@@ -28,7 +28,7 @@
 
 CONFIG=/mnt/us/dashboard/dashboard.conf
 [ -f "$CONFIG" ] && . "$CONFIG"
-BASE="${BASE:-http://10.0.0.206:8801}"
+BASE="${BASE:-http://192.0.2.10:8801}"
 RTC="${RTC:-rtc1}"                       # SNVS RTC; rtc0 (bd71827) has no wakeup
 BOOT_RETRY="${BOOT_RETRY:-15}"
 FALLBACK_INTERVAL="${FALLBACK_INTERVAL:-900}"

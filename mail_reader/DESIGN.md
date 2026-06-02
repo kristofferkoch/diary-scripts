@@ -19,7 +19,7 @@ Non-goals (v1): compose, reply, attach, label-editing.
 
 - **Host:** `server` (notmuch + Postgres are local here).
 - **Tailnet exposure:** bind to the tailscale interface on a fixed port,
-  e.g. `100.84.82.95:8800`. No in-app authentication — Tailscale is the
+  e.g. `100.64.0.1:8800`. No in-app authentication — Tailscale is the
   perimeter. Add a Tailscale-user header check later if needed.
 - **Process supervision:** systemd user unit `mail-reader.service`, same
   style as `mail-sync.service`.
@@ -58,8 +58,11 @@ LIMIT 1`.
 
 ## 5. Backend
 
-- **Language/runtime:** Python 3.14 (matches repo), declared with PEP 723
-  inline deps so `uv run mail-reader/server.py` Just Works.
+- **Language/runtime:** Python 3.14. The app lives in the `diary-scripts`
+  git submodule as a proper `uv` package (`diary-scripts/pyproject.toml`).
+  Start the server with `uv run python -m mail_reader.server` (from the
+  submodule root) or `uv run --project diary-scripts python -m
+  mail_reader.server` (from the diary repo root).
 - **Framework:** FastAPI + Jinja2 templates + HTMX on the client. No build
   step, server-rendered HTML, fragment swaps for nav.
 - **Modules (planned):**
@@ -70,6 +73,17 @@ LIMIT 1`.
     neighbours (mean-pool body chunks, cosine search in `chunks`).
   - `mail_reader/summarize.py` — get-or-create summary via Ollama chat API.
   - `mail_reader/server.py` — HTTP entrypoint, routes, templates.
+- **Workspace root** (where `CALENDAR.md`, `memory/`, topic files live):
+  resolved by `mail_reader.config.workspace_root()` — checks config key
+  `paths.project`, then `$DIARY_ROOT`, then walks the CWD upward for a
+  `CALENDAR.md` anchor. Modules must **not** derive the workspace by
+  walking `__file__`: the code is a git submodule one level removed from
+  the data root, so `__file__`-relative paths return the wrong directory.
+- **Config:** public placeholder defaults ship in-code. Real deployment
+  values (hostnames, `paths.project`, family names, coordinates, …) live
+  in a private `config/local.toml` in the diary repo, symlinked to the
+  XDG path (`~/.config/diary/config.toml`) or pointed to via
+  `$DIARY_CONFIG`. See `mail_reader/config.py` for the full lookup order.
 
 ## 6. Routes
 

@@ -49,8 +49,8 @@ se "GPS som signal" over). Capture-formen
 er multipart med `<input type=file accept=image/* capture>`; et notat kan ha bilde,
 tekst eller begge — bildeløst-tekst og tekstløst-bilde er begge gyldige. Thumbnail
 vises i `_note.html`, full størrelse ved klikk (`/notes/attachment/{id}`). Sjekk-CLI:
-listingen flagger `📎 bilde (vedlegg #N)`, og `notes.py image N <fil>` dumper bildet
-så det kan åpnes. Se `scripts/README.md` → "Notes queue — notes.py".
+listingen flagger `📎 bilde (vedlegg #N)`, og `uv run notes image N <fil>` dumper bildet
+så det kan åpnes. Se `diary-scripts/scripts/README.md` → "Notes queue — notes".
 
 ## 2026-05-31 — notater: vis klokkeslett (user) ✅ LANDET 2026-06-02
 
@@ -97,7 +97,7 @@ USER.md + CALENDAR.md + ... into the escalator's prompt — it'll
 drown and the bills will scale poorly. Instead:
 
 1. **General markdown-search tool — build this first.** New script
-   `scripts/search_md.py` (or extend `search_mail.py` to also index
+   `diary-scripts/scripts/search_md.py` (or extend `search-mail` to also index
    the workspace's own .md files). Same pgvector + bge-m3 backend;
    new table `md_chunks` with `(path, chunk_idx, embedding, text)`.
    Walks `*.md` outside `memory/mail/`. Re-indexed on the same
@@ -110,7 +110,7 @@ drown and the bills will scale poorly. Instead:
      curated set.
    - `md_search(query, k=8)` — semantic top-K over `md_chunks`,
      returning `(path, line_range, snippet)` tuples.
-   - Optional: `mail_search(query, k=5)` reusing search_mail.py for
+   - Optional: `mail_search(query, k=5)` reusing `search-mail` for
      cross-corpus questions ("did Astrid mention the offsite?").
 
    No writes. No shell. The agent reads, reasons, then emits a
@@ -187,7 +187,7 @@ or even available later — the inputs are the record.
   the bar on diff quality. Bad proposals waste user's review time
   more than they save.
 - **Order of work.** Per user's addendum, the markdown-search tool
-  (`scripts/search_md.py` + the three `md_*` tool surfaces) is the
+  (`diary-scripts/scripts/search_md.py` + the three `md_*` tool surfaces) is the
   prerequisite. Build and stabilise it on its own first — it's
   useful in many other contexts (general workspace Q&A, the LLM
   natural-language search idea), and the escalator can land on top
@@ -254,7 +254,7 @@ Risks:
 - pg auth: need a separate DSN env var; document in DESIGN.md when
   promoted.
 
-Related: see "search box (reuse search_mail.py)" in DESIGN.md v2 list.
+Related: see "search box (reuse `search-mail`)" in DESIGN.md v2 list.
 This is the LLM-driven escalation of that.
 
 ---
@@ -552,11 +552,11 @@ Defaults I'd pick if not contradicted:
   (PEP 723) so it runs the same as the other scripts (`uv run`).
 - **Host**: server (notmuch index + Postgres are here). Mac Studio is
   for models only.
-- **Tailnet exposure**: bind to `100.84.82.95:<port>` or use
+- **Tailnet exposure**: bind to the server's Tailscale IP `<host>:<port>` or use
   `tailscale serve`. No auth in-app — Tailscale provides identity. Add
   a `X-Tailscale-User` header check later if we ever want to allowlist.
 - **Mail rendering**: server-side HTML→sanitized-HTML (bleach or
-  nh3). Keep plain-text as the fallback (matches `mailshow.py`).
+  nh3). Keep plain-text as the fallback (matches `uv run mailshow`).
 - **Tankekart algorithm**: per-mail "mean embedding" (avg of body chunks)
   → top-K cosine neighbours from `chunks`/`messages`. Exclude same thread
   (already in context) or include with a different marker. K ≈ 10.
@@ -569,7 +569,7 @@ Defaults I'd pick if not contradicted:
 Things worth considering but not in v1:
 
 - **Compose / reply.** Out of scope for v1 — read-only.
-- **Search box.** Reuse `search_mail.py` semantics. Mobile-friendly results.
+- **Search box.** Reuse `search-mail` semantics. Mobile-friendly results.
 - **Tag editing.** Toggle `tag:digest::keep` from the UI for training data.
 - **Attachment viewer.** Use already-extracted text from `attachments` table
   for quick previews; raw download for non-text.
@@ -579,7 +579,7 @@ Things worth considering but not in v1:
 - **"Why is this in my inbox?"** show signals: tier, tags, similar past
   mail that ended up archived vs kept.
 - **Mark-as-read / archive button.** Push back to notmuch tags +
-  `archive_inbox.py` rules.
+  `archive-inbox` rules.
 - **Offline-first.** Service worker + cached recent inbox JSON. Probably
   overkill; the tailnet is what you're on anyway.
 

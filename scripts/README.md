@@ -1,15 +1,34 @@
 # scripts/
 
-Local helper scripts for the workspace. Python deps live in a **uv project at
-workspace root** (`pyproject.toml` + `uv.lock`). Invoke any script with
+Local helper scripts for the workspace. Python deps live in a **uv project
+rooted at `diary-scripts/`** (`pyproject.toml` + `uv.lock`). Scripts are
+exposed as console entry points — invoke them with
 
 ```bash
-cd ~/diary
-uv run scripts/<name>.py …
+# From inside the diary-scripts/ submodule:
+uv run <entry-point> …
+
+# From the diary repo root (passes --project so uv finds the right pyproject):
+uv run --project diary-scripts <entry-point> …
 ```
+
+Entry-point names: `mailshow`, `search-mail`, `embed-mail`, `archive-inbox`,
+`notmuch-sync-tags`, `spond-sync`, `spondshow`, `finance-ingest`,
+`retire-calendar`, `notes`, `shopping`, `kindle-dashboard`. Server modules are
+invoked as `uv run python -m mail_reader.server` and
+`uv run python -m scripts.kindle_dashboard.serve`.
 
 `uv run` creates/syncs `.venv/` on demand; you never need to activate
 anything. Tests: `uv run pytest scripts/` (doctests + `test_embed_mail.py`).
+
+**Config split.** Real infra/PII values (hostnames, paths, home coordinates,
+family names, Spond IDs, the important-senders list) live in a private
+`config/local.toml` + `config/important_senders.txt` in the diary repo, read
+via `mail_reader.config` (`$DIARY_CONFIG` env var or the
+`~/.config/diary/config.toml` symlink). The submodule ships only placeholder
+defaults. New code must resolve the workspace data root (where `CALENDAR.md`,
+`memory/`, topic files live) via `mail_reader.config.workspace_root()` (from
+config `paths.project`) — not by walking `__file__`.
 
 > **`scripts/` is a stopgap name.** Once we add scripts that aren't
 > mail-related, this whole folder will get split by subsystem (e.g.
@@ -29,29 +48,29 @@ anything. Tests: `uv run pytest scripts/` (doctests + `test_embed_mail.py`).
   - `digest::receipt` — order/payment receipts
   - `digest::transactional` — auth links, notifications, etc.
 - **`tag:unread` is meaningless** for now — the import marked ~125k messages as unread. Use `date:` filters instead.
-- **`tag:inbox` mirrors `folder:INBOX`** — kept in sync automatically by the `post-new` hook (`scripts/notmuch_sync_tags.py`). Same for `tag:spam`, `tag:archive`, `tag:sent`, `tag:draft`, `tag:trash`. The hook also clears stale `unread` from `Sent`. Either query form is fine now.
+- **`tag:inbox` mirrors `folder:INBOX`** — kept in sync automatically by the `post-new` hook (`notmuch-sync-tags`). Same for `tag:spam`, `tag:archive`, `tag:sent`, `tag:draft`, `tag:trash`. The hook also clears stale `unread` from `Sent`. Either query form is fine now.
 - **Before 2026-05-15 the `inbox` tag was unreliable** (the bulk import marked ~205 k messages as `inbox` regardless of folder). If you see old digests or notes that say "use `date:` filters because `tag:inbox` is meaningless" — that's no longer true. Backup of pre-reconciliation tag state is in `memory/notmuch-dumps/`.
 - **State file:** `memory/mail-state.json` (when I build the digest cron).
 - **Digests:** `memory/mail/YYYY-MM-DD.md`.
 
-### Reading mail bodies — `mailshow.py`
+### Reading mail bodies — `mailshow`
 
-Use `scripts/mailshow.py` — handles the boilerplate (raw fetch, html→text, encoding,
+Use `mailshow` — handles the boilerplate (raw fetch, html→text, encoding,
 attachment summary). Examples:
 
 ```bash
-uv run scripts/mailshow.py --limit=5 'tag:inbox and date:today..'
-uv run scripts/mailshow.py thread:00000000000349df
-uv run scripts/mailshow.py --headers-only --limit=20 'from:gonordic'
-uv run scripts/mailshow.py --max-chars=8000 id:<message-id>
+uv run mailshow --limit=5 'tag:inbox and date:today..'
+uv run mailshow thread:00000000000349df
+uv run mailshow --headers-only --limit=20 'from:gonordic'
+uv run mailshow --max-chars=8000 id:<message-id>
 
 # Process-new-mail entrypoint: starts from memory/mail-state.json:last_successful_run.
-uv run scripts/mailshow.py --since-cursor --headers-only
-uv run scripts/mailshow.py --since-cursor 'from:astrid'   # narrow within the cursor window
+uv run mailshow --since-cursor --headers-only
+uv run mailshow --since-cursor 'from:astrid'   # narrow within the cursor window
 ```
 
 Don't write fresh inline `python3 -c "..."` blocks for body extraction — extend this
-script instead so improvements stick.
+tool instead so improvements stick.
 
 ### Processing new mail (SOP)
 
@@ -70,18 +89,18 @@ never bumped the JSON.
    before continuing: `systemctl --user start mail-sync.service` (blocks
    until `mbsync` + `notmuch new` complete — look for `No new mail` /
    `Processed N files` in the journal). Only then read the cursor. Lesson
-   2026-05-29: triaged a cruise booking, then more mail (date-change +
+   2026-05-29: triaged a booking, then more mail (date-change +
    payment link) landed seconds later — re-syncing first each pass caught
    the full thread instead of a half-state.
-1. **Read the cursor** — `uv run scripts/mailshow.py --since-cursor --headers-only`
-   (or add a filter: `--since-cursor 'from:astrid'`). The script reads
+1. **Read the cursor** — `uv run mailshow --since-cursor --headers-only`
+   (or add a filter: `--since-cursor 'from:astrid'`). The tool reads
    `memory/mail-state.json` itself and prints the cursor it used. Anything
    returned is candidate-new.
 2. **Cross-check recent daily notes** (`memory/YYYY-MM-DD.md`) for
    "Mail-status" / "Inbox-gjennomgang" sections that already cover items
    in that window. If they do, the real high-water mark is the latest of
    those, not the JSON cursor.
-3. **Triage** with `mailshow.py` / `search_mail.py`. Record durable facts
+3. **Triage** with `mailshow` / `search-mail`. Record durable facts
    per CLAUDE.md → "How to add a memory".
 4. **Bump `last_successful_run`** in `memory/mail-state.json` to the
    timestamp of the newest message processed (use the message's `Date:`
@@ -95,7 +114,7 @@ inbox. A status summary built from cursor + topic-file scans will miss
 things user already handled. When the user asks "are we good with X?" or
 "what's left on Y?" for an ongoing correspondence, run
 `notmuch search 'from:user@example.com and to:<counterparty> and date:<window>..'`
-(or `mailshow.py thread:<id>` for the full conversation) before
+(or `uv run mailshow thread:<id>` for the full conversation) before
 answering. Treat both directions as load-bearing. Lesson 2026-05-27 —
 declared a VPS-årsoppgave outstanding for User Holding regnskapet that
 user had already forwarded to the accountant the day before.
@@ -103,7 +122,7 @@ user had already forwarded to the accountant the day before.
 ### Live pipeline services
 
 `mail-sync.timer` runs every 15 min: `mbsync -a` → `notmuch new`
-(`post-new` hook syncs tags) → `embed_mail.py --tier 1 --quiet` →
+(`post-new` hook syncs tags) → `uv run --project diary-scripts embed-mail --tier 1 --quiet` →
 `mail_reader.summarize_inbox` (last two non-fatal). Long-running
 services: `proton-bridge`, `goimapnotify` (IDLE push), `mail-reader`
 (FastAPI at 127.0.0.1:8800 behind Caddy `/mail/`). Wrapper:
@@ -112,9 +131,9 @@ just query notmuch; if something genuinely looks stale, check
 `systemctl --user status mail-sync.service` first. No digest cron yet
 (planned alongside Signal).
 
-### Semantic search — `search_mail.py` (pgvector + bge-m3)
+### Semantic search — `search-mail` (pgvector + bge-m3)
 
-Use `scripts/search_mail.py` for fuzzy / cross-language / topical queries —
+Use `search-mail` for fuzzy / cross-language / topical queries —
 useful when the exact word probably isn't in the mail (e.g. "byggematerialer"
 finds renovation threads even when none contain that word). For exact-text
 matching prefer plain `notmuch search`; semantic search is the right tool when
@@ -122,22 +141,22 @@ you don't know the keyword.
 
 ```bash
 # basic
-uv run scripts/search_mail.py "examplefund utbetaling 2025"
+uv run search-mail "examplefund utbetaling 2025"
 
 # filter by tier (see "tier definitions" below), sender, date
-uv run scripts/search_mail.py --tier 1 --since 2025-01-01 "fakturaer fra strøm"
-uv run scripts/search_mail.py --from astrid "ukeplan"
+uv run search-mail --tier 1 --since 2025-01-01 "fakturaer fra strøm"
+uv run search-mail --from astrid "ukeplan"
 
 # exclude a sender (substring, repeatable)
-uv run scripts/search_mail.py --not-from exampleconcrete "byggematerialer"
+uv run search-mail --not-from exampleconcrete "byggematerialer"
 
 # semantic minus — subtract a concept (default --weight 0.3; 0.7+ breaks query)
-uv run scripts/search_mail.py --minus mikrosement "byggematerialer"
-uv run scripts/search_mail.py --weight 0.5 --minus dogs "animals"
+uv run search-mail --minus mikrosement "byggematerialer"
+uv run search-mail --weight 0.5 --minus dogs "animals"
 ```
 
 Each hit prints distance, date, sender, subject, `id:<message-id>`, and a
-240-char snippet. Pipe an `id:` into `scripts/mailshow.py` for the full body.
+240-char snippet. Pipe an `id:` into `uv run mailshow` for the full body.
 
 **Caveat — snippets can stitch chunks across attachments.** A single mail
 with multiple attachments produces chunks from each attachment under the
@@ -145,7 +164,7 @@ same `message_id`. Adjacent chunks in the result list look like one quote
 but can come from unrelated documents (e.g. the homeowner's own søknad
 plus a neighbouring property's søknad attached for context). When an
 embedding hit is the *only* source for a durable claim (FDV, `CONTEXT.md`,
-biographical fact), open the full attachment text — `mailshow.py
+biographical fact), open the full attachment text — `uv run mailshow
 --attachment-text id:…` — and verify in context before writing it as
 fact. Especially risky: multi-attachment mails, neighbouring-property
 references, søknader/byggesaker (often sent as bundles). Lesson from
@@ -184,14 +203,14 @@ tier 1 and tier 4 gets embedded once (under whichever tier ran first) and
 skipped by later tiers. `--all` order is `2,1,3,6,5,4` — smallest tier
 first so failures surface fast.
 
-### Embedding new mail — `embed_mail.py` (automated)
+### Embedding new mail — `embed-mail` (automated)
 
-`scripts/embed_mail.py --all` (idempotent on `message_id`, resumable). Runs
+`uv run embed-mail --all` (idempotent on `message_id`, resumable). Runs
 **automatically every 15 min** via the systemd user unit
 `mail-sync.service` (chains `mbsync -a && notmuch new && uv run --frozen
-scripts/embed_mail.py --all --quiet`). The script is silent on success;
-failures print `!! <mid>: <err>` to stderr and exit nonzero so `chronic`
-surfaces them in the journal.
+--project diary-scripts embed-mail --all --quiet`). The tool is silent on
+success; failures print `!! <mid>: <err>` to stderr and exit nonzero so
+`chronic` surfaces them in the journal.
 
 Per message the script extracts:
 - **Body**: text/plain preferred, text/html fallback (HTML→text + quote/sig strip).
@@ -221,7 +240,8 @@ DROP INDEX chunks_embed_hnsw;
 CREATE INDEX chunks_embed_hnsw ON chunks USING hnsw (embedding vector_cosine_ops);
 ```
 
-Env vars (defaults usually fine): `PG_DSN=dbname=mailvec`,
+Env vars (defaults usually fine, real values from `config/local.toml` via
+`mail_reader.config`): `PG_DSN=dbname=mailvec`,
 `OLLAMA_URL=http://gpu-host:11434`, `EMBED_MODEL=bge-m3:latest`,
 `EMBED_BATCH=32`, `ME_ADDRS=user@example.com`. Do **not** try to
 install `talon` — won't build on Python 3.14 (`cchardet` needs
@@ -230,22 +250,22 @@ install `talon` — won't build on Python 3.14 (`cchardet` needs
 ### Typechecking + tests
 
 `uv run pytest scripts/` runs doctests + unit tests + integration tests
-against `~/Mail` (skipped if absent). `uv run ty check scripts/` runs
-Astral's `ty` typechecker. Both should pass clean before commit.
+against the local mail store (skipped if absent). `uv run ty check scripts/`
+runs Astral's `ty` typechecker. Both should pass clean before commit.
 
-### Auto-archiving the inbox — `archive_inbox.py`
+### Auto-archiving the inbox — `archive-inbox`
 
-For "archive after N days" workflows, use `scripts/archive_inbox.py`. Rules
+For "archive after N days" workflows, use `archive-inbox`. Rules
 live in `scripts/archive_inbox_rules.json`. **Not currently scheduled** — run
-manually (`uv run scripts/archive_inbox.py`) or wire up a user timer if you
+manually (`uv run archive-inbox`) or wire up a user timer if you
 want it daily; only `mail-sync.timer` is installed today.
 
 ### notmuch post-new hook
 
 `notmuch new` runs `~/Mail/Proton/.notmuch/hooks/post-new` after indexing,
-which calls `scripts/notmuch_sync_tags.py --apply --quiet`. Without this,
-folder moves on the Proton side (e.g. archiving a mail) don't update
-`tag:inbox` and the mail-reader inbox view goes stale.
+which calls `uv run --project diary-scripts notmuch-sync-tags --apply --quiet`.
+Without this, folder moves on the Proton side (e.g. archiving a mail) don't
+update `tag:inbox` and the mail-reader inbox view goes stale.
 
 The hooks dir lives **inside** `.notmuch/`, which isn't git-tracked. If
 the xapian DB is ever rebuilt the hook vanishes — reinstall with:
@@ -273,19 +293,19 @@ mbsync run**. Other related gotchas:
   no re-index needed. The `post-new` hook then reconciles tags.
 - Lesson learned 2026-05-15 archiving the Filter newsletters.
 
-### Extracting attachments — `mailshow.py --attachment-text` / `--attachments`
+### Extracting attachments — `mailshow --attachment-text` / `--attachments`
 
-`mailshow.py` handles attachments via two independent flags (reuses
+`mailshow` handles attachments via two independent flags (reuses
 `embed_mail.iter_attachments`, so PDF/DOCX/ODT/text extraction matches what
 the embedder sees):
 
 ```bash
 # inline extracted text (PDF/DOCX/ODT/text) after the body — combine freely
 # with --headers-only when the body is junk and you only want the PDF
-uv run scripts/mailshow.py --headers-only --attachment-text id:<message-id>
+uv run mailshow --headers-only --attachment-text id:<message-id>
 
 # save raw bytes to disk (filenames sanitised; collisions get .1, .2 …)
-uv run scripts/mailshow.py --attachments=/tmp/out id:<message-id>
+uv run mailshow --attachments=/tmp/out id:<message-id>
 ```
 
 `--max-chars` truncates each attachment's extracted text the same way it
@@ -307,13 +327,13 @@ streams. Lesson from 2026-04-27 (`MEMORY.md`).
 
 ---
 
-## Spond — `spond_sync.py` / `spondshow.py`
+## Spond — `spond-sync` / `spondshow`
 
-Evaluation phase, no timer yet. `scripts/spond_sync.py --once` pulls
+Evaluation phase, no timer yet. `uv run spond-sync --once` pulls
 chats + events + posts via the Olen/Spond library and appends raw JSONL
 to `memory/spond/YYYY-MM-DD.jsonl`. State cursor lives at
-`memory/spond-state.json` (auto-bumped by the script — unlike the mail
-cursor). Use `scripts/spondshow.py --since-cursor [--headers-only]` to
+`memory/spond-state.json` (auto-bumped by the tool — unlike the mail
+cursor). Use `uv run spondshow --since-cursor [--headers-only]` to
 triage new items; `--kind event --future` filters to upcoming events.
 Run **manually** for now; we'll add a systemd timer once we trust it.
 
@@ -323,8 +343,8 @@ post bodies, while payment receipts come in over mail.
 
 ### Auth
 
-- `SPOND_USERNAME` is exported from user's `~/.bashrc` — call
-  `spond_sync.py` / `spondshow.py` bare under `uv run`, **no inline
+- `SPOND_USERNAME` is exported from user's shell environment — call
+  `spond-sync` / `spondshow` bare under `uv run`, **no inline
   `SPOND_USERNAME=…` prefix** (a guessed override silently routes to the
   wrong account).
 - Password: `pass show spond/user` (override with `$SPOND_PASSWORD_CMD`).
@@ -338,16 +358,16 @@ post bodies, while payment receipts come in over mail.
 ### Processing new Spond items (SOP)
 
 Unlike the mail cursor, `memory/spond-state.json` is auto-bumped —
-running `spond_sync.py --once` updates `last_successful_run` and the
+running `spond-sync --once` updates `last_successful_run` and the
 per-chat / per-event / per-post seen-sets on every successful run. The
-cursor reflects "the last time `spond_sync.py` ran cleanly", not "the
+cursor reflects "the last time `spond-sync` ran cleanly", not "the
 last time we wrote a digest".
 
-1. **Fetch new activity** — `uv run scripts/spond_sync.py --once`.
+1. **Fetch new activity** — `uv run spond-sync --once`.
    Prints a one-line `new records: total=N, by_kind={...}` summary on
    stderr; appends new records to `memory/spond/YYYY-MM-DD.jsonl`.
    Idempotent — re-running with no new activity is a no-op.
-2. **Triage new records** — `uv run scripts/spondshow.py --since-cursor
+2. **Triage new records** — `uv run spondshow --since-cursor
    --headers-only` for a one-line summary per record; drop
    `--headers-only` to see full JSON bodies. Filter with `--kind
    chat|event|post` or pin to `--chat <id>` / `--event <id>`.
@@ -355,12 +375,12 @@ last time we wrote a digest".
    RSVP change, reschedule, or cancellation on an already-seen event
    re-emits and shows up here — set `$SPOND_RSVP_MEMBER_ID` (exported in
    user's shell) so the key folds in the tracked member's own response.
-   If it's unset, `spond_sync.py` prints a `!!` warning and only
+   If it's unset, `spond-sync` prints a `!!` warning and only
    reschedule/cancellation are caught, not RSVP. (Before 2026-05-29
    events used a flat id-only seen-set that swallowed RSVP changes
    entirely — see `test_spond_sync.py` for the regression.)
 2b. **Belt-and-suspenders: list upcoming events each pass** — `uv run
-   scripts/spondshow.py --kind event --future --headers-only` and
+   spondshow --kind event --future --headers-only` and
    reconcile every `[?]`/`[✓]`/`[✗]` RSVP marker against `CALENDAR.md`. A
    marker that disagrees with the calendar (or a calendar line still
    saying "RSVP: svar?" for an event user has since answered) is the
@@ -404,21 +424,21 @@ a future vision-model pass (e.g. qwen2.5vl) to describe each photo (the
 The check round **digests** the queue:
 
 ```bash
-uv run scripts/notes.py            # list pending notes (default)
-uv run scripts/notes.py list --all # include already-done notes
-uv run scripts/notes.py add "text" # add a note from the terminal
-uv run scripts/notes.py done 42    # mark note 42 handled — drops off the page
-uv run scripts/notes.py rm 42      # hard-delete note 42
-uv run scripts/notes.py image 7    # dump attachment #7's image to a file to view
+uv run notes            # list pending notes (default)
+uv run notes list --all # include already-done notes
+uv run notes add "text" # add a note from the terminal
+uv run notes done 42    # mark note 42 handled — drops off the page
+uv run notes rm 42      # hard-delete note 42
+uv run notes image 7    # dump attachment #7's image to a file to view
 ```
 
-SOP: run `notes.py` with no args. For each pending note, do the real
+SOP: run `uv run notes` with no args. For each pending note, do the real
 work it implies — file a `CALENDAR.md` entry, update a topic file, add a
 daily-note section, open a Spond reply, etc. — then `done <id>` it so it
 stops showing on the page but stays in the table as a record of what was
 captured. A note flagged `📎 bilde (vedlegg #N)` carries a photo: until a
-description exists, `notes.py image N <file>` writes the image out so you
-can open/read it before acting. Use `rm` only for genuine junk (test
+description exists, `uv run notes image N <file>` writes the image out so
+you can open/read it before acting. Use `rm` only for genuine junk (test
 rows, duplicates). If a note is ambiguous, surface it to the user rather
 than guessing. Notes are free-text from a phone on the go: expect terse,
 lower-case, half-sentences.
@@ -452,19 +472,19 @@ web. They are **not** auto-removed — the **sjekk** garbage-collects bought
 items:
 
 ```bash
-uv run scripts/shopping.py                 # list, grouped by category
-uv run scripts/shopping.py add "Bananer" --cat frukt   # category by prefix
-uv run scripts/shopping.py check 42        # tick (bought); uncheck to undo
-uv run scripts/shopping.py mv 42 frys      # move to another category
-uv run scripts/shopping.py rename 42 "..."  # rename
-uv run scripts/shopping.py rm 42           # hard-delete
-uv run scripts/shopping.py uncheck-all     # clear all checks (fresh trip)
-uv run scripts/shopping.py sweep           # delete checked items — THE SJEKK STEP
+uv run shopping                 # list, grouped by category
+uv run shopping add "Bananer" --cat frukt   # category by prefix
+uv run shopping check 42        # tick (bought); uncheck to undo
+uv run shopping mv 42 frys      # move to another category
+uv run shopping rename 42 "..."  # rename
+uv run shopping rm 42           # hard-delete
+uv run shopping uncheck-all     # clear all checks (fresh trip)
+uv run shopping sweep           # delete checked items — THE SJEKK STEP
 ```
 
-SOP each sjekk: run `uv run scripts/shopping.py sweep` to remove what the
+SOP each sjekk: run `uv run shopping sweep` to remove what the
 user ticked off since the last pass (it prints what it removed). A notes-
-queue item that's really a purchase ("kjøp gråblyanter") → `shopping.py add`
+queue item that's really a purchase ("kjøp gråblyanter") → `uv run shopping add`
 it, then `done` the note. `--cat` accepts a case-insensitive prefix of any
 canonical category (`frys`, `kjøl`, `nett`).
 
@@ -485,13 +505,13 @@ decimals.
 
 ```bash
 # From a CSV on disk
-uv run scripts/finance_ingest.py /tmp/bulder/eksporterte_transaksjoner.csv
+uv run finance-ingest /tmp/bulder/eksporterte_transaksjoner.csv
 
 # Auto-extract latest "Bulder bank eksport" mail and summarise
-uv run scripts/finance_ingest.py --from-mail
+uv run finance-ingest --from-mail
 
 # Same, plus cross-reference vs embedded mail and enqueue matches for tier-2
-PG_DSN=dbname=mailvec uv run scripts/finance_ingest.py --from-mail --enrich
+PG_DSN=dbname=mailvec uv run finance-ingest --from-mail --enrich
 ```
 
 Output (markdown tables on stdout): per-month inn/ut, per-account outflows,
@@ -528,12 +548,12 @@ retiring expired one-off events from `CALENDAR.md` — without this step,
 the calendar slowly fills with past entries and the top of the file stops
 being a useful "what's next" view.
 
-### Mechanical step — use the script
+### Mechanical step — use the tool
 
 ```bash
-uv run scripts/retire_calendar.py --dry-run            # preview
-uv run scripts/retire_calendar.py                      # apply, today = date.today()
-uv run scripts/retire_calendar.py --today 2026-06-01   # simulate a later date
+uv run retire-calendar --dry-run            # preview
+uv run retire-calendar                      # apply, today = date.today()
+uv run retire-calendar --today 2026-06-01   # simulate a later date
 ```
 
 Cuts every event line whose end-date is strictly before today's
@@ -624,7 +644,7 @@ commit the change and let the device poll.
   manual judgment call; the script intentionally does not touch the
   line body.
 
-Tests: `uv run pytest scripts/test_retire_calendar.py`.
+Tests: `uv run pytest scripts/test_retire_calendar.py` (run from inside `diary-scripts/`).
 
 ---
 
@@ -644,16 +664,16 @@ Two phases per run:
 
 ```bash
 # Just see what would happen on recent mail (no tags written, no PRs):
-uv run scripts/pr_compose.py --since-cursor
+uv run python -m scripts.pr_compose --since-cursor
 
 # Classify + tag, but don't open PRs:
-uv run scripts/pr_compose.py --apply --since-cursor
+uv run python -m scripts.pr_compose --apply --since-cursor
 
 # Full pipeline — classify, tag, file PRs:
-uv run scripts/pr_compose.py --apply --file-prs --since-cursor
+uv run python -m scripts.pr_compose --apply --file-prs --since-cursor
 
 # File PRs only (skip classify), capped at 2:
-uv run scripts/pr_compose.py --file-prs --apply --limit-prs 2 'id:none'
+uv run python -m scripts.pr_compose --file-prs --apply --limit-prs 2 'id:none'
 ```
 
 ### Model server
@@ -718,10 +738,10 @@ for half a day.
 
 ```bash
 # Sanity-check tool-calling on a new model:
-uv run scripts/mlx_tool_probe.py --model <model-id>
+uv run python -m scripts.mlx_tool_probe --model <model-id>
 
 # Real writer scenario on a notmuch thread:
-uv run scripts/mlx_tool_probe.py --model <id> --scenario writer_lenient \
+uv run python -m scripts.mlx_tool_probe --model <id> --scenario writer_lenient \
     --mail-thread <thread-id-without-prefix> --max-tokens 4000
 ```
 
@@ -823,8 +843,8 @@ landscape moves — review during the monthly check):
 
 Lives under `mail_reader/` (not `scripts/`). FastAPI + Jinja2 + HTMX behind
 Caddy at `https://server.example.ts.net/mail/`; supervised by the
-`mail-reader.service` user unit. Design lives in `mail_reader/DESIGN.md`,
-parking-lot in `mail_reader/IDEAS.md`.
+`mail-reader.service` user unit (`uv run python -m mail_reader.server`).
+Design lives in `mail_reader/DESIGN.md`, parking-lot in `mail_reader/IDEAS.md`.
 
 ### End-to-end verification — `verify_browser.py`
 
@@ -832,8 +852,8 @@ After a change to routes, templates, CSS, or the tankekart pipeline, drive
 the running webapp through headless Chromium:
 
 ```bash
-uv run mail_reader/verify_browser.py --clean
-uv run mail_reader/verify_browser.py --base http://other.host/mail --keep-going
+uv run python -m mail_reader.verify_browser --clean
+uv run python -m mail_reader.verify_browser --base http://other.host/mail --keep-going
 ```
 
 Four independent checks (inbox + agenda dismiss, message-view entity chips +
@@ -845,8 +865,8 @@ so playwright doesn't fetch its own browser.
 Defaults to the tailnet Caddy URL — hitting `127.0.0.1:8800` directly bypasses
 the `/mail/` prefix baked into every `url_for()` link by FastAPI's
 `root_path` setting, so clicks 404. Restart the service after deploying new
-code (`systemctl --user restart mail-reader.service`) — `uv run` doesn't
-reload templates or Python modules on its own.
+code (`systemctl --user restart mail-reader.service`) — `uv run python -m
+mail_reader.server` doesn't reload templates or Python modules on its own.
 
 The agenda-dismiss probe writes a real `agenda_dismissed` row that persists,
 so successive runs see one fewer card unless cleaned with
@@ -861,8 +881,8 @@ single PNG for the wall-mounted Kindle Paperwhite. See
 generator's architecture, content blocks, and customization hooks.
 
 ```bash
-# Dev: launch with logs in the foreground
-uv run --frozen --no-sync python -m scripts.kindle_dashboard.serve
+# Dev: launch with logs in the foreground (run from inside diary-scripts/)
+uv run python -m scripts.kindle_dashboard.serve
 
 # Production: systemd user unit
 systemctl --user {start,stop,restart,status} kindle-dashboard
@@ -870,7 +890,7 @@ journalctl --user -u kindle-dashboard -f
 ```
 
 Endpoints once running:
-- `http://10.0.0.206:8801/dashboard.png` — what the Kindle on the LAN polls
+- `http://192.0.2.10:8801/dashboard.png` — what the Kindle on the LAN polls
 - `https://server.example.ts.net/kindle/` — phone preview over the tailnet
 
 The Kindle SSH key lives at `~/.ssh/kindle_ed25519` on server, with
