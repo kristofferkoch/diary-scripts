@@ -93,3 +93,24 @@ def test_month_grid_counts_events_per_day(tmp_path, monkeypatch):
     assert by_day[5]["event_count"] == 1
     assert by_day[3]["event_count"] == 0
     assert by_day[3]["has_events"] is False
+
+
+def test_every_weather_icon_has_a_norwegian_label():
+    """Every yr.no symbol we ship an icon for must have a Norwegian label.
+
+    Regression for notat #307 (2026-06-04): a missing entry made _label_for
+    leak the raw code ("heavyrainandthunder") onto the wall display.
+    """
+    base_codes = {
+        p.stem.rsplit("_", 1)[0]
+        if p.stem.rsplit("_", 1)[-1] in ("day", "night", "polartwilight")
+        else p.stem
+        for p in data.YR_ICONS_DIR.glob("*.svg")
+    }
+    missing = sorted(c for c in base_codes if c not in data._SYMBOL_LABELS)
+    assert not missing, f"weather codes without a Norwegian label: {missing}"
+
+
+def test_label_for_strips_time_suffix_and_never_returns_raw_code():
+    assert data._label_for("heavyrainandthunder_day") == "Kraftig regn og torden"
+    assert data._label_for("partlycloudy_night") == "Halvskyet"

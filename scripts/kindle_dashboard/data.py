@@ -452,6 +452,13 @@ WEATHER_TTL_SECONDS = 1800  # 30 min; well under yr.no's typical Expires.
 
 _weather_cache: dict[str, Any] = {"fetched_at": None, "payload": None}
 
+# Complete met.no/yr.no weather-symbol base codes → Norwegian labels. Must
+# cover every base code shipped under static/yricons/ (the *_day/_night/
+# _polartwilight suffix is stripped before lookup) — otherwise _label_for
+# falls back to the raw code and leaks e.g. "heavyrainandthunder" onto the
+# wall display (caught 2026-06-04, notat #307). test_data.py asserts the map
+# stays in sync with the icon set. The doubled-s codes
+# (lightssleet…/lightssnow…) are met.no's own spelling, not typos.
 _SYMBOL_LABELS = {
     "clearsky": "Sol",
     "fair": "Lettskyet",
@@ -461,19 +468,39 @@ _SYMBOL_LABELS = {
     "lightrain": "Lett regn",
     "rain": "Regn",
     "heavyrain": "Kraftig regn",
-    "lightrainshowers": "Lette byger",
+    "lightrainandthunder": "Lett regn og torden",
+    "rainandthunder": "Regn og torden",
+    "heavyrainandthunder": "Kraftig regn og torden",
+    "lightrainshowers": "Lette regnbyger",
     "rainshowers": "Regnbyger",
-    "heavyrainshowers": "Kraftige byger",
+    "heavyrainshowers": "Kraftige regnbyger",
+    "lightrainshowersandthunder": "Lette regnbyger og torden",
+    "rainshowersandthunder": "Regnbyger og torden",
+    "heavyrainshowersandthunder": "Kraftige regnbyger og torden",
     "lightsleet": "Lett sludd",
     "sleet": "Sludd",
     "heavysleet": "Kraftig sludd",
+    "lightsleetandthunder": "Lett sludd og torden",
+    "sleetandthunder": "Sludd og torden",
+    "heavysleetandthunder": "Kraftig sludd og torden",
+    "lightsleetshowers": "Lette sluddbyger",
+    "sleetshowers": "Sluddbyger",
+    "heavysleetshowers": "Kraftige sluddbyger",
+    "lightssleetshowersandthunder": "Lette sluddbyger og torden",
+    "sleetshowersandthunder": "Sluddbyger og torden",
+    "heavysleetshowersandthunder": "Kraftige sluddbyger og torden",
     "lightsnow": "Lett snø",
     "snow": "Snø",
     "heavysnow": "Kraftig snø",
+    "lightsnowandthunder": "Lett snø og torden",
+    "snowandthunder": "Snø og torden",
+    "heavysnowandthunder": "Kraftig snø og torden",
+    "lightsnowshowers": "Lette snøbyger",
     "snowshowers": "Snøbyger",
-    "thunderstorm": "Torden",
-    "lightrainandthunder": "Regn og torden",
-    "rainandthunder": "Regn og torden",
+    "heavysnowshowers": "Kraftige snøbyger",
+    "lightssnowshowersandthunder": "Lette snøbyger og torden",
+    "snowshowersandthunder": "Snøbyger og torden",
+    "heavysnowshowersandthunder": "Kraftige snøbyger og torden",
 }
 
 YR_ICONS_DIR = Path(__file__).parent / "static" / "yricons"
