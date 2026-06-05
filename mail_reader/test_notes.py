@@ -131,13 +131,17 @@ def test_get_returns_none_for_missing(conn):
 # --- attachments -----------------------------------------------------------
 
 
-def _img(tag: bytes = b"") -> ProcessedImage:
+def _img(
+    tag: bytes = b"", *, gps: tuple[float, float] | None = None
+) -> ProcessedImage:
     return ProcessedImage(
         mime_type="image/jpeg",
         image_bytes=b"WEB" + tag,
         thumb_bytes=b"THUMB" + tag,
         width=800,
         height=600,
+        gps_lat=gps[0] if gps else None,
+        gps_lon=gps[1] if gps else None,
     )
 
 
@@ -169,6 +173,21 @@ def test_add_attachment_stores_and_serves_blobs(conn):
     assert meta["note_id"] == note["id"]
     assert (meta["width"], meta["height"]) == (800, 600)
     assert meta["description"] is None and meta["described_at"] is None
+    assert meta["gps_lat"] is None and meta["gps_lon"] is None  # no fix on _img()
+
+
+def test_attachment_stores_and_surfaces_gps(conn):
+    note = _mk(conn, "med sted")
+    att_id = notes.add_attachment(conn, note["id"], _img(gps=(59.925, 10.75)))
+
+    meta = notes.get_attachment(conn, att_id)
+    assert meta["gps_lat"] == pytest.approx(59.925)
+    assert meta["gps_lon"] == pytest.approx(10.75)
+
+    # gps rides along on the note row so the page renders the chip in one query
+    listed = {n["id"]: n for n in notes.list_pending(conn)}
+    assert listed[note["id"]]["gps_lat"] == pytest.approx(59.925)
+    assert listed[note["id"]]["gps_lon"] == pytest.approx(10.75)
 
 
 def test_get_attachment_blob_missing_returns_none(conn):

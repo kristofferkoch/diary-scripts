@@ -44,13 +44,21 @@ class NotAnImage(ValueError):
 
 @dataclass(frozen=True)
 class ProcessedImage:
-    """A processed attachment ready to store: two JPEGs + web dimensions."""
+    """A processed attachment ready to store: two JPEGs + web dimensions.
+
+    `gps_lat`/`gps_lon` are signed decimal degrees pulled from the photo's
+    EXIF GPS tags, or None — location is optional (screenshots, location-off,
+    share-sheet stripping), so a missing fix is normal, not an error. See the
+    "GPS as a signal" item in IDEAS.md.
+    """
 
     mime_type: str
     image_bytes: bytes
     thumb_bytes: bytes
     width: int
     height: int
+    gps_lat: float | None = None
+    gps_lon: float | None = None
 
 
 def _to_rgb(img: Image.Image) -> Image.Image:
@@ -75,6 +83,57 @@ def _encode_jpeg(img: Image.Image, exif: Image.Exif | None = None) -> bytes:
     return buf.getvalue()
 
 
+# EXIF GPS IFD tag (0x8825) and the sub-tags we read within it.
+_GPS_IFD = 0x8825
+_GPS_LAT_REF, _GPS_LAT = 1, 2
+_GPS_LON_REF, _GPS_LON = 3, 4
+
+
+def _dms_to_deg(dms, ref) -> float | None:
+    """Convert one EXIF (degrees, minutes, seconds) triple plus its hemisphere
+    ref ('N'/'S'/'E'/'W') to signed decimal degrees. Returns None if the triple
+    isn't three numbers — corrupt or absent GPS shouldn't sink the whole upload.
+
+    >>> _dms_to_deg((59.0, 55.0, 30.0), "N")
+    59.925
+    >>> _dms_to_deg((10.0, 45.0, 0.0), "W")
+    -10.75
+    >>> _dms_to_deg((10.0, 45.0, 0.0), b"E")
+    10.75
+    >>> _dms_to_deg(None, "N") is None
+    True
+    >>> _dms_to_deg((1.0, 2.0), "N") is None
+    True
+    """
+    try:
+        deg, minute, sec = (float(x) for x in dms)
+    except (TypeError, ValueError):
+        return None
+    value = deg + minute / 60 + sec / 3600
+    if isinstance(ref, bytes):
+        ref = ref.decode("ascii", "ignore")
+    if isinstance(ref, str) and ref.upper() in ("S", "W"):
+        value = -value
+    return value
+
+
+def _extract_gps(exif: Image.Exif) -> tuple[float, float] | None:
+    """Pull (lat, lon) in signed decimal degrees from EXIF, or None when the
+    photo carries no usable fix. Partial (one axis only) or out-of-range
+    coordinates count as no fix — better to drop a dubious location than store
+    a wrong one."""
+    gps = exif.get_ifd(_GPS_IFD)
+    if not gps:
+        return None
+    lat = _dms_to_deg(gps.get(_GPS_LAT), gps.get(_GPS_LAT_REF))
+    lon = _dms_to_deg(gps.get(_GPS_LON), gps.get(_GPS_LON_REF))
+    if lat is None or lon is None:
+        return None
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return None
+    return lat, lon
+
+
 def process(raw: bytes) -> ProcessedImage:
     """Decode `raw`, bake in EXIF orientation, and produce a downscaled web
     JPEG plus a thumbnail JPEG. GPS / remaining EXIF is preserved on the web
@@ -95,6 +154,7 @@ def process(raw: bytes) -> ProcessedImage:
     # (GPS included) on the returned image — that's what we carry forward.
     img = ImageOps.exif_transpose(img)
     exif = img.getexif()
+    gps = _extract_gps(exif)
     img = _to_rgb(img)
 
     web = img.copy()
@@ -108,4 +168,6 @@ def process(raw: bytes) -> ProcessedImage:
         thumb_bytes=_encode_jpeg(thumb),
         width=web.width,
         height=web.height,
+        gps_lat=gps[0] if gps else None,
+        gps_lon=gps[1] if gps else None,
     )

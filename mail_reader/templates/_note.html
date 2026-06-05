@@ -12,6 +12,13 @@
     <img src="{{ url_for('get_note_attachment_thumb', attachment_id=note.attachment_id) }}"
          alt="Vedlagt bilde" loading="lazy">
   </a>
+  {% if note.gps_lat is not none and note.gps_lon is not none %}
+  {# Where the photo was taken (EXIF GPS). Opens OpenStreetMap with a pin on
+     tap — no external request until the user clicks, so an idle page view
+     leaks nothing. #}
+  <a class="note-geo" target="_blank" rel="noopener"
+     href="https://www.openstreetmap.org/?mlat={{ '%.6f'|format(note.gps_lat) }}&amp;mlon={{ '%.6f'|format(note.gps_lon) }}#map=16/{{ '%.6f'|format(note.gps_lat) }}/{{ '%.6f'|format(note.gps_lon) }}">📍 sted</a>
+  {% endif %}
   {% endif %}
   <div class="note-foot">
     <span class="note-when">{{ note.created_at | short_datetime }}{% if note.updated_at != note.created_at %} · endret{% endif %}</span>

@@ -86,6 +86,54 @@ def test_process_preserves_gps_on_web_image():
         assert kept.get(3) == "E"
 
 
+def _jpeg_with_gps(lat_dms, lat_ref, lon_dms, lon_ref) -> bytes:
+    """A small JPEG carrying the given EXIF GPS triples/refs."""
+    base = Image.new("RGB", (300, 200), "green")
+    exif = base.getexif()
+    gps = exif.get_ifd(0x8825)
+    gps[1], gps[2] = lat_ref, lat_dms
+    gps[3], gps[4] = lon_ref, lon_dms
+    buf = io.BytesIO()
+    base.save(buf, format="JPEG", exif=exif)
+    return buf.getvalue()
+
+
+def test_process_extracts_gps_to_decimal_degrees():
+    # Oslo-ish: 59°55'30"N, 10°45'00"E -> 59.925, 10.75
+    out = ni.process(_jpeg_with_gps((59.0, 55.0, 30.0), "N", (10.0, 45.0, 0.0), "E"))
+    assert out.gps_lat == pytest.approx(59.925)
+    assert out.gps_lon == pytest.approx(10.75)
+
+
+def test_process_signs_southern_western_hemisphere():
+    out = ni.process(_jpeg_with_gps((33.0, 51.0, 0.0), "S", (151.0, 12.0, 0.0), "W"))
+    assert out.gps_lat < 0 and out.gps_lon < 0
+    assert out.gps_lat == pytest.approx(-33.85)
+
+
+def test_process_no_gps_leaves_coords_none():
+    out = ni.process(_jpeg((100, 100)))
+    assert out.gps_lat is None and out.gps_lon is None
+
+
+def test_process_partial_gps_is_no_fix():
+    # Latitude present but longitude missing -> treat as no location at all.
+    base = Image.new("RGB", (120, 80), "green")
+    exif = base.getexif()
+    gps = exif.get_ifd(0x8825)
+    gps[1], gps[2] = "N", (59.0, 0.0, 0.0)  # lat only, no lon
+    buf = io.BytesIO()
+    base.save(buf, format="JPEG", exif=exif)
+    out = ni.process(buf.getvalue())
+    assert out.gps_lat is None and out.gps_lon is None
+
+
+def test_process_rejects_out_of_range_coords():
+    # Corrupt EXIF claiming 200° longitude is dropped, not stored.
+    out = ni.process(_jpeg_with_gps((10.0, 0.0, 0.0), "N", (200.0, 0.0, 0.0), "E"))
+    assert out.gps_lat is None and out.gps_lon is None
+
+
 def test_process_normalizes_orientation_tag_but_keeps_other_exif():
     # The Orientation tag is baked into pixels and removed; unrelated EXIF
     # (here: a Make tag) rides along.

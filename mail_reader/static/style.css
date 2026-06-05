@@ -1448,6 +1448,19 @@ li.cal-event-allday .cal-event-time {
   border: 1px solid var(--rule);
 }
 
+/* "📍 sted" chip under a photo that carried EXIF GPS — links to a map pin. */
+.note-geo {
+  display: inline-block;
+  margin: var(--s-2) 0 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+  text-decoration: none;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-sm);
+  padding: 2px var(--s-2);
+}
+.note-geo:hover { color: var(--ink-strong); border-color: var(--ink-strong); }
+
 /* --------------------------------------------------------------------------
    Shopping list (/shopping/) — add box + categorised checklist
    -------------------------------------------------------------------------- */

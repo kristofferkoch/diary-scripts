@@ -28,7 +28,11 @@ class Note(TypedDict):
     updated_at: object
     # First image attached to this note, if any. Populated by list_pending/get
     # (which resolve it in one query); the mutation helpers don't return it.
+    # gps_lat/gps_lon ride along so the page can show a map link without a
+    # second round trip; both None when the photo carried no location.
     attachment_id: NotRequired[int | None]
+    gps_lat: NotRequired[float | None]
+    gps_lon: NotRequired[float | None]
 
 
 class Attachment(TypedDict):
@@ -40,6 +44,8 @@ class Attachment(TypedDict):
     description: str | None
     description_model: str | None
     described_at: object
+    gps_lat: float | None
+    gps_lon: float | None
     created_at: object
 
 
@@ -48,12 +54,14 @@ class Attachment(TypedDict):
 # trip. A note may legitimately have an image but no text (capture from a
 # phone), hence resolving the attachment independently of the body.
 _NOTE_COLS = (
-    "n.id, n.body, n.status, n.created_at, n.updated_at, a.id AS attachment_id"
+    "n.id, n.body, n.status, n.created_at, n.updated_at, "
+    "a.id AS attachment_id, a.gps_lat, a.gps_lon"
 )
 _NOTE_FROM = (
     "FROM notes_queue n "
     "LEFT JOIN LATERAL ("
-    "  SELECT id FROM note_attachments WHERE note_id = n.id ORDER BY id LIMIT 1"
+    "  SELECT id, gps_lat, gps_lon FROM note_attachments "
+    "  WHERE note_id = n.id ORDER BY id LIMIT 1"
     ") a ON true"
 )
 
@@ -163,8 +171,9 @@ def add_attachment(
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO note_attachments "
-            "(note_id, mime_type, image_bytes, thumb_bytes, width, height) "
-            "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+            "(note_id, mime_type, image_bytes, thumb_bytes, width, height, "
+            "gps_lat, gps_lon) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
             (
                 note_id,
                 image.mime_type,
@@ -172,6 +181,8 @@ def add_attachment(
                 image.thumb_bytes,
                 image.width,
                 image.height,
+                image.gps_lat,
+                image.gps_lon,
             ),
         )
         row = cur.fetchone()
@@ -186,7 +197,8 @@ def get_attachment(conn: psycopg.Connection, attachment_id: int) -> Attachment |
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "SELECT id, note_id, mime_type, width, height, "
-            "description, description_model, described_at, created_at "
+            "description, description_model, described_at, "
+            "gps_lat, gps_lon, created_at "
             "FROM note_attachments WHERE id = %s",
             (attachment_id,),
         )

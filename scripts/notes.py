@@ -39,6 +39,13 @@ def _fmt(note: dict, attachment: dict | None = None) -> str:
         if attachment.get("width") and attachment.get("height"):
             dims = f", {attachment['width']}×{attachment['height']}"
         out += f"\n      📎 bilde (vedlegg #{attachment['id']}{dims})"
+        if attachment.get("gps_lat") is not None and attachment.get("gps_lon") is not None:
+            out += (
+                f"\n        📍 {attachment['gps_lat']:.5f}, {attachment['gps_lon']:.5f}"
+                f"  https://www.openstreetmap.org/?mlat={attachment['gps_lat']:.5f}"
+                f"&mlon={attachment['gps_lon']:.5f}#map=16/{attachment['gps_lat']:.5f}"
+                f"/{attachment['gps_lon']:.5f}"
+            )
         if attachment.get("description"):
             desc = attachment["description"].replace("\n", "\n        ")
             out += f"\n        ↳ {desc}"

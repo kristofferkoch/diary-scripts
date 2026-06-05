@@ -9,32 +9,109 @@ Format: `## YYYY-MM-DD — short title` headings, newest at top. Tag author with
 
 ---
 
-## 2026-06-01 — notat-foto: GPS som signal (user)
+## 2026-06-05 — sandboxed read-only notmuch access (user)
+
+> "Another idea: sandboxed read-only access to notmuch. Could be useful in
+> conjunction with the LLM-composed database search."
+
+A third read corpus for an LLM search/escalation agent, alongside the
+Postgres RO role ([[#2026-05-22-—-llm-composed-search-via-read-only-db-role]])
+and the markdown store
+([[#2026-05-23-—-tier-2-escalation-flag-→-second-level-agent]]). The
+`summaries`/`chunks`/`entities` tables are a *derived* view of the mail;
+notmuch holds things the DB doesn't fully replicate:
+
+- the **tag taxonomy** — `tag:inbox`, `tag:digest::*`, `tag:important`,
+  thread/flagged state — which is where triage decisions actually live;
+- **Xapian full-text** with notmuch's own query language (`from:`,
+  `subject:`, `date:..`, boolean) — different recall than pgvector
+  semantic search, complementary to it;
+- **thread structure** as notmuch sees it.
+
+So an LLM that can compose *both* a SQL query (structured/semantic) *and*
+a notmuch query (tag/full-text) covers more question shapes than either
+alone — "unanswered mail from skolen tagged important in May", "threads I
+flagged but never replied to".
+
+**Why "sandboxed" is the crux.** notmuch is read-mostly, but the binary
+mixes read and write subcommands. The danger isn't `search`/`show` —
+it's `notmuch tag` / `new` / `insert` / `reindex` / `config set`
+mutating the index (which the whole 15-min sync + triage pipeline
+depends on), plus the usual shell-injection risk if the LLM's query
+string reaches a shell. Sandbox layers:
+
+1. **Subcommand allowlist** — only `search`, `show`, `count`, `address`.
+   Never `tag`/`new`/`insert`/`reindex`/`config`/`dump`/`restore`.
+   Args passed as an argv list (no shell), query string as a single
+   positional arg so it can't smuggle flags (`--` terminator).
+2. **OS-level RO** — run under a restricted process with the maildir +
+   `.notmuch/xapian` bind-mounted read-only (bwrap / a dedicated unix
+   user without write perms). Even a bug in (1) can't mutate the index.
+3. **Bounded cost** — subprocess timeout (the notmuch analog of the
+   RO role's `statement_timeout`) + a cap on result count / output bytes.
+
+**Tool surface for the agent** (mirrors the `md_*` / SQL shapes):
+- `notmuch_search(query, limit=20)` → `[{thread_id, msg_id, from,
+  subject, date, tags}]` (i.e. `notmuch search --format=json --output=summary`).
+- `notmuch_show(msg_id)` → headers + plain body for one message
+  (reuse the same sanitisation `mailshow` already does).
+- maybe `notmuch_count(query)` for cheap "how many" answers.
+
+Could share the single agent harness from the tier-2 escalator with a
+fourth entry in the tool allowlist. Reuses notmuch's existing JSON
+output — little new code beyond the sandbox wrapper. Caveat: the index
+is ≤15 min stale (same as the inbox view) — fine for retrospective
+questions, not for "did this *just* arrive".
+
+## 2026-06-05 — tankekart hasn't earned its keep (user signal)
+
+> "The tankekart features haven't been useful so far."
+
+Real-world signal after living with it: the mind-map / related-mail
+panel hasn't paid off. That **reprioritizes the whole fan-out cluster
+below** — [[#2026-05-22-—-tankekart-that-actually-fans-out]] (incl. the
+"chosen" per-chunk option 2), and the parts of
+[[#2026-05-22-—-extract-more-per-qwen-call]] justified mainly by feeding
+tankekart branch labels (themes + theme-vectors). Before building more
+fan-out, worth asking *why* it's not useful: nearest-neighbours of
+routine mail are just more routine mail (the "Stripe receipt → all
+Stripe receipts" pitfall from the risks section), the signal may be
+genuinely low for this inbox, or a flat related-list just isn't a
+workflow the user reaches for. Don't sink the per-chunk / MMR / cluster
+work in on a feature that isn't landing — the search-and-escalation
+direction (md-search, RO SQL, RO notmuch above) looks like the better
+bet for LLM-over-the-corpus value. Not a gravestone yet; a flag to
+*not* invest further without evidence the core idea helps.
+
+## 2026-06-01 — notat-foto: GPS som signal (user) — ✅ LANDET 2026-06-05
 
 > "gps should not be stripped, but used as a signal."
 
-Photo notes (the bilde-opplasting feature below) now **preserve** the EXIF —
-GPS included — on the stored web image rather than stripping it
-(`mail_reader/note_images.py`). The lat/lon a phone stamps on a photo is a
-useful signal: *where* a note was captured. Things we could do with it once
-we lean in:
+**Landet (extraction + surfacing).** Beyond preserving the EXIF on the
+stored web image, `note_images.process()` now parses the GPS lat/lon into
+signed decimal degrees at upload time and `add_attachment` stamps them into
+new `gps_lat`/`gps_lon` columns on `note_attachments` (migration 014). The
+/notes/ page renders a "📍 sted" chip linking to an OpenStreetMap pin
+(click-to-load — no map request on an idle view), and the sjekk CLI prints
+the coordinates + map URL under the `📎 bilde` line. Partial / out-of-range
+/ absent fixes resolve to NULL — location is optional by construction
+(screenshots, location-off, share-sheet stripping), so a missing fix never
+fails the upload. Doctested DMS→decimal helper + extraction/roundtrip tests
+in `test_note_images.py` / `test_notes.py`.
+
+Considered this "complete for now"; **still future work** if it proves
+useful:
 
 - **Reverse-geocode** the coordinates to a place name and fold it into the
   note's text / the future VLM description ("foto tatt ved Eksempelveien 3B" /
   "…ved Rema Olsvik"). Local-only geocoder or a cached lookup — no need to
   phone out per note.
-- **Stamp it into `note_attachments`** as structured columns (e.g.
-  `gps_lat`, `gps_lon`, or a `geo POINT`) at upload time, parsed from the
-  EXIF we already keep — cheaper than re-parsing the JPEG each read, and
-  queryable ("notater tatt i nærheten av X").
-- **Surface on the page**: a tiny "📍 sted" chip linking to a map, or group
-  notes by location.
+- **Query by location** ("notater tatt i nærheten av X") — the structured
+  columns make this a plain SQL distance filter now; pairs with the
+  LLM-composed search ideas below.
 - **Sjekk hint**: a grocery photo snapped at a store, a parking-spot photo
-  at an airport — location disambiguates terse captures.
-
-For now we just stop discarding it; extraction/use is future work. Caveat:
-not every photo has GPS (screenshots, location-off, stripped by the share
-sheet), so anything built on this must treat it as optional.
+  at an airport — location disambiguates terse captures. (Needs the
+  reverse-geocode step to be legible; raw lat/lon isn't.)
 
 ## 2026-05-31 — notater: bilde-opplasting (user) — ✅ IMPLEMENTERT 2026-06-01
 

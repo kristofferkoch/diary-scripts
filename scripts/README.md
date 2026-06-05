@@ -416,7 +416,13 @@ as a signal — see "GPS as a signal" in `mail_reader/IDEAS.md`)
 and stored as web + thumbnail BYTEA in the `note_attachments` table
 (migration `migrations/013_note_attachments.sql`). A note may carry a
 photo, text, or both — an image-only note (blank text) is valid. The list
-renders the thumbnail; tapping opens the full image. The table also has
+renders the thumbnail; tapping opens the full image. If the photo's EXIF
+carries a location it's parsed at upload time into the `gps_lat`/`gps_lon`
+columns (migration `migrations/014_note_attachment_gps.sql`): the page
+shows a "📍 sted" chip linking to an OpenStreetMap pin and the CLI listing
+prints the coordinates + map URL. Location is optional — screenshots /
+location-off / share-sheet-stripped photos just leave both columns NULL.
+The table also has
 `description` / `description_model` / `described_at` columns reserved for
 a future vision-model pass (e.g. qwen2.5vl) to describe each photo (the
 "image attachment summaries" item in `mail_reader/IDEAS.md`).
