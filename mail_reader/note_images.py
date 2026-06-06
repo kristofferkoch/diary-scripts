@@ -107,7 +107,10 @@ def _dms_to_deg(dms, ref) -> float | None:
     """
     try:
         deg, minute, sec = (float(x) for x in dms)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, ZeroDivisionError):
+        # A 0/0 EXIF rational (cameras write it for an empty seconds field)
+        # is an IFDRational that reprs as nan but raises ZeroDivisionError on
+        # float() — treat it as absent GPS rather than sinking the upload.
         return None
     value = deg + minute / 60 + sec / 3600
     if isinstance(ref, bytes):

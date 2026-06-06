@@ -128,6 +128,25 @@ def test_process_partial_gps_is_no_fix():
     assert out.gps_lat is None and out.gps_lon is None
 
 
+def test_process_survives_zero_denominator_gps_rational():
+    # Some cameras write a 0/0 EXIF rational for an empty seconds field. PIL
+    # decodes it as an IFDRational that raises ZeroDivisionError on float() —
+    # it must be treated as absent GPS, not crash the whole upload (which 500'd
+    # the /notes/ page on 2026-06-06).
+    from PIL.TiffImagePlugin import IFDRational
+
+    base = Image.new("RGB", (120, 80), "green")
+    exif = base.getexif()
+    gps = exif.get_ifd(0x8825)
+    gps[1], gps[2] = "N", (59.0, 55.0, IFDRational(0, 0))
+    gps[3], gps[4] = "E", (10.0, 45.0, IFDRational(0, 0))
+    buf = io.BytesIO()
+    base.save(buf, format="JPEG", exif=exif)
+
+    out = ni.process(buf.getvalue())  # must not raise
+    assert out.gps_lat is None and out.gps_lon is None
+
+
 def test_process_rejects_out_of_range_coords():
     # Corrupt EXIF claiming 200° longitude is dropped, not stored.
     out = ni.process(_jpeg_with_gps((10.0, 0.0, 0.0), "N", (200.0, 0.0, 0.0), "E"))
