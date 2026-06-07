@@ -10,6 +10,7 @@
    after-request clears the name field and refocuses it (category selection
    is kept, so adding several items in one aisle is one tap each). #}
 <form class="shop-form"
+      method="post" action="{{ url_for('post_shopping_item') }}"
       hx-post="{{ url_for('post_shopping_item') }}"
       hx-target="#shopping-list"
       hx-swap="outerHTML"

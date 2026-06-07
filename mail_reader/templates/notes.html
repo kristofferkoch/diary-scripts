@@ -13,6 +13,7 @@
    Text is NOT required here — an image-only note is valid; the submit button's
    onclick blocks a send with neither text nor photo. #}
 <form class="note-form"
+      method="post" action="{{ url_for('post_note') }}" enctype="multipart/form-data"
       hx-post="{{ url_for('post_note') }}"
       hx-encoding="multipart/form-data"
       hx-target="#note-list"
