@@ -439,7 +439,13 @@ lost a whole conversation on 2026-06-07).
    `--with <peer>` (whole thread incl. your replies), `--group`/`--no-group`.
 2. Triage substantive messages as first-class sjekk input (same weight as
    mail/Spond) — surface anything actionable, file durable facts to the
-   right topic file.
+   right topic file. **Do NOT mention insignificant messages at all** —
+   real-time coordination ("kom hit litt", "ja"), greetings,
+   acknowledgements, group-chat thanks/reactions and the like are noise:
+   leave them out of the sjekk summary *and* the daily note entirely. Read
+   them only to confirm there's nothing actionable, then move on. Surface a
+   Signal message only when it carries a fact worth keeping or an action to
+   take.
 3. `uv run signalshow --since-cursor --bump` (or just `--bump`) to advance
    the cursor to the newest message shown. Commit `memory/signal-state.json`
    under `MEM:` — the JSONL itself is git-ignored.
