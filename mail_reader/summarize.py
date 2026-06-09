@@ -35,7 +35,7 @@ from typing import TypedDict
 import psycopg
 
 from . import db, extract, priority
-from .config import ollama_url
+from .config import ollama_url, summaries_enabled
 
 
 OLLAMA_URL = ollama_url()  # $OLLAMA_URL → config hosts.llm (see config.ollama_url)
@@ -551,7 +551,12 @@ def schedule_all_passes(conn: psycopg.Connection,
                         notmuch_msg_id: str) -> int:
     """Enqueue every configured pass for this mail. Returns the count of
     NEW claims (0 if all passes already have rows). Idempotent — the
-    partial unique index keeps existing in-flight rows from duplicating."""
+    partial unique index keeps existing in-flight rows from duplicating.
+
+    No-op (returns 0) when summaries are disabled via config — see
+    `config.summaries_enabled`."""
+    if not summaries_enabled():
+        return 0
     meta = _msg_meta(conn, notmuch_msg_id)
     if meta is None:
         return 0

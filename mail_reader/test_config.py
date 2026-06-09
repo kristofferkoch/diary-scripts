@@ -117,6 +117,33 @@ def test_host_url_falls_back_to_placeholder_when_unconfigured(monkeypatch: pytes
     assert config.ollama_url() == "http://gpu-host:11434"
 
 
+def test_summaries_enabled_defaults_on(monkeypatch: pytest.MonkeyPatch):
+    """Public submodule default: no config, no env → summaries run."""
+    monkeypatch.delenv("SUMMARY_ENABLED", raising=False)
+    monkeypatch.delenv("DIARY_CONFIG", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/nonexistent-xdg-dir")
+    config.reload()
+    assert config.summaries_enabled() is True
+
+
+def test_summaries_disabled_via_config(with_config, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("SUMMARY_ENABLED", raising=False)
+    with_config("[summaries]\nenabled = false\n")
+    assert config.summaries_enabled() is False
+
+
+@pytest.mark.parametrize(
+    "val,expected",
+    [("0", False), ("false", False), ("off", False), ("no", False), ("", False),
+     ("1", True), ("true", True), ("yes", True)],
+)
+def test_summaries_env_overrides_config(with_config, monkeypatch, val, expected):
+    """Env var wins over config, in both directions."""
+    with_config("[summaries]\nenabled = false\n")  # config says off
+    monkeypatch.setenv("SUMMARY_ENABLED", val)
+    assert config.summaries_enabled() is expected
+
+
 def test_explicit_missing_config_raises(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("DIARY_CONFIG", "/no/such/config.toml")
     config.reload()

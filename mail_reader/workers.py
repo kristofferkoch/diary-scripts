@@ -22,6 +22,7 @@ import urllib.error
 import anyio.to_thread
 
 from . import db, summarize
+from .config import summaries_enabled
 
 log = logging.getLogger(__name__)
 
@@ -121,7 +122,14 @@ def spawn_all() -> list[asyncio.Task]:
     """Launch one worker task per configured pass. Reclaims any rows still
     in `streaming` at boot — those are by definition orphans from a dead
     previous worker process, since spawn_all is the only thing that creates
-    workers for this process."""
+    workers for this process.
+
+    Returns no workers when summaries are disabled via config — the queue
+    is never consumed, so no LLM/GPU work happens (see
+    `config.summaries_enabled`)."""
+    if not summaries_enabled():
+        log.info("[worker] summaries disabled (config) — no workers spawned")
+        return []
     n = _reap_stale(0)
     if n:
         log.warning("[reaper] cleaned %s orphaned streaming row(s) at startup", n)

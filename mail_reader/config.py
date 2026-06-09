@@ -138,6 +138,23 @@ def _host_url(env_var: str, dotted: str, default_hostport: str) -> str:
             or f"http://{cfg(dotted, default_hostport)}").rstrip("/")
 
 
+def summaries_enabled() -> bool:
+    """Whether the per-mail LLM summary passes run.
+
+    Default on, so the public submodule keeps its original behaviour. Set
+    ``summaries.enabled = false`` in the private config (or export
+    ``SUMMARY_ENABLED=0``) to stop both *enqueueing* new summary work and
+    *spawning* the worker tasks — in particular the GPU-heavy tier-2 pass
+    (a 35B model that pins VRAM on the LLM host). Already-stored ``done``
+    summaries still render in the UI; only new generation is suppressed.
+    The env var wins over config for ad-hoc overrides.
+    """
+    env = os.environ.get("SUMMARY_ENABLED")
+    if env is not None:
+        return env.strip().lower() not in ("0", "false", "no", "off", "")
+    return bool(cfg("summaries.enabled", True))
+
+
 def ollama_url() -> str:
     """Ollama embedding/chat server, e.g. ``http://gpu-host:11434``."""
     return _host_url("OLLAMA_URL", "hosts.llm", "gpu-host:11434")
