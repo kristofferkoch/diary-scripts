@@ -114,3 +114,26 @@ def test_every_weather_icon_has_a_norwegian_label():
 def test_label_for_strips_time_suffix_and_never_returns_raw_code():
     assert data._label_for("heavyrainandthunder_day") == "Kraftig regn og torden"
     assert data._label_for("partlycloudy_night") == "Halvskyet"
+
+
+def test_ordinal_period_does_not_truncate_title_or_drop_badge(monkeypatch):
+    """Regression: an ordinal title like "Avslutning 2. trinn (Robin)" was
+    truncated at the "2." ordinal to "Avslutning 2", losing both the headline
+    and the trailing name badge. An ordinal/decimal period must not count as a
+    sentence break."""
+    monkeypatch.setattr(data, "FAMILY_MEMBERS", ("Robin", "Bjorn", "Carl"))
+    line = (
+        "- **2026-06-09 17:00** — Avslutning 2. trinn (Robin). "
+        "Sang og høytlesing kl. 17:00."
+    )
+    (ev,) = data.parse_calendar(line)
+    assert ev["title"] == "Avslutning 2. trinn (Robin)"
+    assert ev["who"] == "R"
+
+
+def test_real_sentence_period_still_truncates():
+    """A genuine sentence boundary (period after a non-digit) still trims."""
+    assert (
+        data._clean_title("Vennegruppe hos Kari. Foreldre: Per + Pål.")
+        == "Vennegruppe hos Kari"
+    )

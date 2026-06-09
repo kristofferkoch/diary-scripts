@@ -79,18 +79,45 @@ def _who(title: str) -> str:
     return "/".join(found)
 
 
+def _first_sentence_break(t: str) -> int:
+    """Index of the first real ``. `` sentence boundary, else -1.
+
+    A period preceded by a digit is an ordinal/decimal (``2. trinn``,
+    ``1. mai``), not a sentence end, and must not split the headline —
+    otherwise ``Avslutning 2. trinn (Robin)`` truncates to ``Avslutning 2``
+    and the ``(Robin)`` tail (and its badge) is lost.
+
+    >>> _first_sentence_break("Avslutning 2. trinn (Robin). Sang")
+    27
+    >>> _first_sentence_break("Helt uten punktum her")
+    -1
+    """
+    start = 0
+    while True:
+        i = t.find(". ", start)
+        if i == -1:
+            return -1
+        if i > 0 and t[i - 1].isdigit():
+            start = i + 1
+            continue
+        return i
+
+
 def _clean_title(raw: str) -> str:
     """Strip inline markdown and trim the body of a calendar title for display.
 
     CALENDAR.md often appends a long context blob to the title (RSVP status,
     parents' phone numbers, etc). For the wall display we want only the short
-    headline — everything up to the first `.` (period+space) or ` — ` (the
-    em-dash that introduces fri-tekst-halen).
+    headline — everything up to the first sentence-ending `. ` (ordinals like
+    `2.` don't count) or ` — ` (the em-dash that introduces fri-tekst-halen).
+
+    >>> _clean_title("**Avslutning 2. trinn (Robin)**. Sang kl. 17")
+    'Avslutning 2. trinn (Robin)'
     """
     t = raw.strip()
     t = re.sub(r"\*\*", "", t)  # drop inline bold markers
     for sep in (". ", " — ", " – "):
-        i = t.find(sep)
+        i = _first_sentence_break(t) if sep == ". " else t.find(sep)
         if i > 12:
             t = t[:i].rstrip(",.")
             break
