@@ -121,18 +121,22 @@ KEEP_DUMPS = 5
 
 
 def backup_dump() -> pathlib.Path:
-    """Write a gzipped tag dump and keep only the most recent KEEP_DUMPS."""
-    import gzip
+    """Write a tag dump and keep only the most recent KEEP_DUMPS.
+
+    Stored UNCOMPRESSED on purpose: the kept dumps are near-identical
+    batch-tag text, so restic dedups all KEEP_DUMPS of them down to roughly
+    one copy and zstd-compresses that. Pre-gzipping would make each dump a
+    unique high-entropy blob that dedups against nothing.
+    """
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
-    path = BACKUP_DIR / f"tags-{ts}.dump.gz"
-    with gzip.open(path, "wb") as f:
-        proc = subprocess.run(
-            ["notmuch", "dump", "--format=batch-tag"],
-            check=True, capture_output=True,
-        )
-        f.write(proc.stdout)
-    # Rotate
+    path = BACKUP_DIR / f"tags-{ts}.dump"
+    proc = subprocess.run(
+        ["notmuch", "dump", "--format=batch-tag"],
+        check=True, capture_output=True,
+    )
+    path.write_bytes(proc.stdout)
+    # Rotate (glob matches both legacy .dump.gz and current .dump)
     dumps = sorted(BACKUP_DIR.glob("tags-*.dump*"))
     for old in dumps[:-KEEP_DUMPS]:
         old.unlink()
