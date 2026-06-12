@@ -645,7 +645,10 @@ Today's events (with end-date == today) stay in `CALENDAR.md` until the
 day is over. Format / parser-contract is identical in both files; see
 [../CALENDAR-RULES.md](../CALENDAR-RULES.md).
 
-### Force a Kindle refresh — last step of any sjekk that changed the display
+### Kindle refresh — don't poke it, let the device pull
+
+**Do not try to refresh the wall Kindle at the end of a sjekk.** The
+device sleeps, so the poke always fails — just commit and let it pull.
 
 The wall Kindle renders the [kindle_dashboard](#kindle_dashboard--wall-display-png-generator)
 PNG, whose calendar and spond blocks are scraped live from `CALENDAR.md`
@@ -655,21 +658,20 @@ own scheduled wake**.
 
 **As of 2026-05-29 the device suspends to RAM between refreshes** (battery
 fix — see [KINDLE.md](../KINDLE.md)). While suspended its WiFi is off, so
-**`ssh kindle 'initctl restart dashboard'` usually fails with "No route to
-host" — the poke can't reach a sleeping device.** Don't rely on it. Two
+**`ssh kindle 'initctl restart dashboard'` reliably fails with "No route to
+host" — the poke can't reach a sleeping device.** Don't run it. Two
 things follow for the sjekk:
 
 - **Just commit and let it poll.** A change to the today..+3 agenda
   appears on the next scheduled wake: **≤15 min** off-peak, **≤5 min**
   during the peak windows (06:00–09:00, 15:00–20:00). For a sjekk that's
-  almost always fine — no action needed.
-- **Need it on the wall *now*?** Press the Kindle's **power button** (a
-  short press) — `snvs-powerkey` wakes it from suspend and the loop
-  re-fetches + re-renders within seconds. That's the only reliable
-  on-demand refresh; the SSH poke is best-effort (lands only if you happen
-  to catch the ~10 s awake window). Deploying device changes from
-  server has the same problem — see the "deploy on next wake"
-  catcher pattern used on 2026-05-29.
+  always fine — **no action needed, and no poke to attempt.**
+- **Need it on the wall *now*?** That's a **human** job: press the
+  Kindle's **power button** (a short press) — `snvs-powerkey` wakes it
+  from suspend and the loop re-fetches + re-renders within seconds. That's
+  the only reliable on-demand refresh, and it's the user's call — not an
+  agent step. Deploying device changes from server has the same problem —
+  see the "deploy on next wake" catcher pattern used on 2026-05-29.
 
 **Only bother at all when the change is actually visible on the wall.** The agenda
 block (`kindle_dashboard/data.py` → `calendar_block`, `days_ahead=3`)
