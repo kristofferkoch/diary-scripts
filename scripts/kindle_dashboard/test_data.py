@@ -137,3 +137,22 @@ def test_real_sentence_period_still_truncates():
         data._clean_title("Vennegruppe hos Kari. Foreldre: Per + Pål.")
         == "Vennegruppe hos Kari"
     )
+
+
+def test_struck_through_event_is_skipped():
+    """A done/cancelled event whose headline is struck through (`— ~~…~~ ✅`)
+    must not surface on the wall display, even when future-dated (a bill paid
+    early lingers in the calendar until the retire sweep, which only moves past
+    entries). Regression: a paid invoice line showed on the Kindle with literal
+    `~~` tildes."""
+    line = "- **2026-06-14** — ~~Forfall: example invoice, KID 1234567890~~ **✅ Done.**"
+    assert data.parse_calendar(line) == []
+
+
+def test_live_event_with_inline_strike_keeps_markers_for_the_filter():
+    """A still-live event that strikes only a sub-span (e.g. a corrected day)
+    stays visible and keeps its `~~` markers — the template's ``strike`` filter
+    promotes them to `<del>` at render time (see test_serve)."""
+    line = "- **2026-06-20** — Pinsefri ~~mandag~~ tirsdag"
+    (ev,) = data.parse_calendar(line)
+    assert ev["title"] == "Pinsefri ~~mandag~~ tirsdag"

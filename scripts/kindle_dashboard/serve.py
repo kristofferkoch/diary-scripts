@@ -25,6 +25,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,7 @@ from typing import Any
 from fastapi import FastAPI, Header
 from fastapi.responses import HTMLResponse, Response
 from jinja2 import Environment, FileSystemLoader, select_autoescape
+from markupsafe import Markup, escape
 
 from . import render, view
 
@@ -131,6 +133,26 @@ _TEMPLATES = Environment(
     loader=FileSystemLoader(Path(__file__).parent / "templates"),
     autoescape=select_autoescape(["html", "j2", "html.j2"]),
 )
+
+
+def _strike(text: str) -> Markup:
+    """Render `~~struck~~` spans as `<del>` for the wall display.
+
+    Escapes everything first, then promotes the `~~…~~` markers to real
+    strikethrough — so an inline correction (`Pinsefri ~~mandag~~ tirsdag`)
+    shows the old value crossed out rather than as plain text or raw tildes.
+    The captured span is already escaped, so the returned Markup is safe.
+
+    >>> str(_strike("Pinsefri ~~mandag~~ tirsdag"))
+    'Pinsefri <del>mandag</del> tirsdag'
+    >>> str(_strike("Lek & moro"))
+    'Lek &amp; moro'
+    """
+    escaped = str(escape(text))
+    return Markup(re.sub(r"~~(.+?)~~", r"<del>\1</del>", escaped))
+
+
+_TEMPLATES.filters["strike"] = _strike
 
 # --- material-hash cache ----------------------------------------------------
 #

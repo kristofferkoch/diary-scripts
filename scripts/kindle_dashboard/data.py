@@ -113,6 +113,15 @@ def _clean_title(raw: str) -> str:
 
     >>> _clean_title("**Avslutning 2. trinn (Robin)**. Sang kl. 17")
     'Avslutning 2. trinn (Robin)'
+
+    Inline `~~strikethrough~~` markers are *kept* — the template's ``strike``
+    filter promotes them to ``<del>`` for the wall display (an inline
+    correction like "Pinsefri ~~mandag~~ tirsdag" should show crossed out, not
+    flattened). A *fully* struck headline is dropped upstream in
+    ``parse_calendar`` instead.
+
+    >>> _clean_title("Pinsefri ~~mandag~~ tirsdag")
+    'Pinsefri ~~mandag~~ tirsdag'
     """
     t = raw.strip()
     t = re.sub(r"\*\*", "", t)  # drop inline bold markers
@@ -148,9 +157,20 @@ def parse_calendar(text: str) -> list[dict[str, Any]]:
         m = _EVENT_RE.match(line)
         if not m:
             continue
+        raw_title = m.group("title")
+        # A struck-through headline (`— ~~…~~ ✅ Betalt`) marks a done/cancelled
+        # event kept inline for the human record until the retire sweep moves it
+        # out. The retire sweep only relocates entries *before* today, so a
+        # future-dated-but-resolved bill (paid early) lingers in CALENDAR.md and
+        # would otherwise surface on the wall display as a live obligation. Skip
+        # it. (Fully-struck bullets like `- ~~**date** — …~~` already fail the
+        # regex — `**` doesn't follow `- ` — so this only catches the partial
+        # `**date** — ~~title~~` shape.)
+        if raw_title.lstrip().startswith("~~"):
+            continue
         d1 = _dt.date.fromisoformat(m.group("d1"))
         d2 = _dt.date.fromisoformat(m.group("d2")) if m.group("d2") else d1
-        title = _clean_title(m.group("title"))
+        title = _clean_title(raw_title)
         events.append(
             {
                 "start": d1,
