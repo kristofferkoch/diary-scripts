@@ -439,13 +439,31 @@ lost a whole conversation on 2026-06-07).
    `--with <peer>` (whole thread incl. your replies), `--group`/`--no-group`.
 2. Triage substantive messages as first-class sjekk input (same weight as
    mail/Spond) — surface anything actionable, file durable facts to the
-   right topic file. **Do NOT mention insignificant messages at all** —
-   real-time coordination ("kom hit litt", "ja"), greetings,
-   acknowledgements, group-chat thanks/reactions and the like are noise:
-   leave them out of the sjekk summary *and* the daily note entirely. Read
-   them only to confirm there's nothing actionable, then move on. Surface a
-   Signal message only when it carries a fact worth keeping or an action to
-   take.
+   right topic file. The threshold is fuzzy; the line is roughly **"would
+   the user want this remembered or acted on later?"** Above the line, and
+   worth capturing:
+   - **Scheduling / logistics** — dates, times, plans, changes, who's
+     where when.
+   - **Gift signals** — anyone expressing they want / wish for a thing
+     (e.g. a partner mentioning something they'd like), or a question that
+     implies gift-planning. Worth a durable note even when phrased
+     casually.
+   - **Explicit "remember to" / "must do" items** — anything framed as a
+     todo, deadline, or thing-not-to-forget.
+
+   **Note to Self is a first-class capture channel.** The user's own
+   Signal *Note to Self* messages (peer == self) are deliberate captured
+   reminders — treat them exactly like a `/notes/` queue item: act on each
+   one, then file/route it. The user finds Note to Self easier than the
+   custom notes page, so expect real reminders to arrive here; never skip
+   a self-note as "noise."
+
+   **Do NOT mention insignificant messages at all** — real-time
+   coordination ("kom hit litt", "ja"), greetings, acknowledgements,
+   group-chat thanks/reactions and the like are noise: leave them out of
+   the sjekk summary *and* the daily note entirely. Read them only to
+   confirm there's nothing actionable, then move on. Surface a Signal
+   message only when it carries a fact worth keeping or an action to take.
 3. `uv run signalshow --since-cursor --bump` (or just `--bump`) to advance
    the cursor to the newest message shown. Commit `memory/signal-state.json`
    under `MEM:` — the JSONL itself is git-ignored.
