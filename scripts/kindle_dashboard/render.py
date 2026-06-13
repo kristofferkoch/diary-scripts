@@ -58,32 +58,84 @@ def to_png_bytes(img: Image.Image) -> bytes:
 
 def _load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     candidates = [
+        # DejaVu (Debian/Ubuntu + some Fedora installs)
         "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
         "/usr/share/fonts/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        # Liberation / Noto — what baglernissen (Fedora) actually ships. Without
+        # one of these, the loop fell through to load_default(), a fixed ~8px
+        # bitmap that ignores `size`, so every placeholder string came out
+        # unreadably tiny on the wall regardless of the size we asked for.
+        "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/google-noto-vf/NotoSans[wght].ttf",
+        "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
     ]
     for path in candidates:
         if Path(path).exists():
             return ImageFont.truetype(path, size)
-    return ImageFont.load_default()
+    # Last resort: modern Pillow's load_default(size) scales; older ignores it.
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def _wrap_text(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    max_width: int,
+) -> str:
+    """Greedy word-wrap `text` to `max_width` px, returning a `\\n`-joined block."""
+    lines: list[str] = []
+    line = ""
+    for word in text.split():
+        candidate = f"{line} {word}".strip()
+        if line and draw.textlength(candidate, font=font) > max_width:
+            lines.append(line)
+            line = word
+        else:
+            line = candidate
+    if line:
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _compose_placeholder(message: str, now: str) -> Image.Image:
+    """Draw the placeholder in the **landscape** compose orientation.
+
+    Mirrors `html_to_png()`: the device is wall-mounted landscape, so we
+    compose at COMPOSE_W x COMPOSE_H and let `placeholder_png()` apply the
+    same ROTATE_DIR. Drawing straight onto the portrait framebuffer (the old
+    behaviour) put the text 90° off and shrunk — unreadable on the wall.
+    """
+    img = Image.new("L", (COMPOSE_W, COMPOSE_H), 255)
+    draw = ImageDraw.Draw(img)
+    margin = 70
+
+    title_font = _load_font(110)
+    body_font = _load_font(64)
+    small_font = _load_font(36)
+
+    draw.text((margin, 90), "Kindle dashboard", font=title_font, fill=0)
+    draw.line([(margin, 230), (COMPOSE_W - margin, 230)], fill=0, width=4)
+
+    wrapped = _wrap_text(draw, message, body_font, COMPOSE_W - 2 * margin)
+    draw.multiline_text((margin, 300), wrapped, font=body_font, fill=0, spacing=16)
+
+    draw.text((margin, COMPOSE_H - 80), f"Rendered {now}", font=small_font, fill=0)
+    return img
 
 
 def placeholder_png(message: str = "kindle_dashboard online") -> bytes:
-    """Pillow-only placeholder. No network, no browser — always works."""
-    img = Image.new("L", (KINDLE_W, KINDLE_H), 255)
-    draw = ImageDraw.Draw(img)
+    """Pillow-only placeholder. No network, no browser — always works.
 
-    title_font = _load_font(72)
-    body_font = _load_font(40)
-    small_font = _load_font(28)
-
-    draw.text((60, 80), "Kindle dashboard", font=title_font, fill=0)
-    draw.line([(60, 180), (KINDLE_W - 60, 180)], fill=0, width=3)
-    draw.text((60, 220), message, font=body_font, fill=0)
-
+    Composed landscape then rotated through the same ROTATE_DIR as the real
+    render, so it reads upright (and full-size) on the wall-mounted device.
+    """
     now = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
-    draw.text((60, KINDLE_H - 80), f"Rendered {now}", font=small_font, fill=0)
-
+    img = _compose_placeholder(message, now).rotate(ROTATE_DIR, expand=True)
     return to_png_bytes(img)
 
 
