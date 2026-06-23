@@ -35,7 +35,7 @@ from typing import TypedDict
 import psycopg
 
 from . import db, extract, priority
-from .config import ollama_url, summaries_enabled
+from .config import ollama_url, summaries_enabled, summaries_max_tier
 
 
 OLLAMA_URL = ollama_url()  # $OLLAMA_URL → config hosts.llm (see config.ollama_url)
@@ -560,8 +560,11 @@ def schedule_all_passes(conn: psycopg.Connection,
     meta = _msg_meta(conn, notmuch_msg_id)
     if meta is None:
         return 0
+    max_tier = summaries_max_tier()
     new = 0
     for p in PASSES:
+        if p["tier"] > max_tier:
+            continue  # pass capped out via summaries.max_tier (e.g. GPU-heavy tier-2)
         if _claim_one(conn, meta, p["model"], p["tier"]):
             new += 1
     return new

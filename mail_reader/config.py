@@ -155,6 +155,23 @@ def summaries_enabled() -> bool:
     return bool(cfg("summaries.enabled", True))
 
 
+def summaries_max_tier() -> int:
+    """Highest summary *tier* that is allowed to run. Passes above this are
+    neither enqueued nor given a worker.
+
+    Lets you keep the cheap draft tier (qwen2.5:3b, tier 1) while suppressing
+    the GPU-heavy tier-2 final pass (a 35B model that pins VRAM on the LLM
+    host) without disabling summaries entirely. Default is a large sentinel
+    so every configured pass runs unless capped. Set ``summaries.max_tier``
+    in the private config (or export ``SUMMARY_MAX_TIER``). Only meaningful
+    when ``summaries_enabled()`` is true.
+    """
+    env = os.environ.get("SUMMARY_MAX_TIER")
+    if env is not None:
+        return int(env)
+    return int(cfg("summaries.max_tier", 99))
+
+
 def ollama_url() -> str:
     """Ollama embedding/chat server, e.g. ``http://gpu-host:11434``."""
     return _host_url("OLLAMA_URL", "hosts.llm", "gpu-host:11434")

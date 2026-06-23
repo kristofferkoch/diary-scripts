@@ -22,7 +22,7 @@ import urllib.error
 import anyio.to_thread
 
 from . import db, summarize
-from .config import summaries_enabled
+from .config import summaries_enabled, summaries_max_tier
 
 log = logging.getLogger(__name__)
 
@@ -133,10 +133,15 @@ def spawn_all() -> list[asyncio.Task]:
     n = _reap_stale(0)
     if n:
         log.warning("[reaper] cleaned %s orphaned streaming row(s) at startup", n)
-    return [
-        asyncio.create_task(
+    max_tier = summaries_max_tier()
+    tasks = []
+    for p in summarize.PASSES:
+        if p["tier"] > max_tier:
+            log.info("[worker] tier-%s pass (%s) capped out via summaries.max_tier — no worker",
+                     p["tier"], p["model"])
+            continue
+        tasks.append(asyncio.create_task(
             worker_loop(p["model"], p["tier"]),
             name=f"summary-worker-tier{p['tier']}",
-        )
-        for p in summarize.PASSES
-    ]
+        ))
+    return tasks
