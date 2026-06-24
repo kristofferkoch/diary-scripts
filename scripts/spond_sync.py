@@ -52,7 +52,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from mail_reader.config import workspace_root
+from mail_reader.config import cfg, workspace_root
 
 PROJECT_ROOT = workspace_root()
 STATE_PATH = PROJECT_ROOT / "memory" / "spond-state.json"
@@ -254,13 +254,16 @@ async def run_once(
     # Late import — keeps `--help` and tests cheap if spond isn't installed.
     from spond import spond
 
-    user = os.environ.get("SPOND_USERNAME")
+    # Env wins; fall back to [spond] in config/local.toml so these survive a
+    # restore (they used to be ephemeral shell exports — see
+    # backup/RESTORE-2026-06-22.md). password_cmd stays a `pass` reference.
+    user = os.environ.get("SPOND_USERNAME") or cfg("spond.username", None)
     if not user:
-        raise SystemExit("SPOND_USERNAME env var not set")
-    pw_cmd = os.environ.get("SPOND_PASSWORD_CMD", DEFAULT_PASSWORD_CMD)
+        raise SystemExit("SPOND_USERNAME not set (env or [spond].username in config)")
+    pw_cmd = os.environ.get("SPOND_PASSWORD_CMD") or cfg("spond.password_cmd", DEFAULT_PASSWORD_CMD)
     pw = get_password(pw_cmd)
 
-    member_id = os.environ.get("SPOND_RSVP_MEMBER_ID") or None
+    member_id = os.environ.get("SPOND_RSVP_MEMBER_ID") or cfg("spond.rsvp_member_id", None)
     if "event" in kinds and not member_id:
         print(
             "!! SPOND_RSVP_MEMBER_ID unset — RSVP changes on already-seen "

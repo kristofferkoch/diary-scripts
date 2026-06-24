@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from mail_reader.config import workspace_root
+from mail_reader.config import cfg, workspace_root
 
 PROJECT_ROOT = workspace_root()
 STATE_PATH = PROJECT_ROOT / "memory" / "spond-state.json"
@@ -185,9 +185,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--event", default=None, help="Only records whose data.id matches this event id.")
     ap.add_argument("--future", action="store_true",
                     help="For events: only those with startTimestamp >= now. No effect on chats/posts.")
-    ap.add_argument("--rsvp-as", default=os.environ.get(RSVP_ENV), metavar="MEMBER_ID",
+    ap.add_argument("--rsvp-as", default=os.environ.get(RSVP_ENV) or cfg("spond.rsvp_member_id", None),
+                    metavar="MEMBER_ID",
                     help=f"Show RSVP status for this Spond member-id in event headers "
-                         f"(default: ${RSVP_ENV} if set). Markers: ✓ accepted, ✗ declined, "
+                         f"(default: ${RSVP_ENV} or [spond].rsvp_member_id). Markers: ✓ accepted, ✗ declined, "
                          f"? unanswered, W waitinglist, u unconfirmed, — not on guest list.")
     ap.add_argument("--headers-only", action="store_true",
                     help="One-line summary per record; no JSON body.")
