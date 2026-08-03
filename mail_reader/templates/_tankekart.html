@@ -4,7 +4,7 @@
    stack as a scannable keyword list; expanding one reveals its cards.
    Two levels: mode (tabs) → branch (collapsed → expanded). #}
 <div class="tankekart-modes" role="tablist" aria-label="Tankekart-visning">
-  {% for m, label in [('chunks', 'Innhold'), ('themes', 'Tema'), ('emergent', 'Funn')] %}
+  {% for m, label in [('chunks', 'Innhold'), ('emergent', 'Funn')] %}
   <button type="button"
           role="tab"
           aria-selected="{{ 'true' if m == mode else 'false' }}"
@@ -16,8 +16,7 @@
 </div>
 {% if not branches %}
 <p class="empty">
-  {% if mode == 'themes' %}Ingen tema funnet enda for denne mailen.
-  {%- elif mode == 'emergent' %}Ingen felles tema i naboskapet.
+  {% if mode == 'emergent' %}Ingen felles tema i naboskapet.
   {%- else %}Ingen relaterte funn.{% endif %}
 </p>
 {% else %}

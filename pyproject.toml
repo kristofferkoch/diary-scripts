@@ -1,7 +1,7 @@
 [project]
 name = "diary-scripts"
 version = "0.1.0"
-description = "Helper scripts: mail embedding pipeline (pgvector + Ollama bge-m3), notmuch tag sync, inbox auto-archive."
+description = "Helper scripts: mail embedding pipeline (pgvector + llama.cpp qwen3-embedding), notmuch tag sync, inbox auto-archive."
 requires-python = ">=3.14"
 dependencies = [
     "psycopg[binary]>=3.2",

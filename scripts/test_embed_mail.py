@@ -460,33 +460,56 @@ class TestPrepareMessage:
 
 
 class TestEmbedBatch:
-    def test_calls_api_embed_with_list(self, monkeypatch):
-        from scripts import embed_mail
-        captured: dict = {}
+    @staticmethod
+    def _fake_urlopen(captured: dict, payload: dict):
+        import json
 
         class FakeResp:
-            def __init__(self, payload: bytes): self.payload = payload
+            def __init__(self, body: bytes): self.body = body
             def __enter__(self): return self
             def __exit__(self, *a): pass
-            def read(self): return self.payload
+            def read(self): return self.body
 
         def fake_urlopen(req, timeout=None):
             captured["url"] = req.full_url
             captured["body"] = req.data
-            import json
-            return FakeResp(json.dumps(
-                {"embeddings": [[0.1] * 1024, [0.2] * 1024, [0.3] * 1024]}
-            ).encode())
+            return FakeResp(json.dumps(payload).encode())
 
-        monkeypatch.setattr("scripts.embed_mail.urllib.request.urlopen", fake_urlopen)
+        return fake_urlopen
+
+    @staticmethod
+    def _openai_payload(vectors, shuffle: bool = False):
+        data = [{"index": i, "embedding": v} for i, v in enumerate(vectors)]
+        if shuffle:
+            data = list(reversed(data))
+        return {"object": "list", "data": data}
+
+    def test_calls_v1_embeddings_with_list(self, monkeypatch):
+        from scripts import embed_mail
+        captured: dict = {}
+        monkeypatch.setattr(
+            "scripts.embed_mail.urllib.request.urlopen",
+            self._fake_urlopen(captured, self._openai_payload(
+                [[0.1] * 1024, [0.2] * 1024, [0.3] * 1024])))
         out = embed_mail.embed_batch(["a", "b", "c"])
         assert len(out) == 3
         assert all(len(v) == 1024 for v in out)
-        assert captured["url"].endswith("/api/embed")
+        assert captured["url"].endswith("/v1/embeddings")
         import json
         body = json.loads(captured["body"].decode())
         assert body["input"] == ["a", "b", "c"]
         assert body["model"]    # whatever EMBED_MODEL resolved to at import
+
+    def test_results_sorted_by_index(self, monkeypatch):
+        """OpenAI `data` order is not guaranteed — sort on `index`."""
+        from scripts import embed_mail
+        monkeypatch.setattr(
+            "scripts.embed_mail.urllib.request.urlopen",
+            self._fake_urlopen({}, self._openai_payload(
+                [[1.0] * 1024, [2.0] * 1024], shuffle=True)))
+        out = embed_mail.embed_batch(["first", "second"])
+        assert out[0][0] == 1.0
+        assert out[1][0] == 2.0
 
     def test_empty_input_skips_http(self, monkeypatch):
         from scripts import embed_mail
@@ -497,20 +520,151 @@ class TestEmbedBatch:
 
     def test_mismatched_count_raises(self, monkeypatch):
         from scripts import embed_mail
-
-        class FakeResp:
-            def __init__(self, payload: bytes): self.payload = payload
-            def __enter__(self): return self
-            def __exit__(self, *a): pass
-            def read(self): return self.payload
-
-        def fake_urlopen(req, timeout=None):
-            import json
-            return FakeResp(json.dumps({"embeddings": [[0.1] * 1024]}).encode())
-
-        monkeypatch.setattr("scripts.embed_mail.urllib.request.urlopen", fake_urlopen)
+        monkeypatch.setattr(
+            "scripts.embed_mail.urllib.request.urlopen",
+            self._fake_urlopen({}, self._openai_payload([[0.1] * 1024])))
         with pytest.raises(RuntimeError, match="expected 2"):
             embed_mail.embed_batch(["a", "b"])
+
+    def test_wide_vector_truncated_and_renormalized(self, monkeypatch):
+        """Natively wider model (MRL): truncate to EMBED_DIMS, L2-renorm."""
+        from scripts import embed_mail
+        monkeypatch.setattr(embed_mail, "EMBED_DIMS", 4)
+        wide = [3.0, 4.0, 0.0, 0.0, 99.0, 99.0]   # tail must be dropped
+        monkeypatch.setattr(
+            "scripts.embed_mail.urllib.request.urlopen",
+            self._fake_urlopen({}, self._openai_payload([wide])))
+        out = embed_mail.embed_batch(["x"])
+        assert len(out[0]) == 4
+        assert out[0] == pytest.approx([0.6, 0.8, 0.0, 0.0])
+        assert sum(x * x for x in out[0]) == pytest.approx(1.0)
+
+    def test_exact_dim_vector_untouched(self, monkeypatch):
+        from scripts import embed_mail
+        monkeypatch.setattr(embed_mail, "EMBED_DIMS", 3)
+        v = [0.1, 0.2, 0.3]
+        monkeypatch.setattr(
+            "scripts.embed_mail.urllib.request.urlopen",
+            self._fake_urlopen({}, self._openai_payload([v])))
+        assert embed_mail.embed_batch(["x"]) == [v]
+
+    def test_short_vector_raises(self, monkeypatch):
+        """Shorter than EMBED_DIMS = wrong model served — fail loudly,
+        never poison the store (2026-06-02 lesson)."""
+        from scripts import embed_mail
+        monkeypatch.setattr(embed_mail, "EMBED_DIMS", 1024)
+        monkeypatch.setattr(
+            "scripts.embed_mail.urllib.request.urlopen",
+            self._fake_urlopen({}, self._openai_payload([[0.1] * 768])))
+        with pytest.raises(RuntimeError, match="wrong model"):
+            embed_mail.embed_batch(["x"])
+
+    @staticmethod
+    def _scripted_urlopen(monkeypatch, responses: list[dict]):
+        """Serve a queue of payloads, one per HTTP call; asserts the queue
+        is long enough. Returns a call-count dict."""
+        import json
+        calls = {"n": 0}
+
+        class FakeResp:
+            def __init__(self, body: bytes): self.body = body
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def read(self): return self.body
+
+        def fake_urlopen(req, timeout=None):
+            payload = responses[min(calls["n"], len(responses) - 1)]
+            calls["n"] += 1
+            return FakeResp(json.dumps(payload).encode())
+
+        monkeypatch.setattr("scripts.embed_mail.urllib.request.urlopen", fake_urlopen)
+        monkeypatch.setattr("scripts.embed_mail.time.sleep", lambda *_: None)
+        return calls
+
+    def test_null_batch_retried(self, monkeypatch):
+        """Transient null embeddings (llama-server slot flakiness, 2026-08-03):
+        batch retry recovers without per-text fallback."""
+        from scripts import embed_mail
+        calls = self._scripted_urlopen(monkeypatch, [
+            self._openai_payload([[None] * 1024, [0.2] * 1024]),   # poisoned
+            self._openai_payload([[0.1] * 1024, [0.2] * 1024]),   # clean retry
+        ])
+        out = embed_mail.embed_batch(["a", "b"])
+        assert [v[0] for v in out] == [0.1, 0.2]
+        assert calls["n"] == 2
+
+    def test_null_text_isolated_and_retried(self, monkeypatch):
+        """One text stays null in batch responses → per-text retry rescues it."""
+        from scripts import embed_mail
+        calls = self._scripted_urlopen(monkeypatch, [
+            self._openai_payload([[0.1] * 1024, [None] * 1024]),
+            self._openai_payload([[0.1] * 1024, [None] * 1024]),
+            self._openai_payload([[0.1] * 1024, [None] * 1024]),
+            self._openai_payload([[0.2] * 1024]),                  # single retry
+        ])
+        out = embed_mail.embed_batch(["a", "b"])
+        assert [v[0] for v in out] == [0.1, 0.2]
+        assert calls["n"] == 4
+
+    def test_persistent_null_raises(self, monkeypatch):
+        """Nulls that survive batch retries AND per-text retries: loud error,
+        batch skipped (resumable next run) rather than poisoning the store."""
+        from scripts import embed_mail
+        self._scripted_urlopen(monkeypatch, [
+            self._openai_payload([[None] * 1024]),   # batch x3
+            self._openai_payload([[None] * 1024]),
+            self._openai_payload([[None] * 1024]),
+            self._openai_payload([[None] * 1024]),   # single x3
+            self._openai_payload([[None] * 1024]),
+            self._openai_payload([[None] * 1024]),
+        ])
+        with pytest.raises(RuntimeError, match="null vector"):
+            embed_mail.embed_batch(["bad"])
+
+    def test_query_uses_instruction_prefix(self, monkeypatch):
+        """qwen3 retrieval requires Instruct/Query on the query side —
+        without it junk micro-chunks outrank relevant content (2026-08-03)."""
+        import json
+        from scripts import embed_mail
+        captured: dict = {}
+        monkeypatch.setattr(
+            "scripts.embed_mail.urllib.request.urlopen",
+            self._fake_urlopen(captured, self._openai_payload([[0.1] * 1024])))
+        out = embed_mail.embed_query("strømregning")
+        assert len(out) == 1024
+        sent = json.loads(captured["body"].decode())["input"][0]
+        assert sent.startswith("Instruct:")
+        assert sent.endswith("\nQuery: strømregning")
+
+    def test_char_cap_splits_groups(self, monkeypatch):
+        """Oversized batched calls corrupt llama-server (2026-08-03): texts
+        must be split by total chars, not just count."""
+        import json
+        from scripts import embed_mail
+        monkeypatch.setattr(embed_mail, "BATCH_CHARS", 100)
+        monkeypatch.setattr(embed_mail, "BATCH_CHUNKS", 32)
+        bodies = []
+
+        class FakeResp:
+            def __init__(self, body: bytes): self.body = body
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def read(self): return self.body
+
+        def fake_urlopen(req, timeout=None):
+            texts = json.loads(req.data.decode())["input"]
+            bodies.append(texts)
+            return FakeResp(json.dumps(
+                self._openai_payload([[0.1] * 1024] * len(texts))).encode())
+
+        monkeypatch.setattr("scripts.embed_mail.urllib.request.urlopen", fake_urlopen)
+        monkeypatch.setattr("scripts.embed_mail.time.sleep", lambda *_: None)
+        out = embed_mail.embed_batch(["x" * 60] * 4)   # 240 chars total
+        assert len(out) == 4
+        assert bodies == [["x" * 60], ["x" * 60], ["x" * 60], ["x" * 60]]
+        bodies.clear()
+        out = embed_mail.embed_batch(["a" * 40] * 3)   # 40+40 fits, +40 caps
+        assert bodies == [["a" * 40, "a" * 40], ["a" * 40]]
 
 
 # ---------- end-to-end with real notmuch (skipped if mail not present) ----------

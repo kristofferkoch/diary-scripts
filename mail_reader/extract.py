@@ -4,14 +4,18 @@ The slow pass returns JSON with summary text + action flag + dates +
 themes + entities. This module shreds that JSON into the side tables
 defined in migration 007:
 
-  - `themes`           — deduped via bge-m3 nearest-neighbour
-  - `summary_themes`   — M2M link to summaries
   - `entities`         — deduped via per-kind `normalized` form
   - `summary_entities` — M2M link to summaries
   - `summary_temporal` — flat per-summary list of dates
 
-Helpers don't commit; the caller in `summarize.py` wraps the whole
-finalize step in a single transaction so failures roll back cleanly.
+(The `themes` / `summary_themes` side was retired 2026-08-02 together with
+summary generation — its dedup needed a live embedding call, and no new
+summaries means no new themes. The tables stay in place for existing rows.)
+
+Helpers don't commit; the caller owns the transaction. (Their original
+caller — `summarize.py`'s tier-2 finalize — was removed with summary
+generation; the helpers stay for the existing rows and any future
+extraction pass.)
 """
 from __future__ import annotations
 
@@ -21,14 +25,6 @@ from typing import Any, TypedDict
 
 import psycopg
 
-from scripts.embed_mail import embed_batch, vec_literal
-
-
-# Two theme strings whose bge-m3 vectors are within this cosine of each
-# other are treated as the same concept (reuse the existing row instead
-# of inserting). 0.85 is a starting point — tighten if we see false
-# merges, loosen if we see "varmekabler" vs "gulvarme" splitting.
-THEME_DEDUP_COSINE = 0.85
 
 ENTITY_KINDS = frozenset({
     "person", "org", "place", "money", "identifier", "contact", "url",
@@ -98,87 +94,6 @@ def normalize_entity(kind: str, value: str, meta: dict[str, Any]) -> str:
     if kind == "url":
         return base.rstrip("/")
     return base
-
-
-# ---------- themes ----------
-
-def upsert_themes(conn: psycopg.Connection, summary_id: int,
-                  theme_texts: list[str]) -> list[int]:
-    """Embed each theme, find-or-create in `themes`, link to summary.
-
-    Dedup is two-stage:
-      1. Exact text match (cheap).
-      2. bge-m3 cosine ≥ THEME_DEDUP_COSINE against the HNSW index.
-
-    Returns the list of theme_ids attached to this summary. Does NOT
-    commit — the caller owns the transaction.
-    """
-    cleaned: list[str] = []
-    seen: set[str] = set()
-    for t in theme_texts:
-        if not isinstance(t, str):
-            continue
-        s = t.strip()
-        key = s.lower()
-        if not s or key in seen:
-            continue
-        cleaned.append(s)
-        seen.add(key)
-    if not cleaned:
-        return []
-
-    vecs = embed_batch(cleaned)
-    ids: list[int] = []
-    with conn.cursor() as cur:
-        for text, vec in zip(cleaned, vecs):
-            vlit = vec_literal(vec)
-
-            cur.execute("SELECT id FROM themes WHERE text = %s", (text,))
-            r = cur.fetchone()
-            if r is not None:
-                ids.append(r[0])
-                continue
-
-            # Nearest neighbour. `<=>` is cosine distance in pgvector
-            # (0 = identical, 1 = orthogonal). Similarity = 1 - distance.
-            cur.execute(
-                """
-                SELECT id, 1 - (embedding <=> %s::vector) AS sim
-                FROM themes
-                ORDER BY embedding <=> %s::vector
-                LIMIT 1
-                """,
-                (vlit, vlit),
-            )
-            nn = cur.fetchone()
-            if nn is not None and float(nn[1]) >= THEME_DEDUP_COSINE:
-                ids.append(nn[0])
-                continue
-
-            cur.execute(
-                """
-                INSERT INTO themes (text, embedding)
-                VALUES (%s, %s::vector)
-                ON CONFLICT (text) DO UPDATE
-                    SET text = themes.text  -- no-op, lets RETURNING fire
-                RETURNING id
-                """,
-                (text, vlit),
-            )
-            ins = cur.fetchone()
-            assert ins is not None
-            ids.append(ins[0])
-
-        if ids:
-            cur.executemany(
-                """
-                INSERT INTO summary_themes (summary_id, theme_id)
-                VALUES (%s, %s)
-                ON CONFLICT DO NOTHING
-                """,
-                [(summary_id, tid) for tid in ids],
-            )
-    return ids
 
 
 # ---------- entities ----------

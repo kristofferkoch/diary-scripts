@@ -181,21 +181,6 @@ def _pick_themed_message_id(conn: psycopg.Connection) -> str | None:
         return row[0] if row else None
 
 
-def test_tankekart_themes_mode_returns_branches(conn):
-    """themes mode: for a mail with at least one tier-2 theme, branches
-    should come back. Each branch's label is the theme text."""
-    mid = _pick_themed_message_id(conn)
-    if mid is None:
-        pytest.skip("no message with tier-2 themes at current prompt_version")
-    branches = tankekart(conn, mid, n_per_branch=3, mode="themes")
-    assert isinstance(branches, list)
-    # Every branch label is a non-empty string; every leaf has a message_id.
-    for b in branches:
-        assert isinstance(b["label"], str) and b["label"]
-        for leaf in b["leaves"]:
-            assert leaf["message_id"]
-
-
 def test_tankekart_emergent_mode_returns_branches(conn):
     """emergent mode: cluster neighbours' themes. For any embedded mail,
     if there are themed neighbours, we should get branches back."""
@@ -213,12 +198,9 @@ def test_tankekart_emergent_mode_returns_branches(conn):
             assert 0.0 <= leaf["similarity"] <= 1.0
 
 
-def test_tankekart_themes_mode_for_unindexed_returns_empty(conn):
-    """themes/emergent modes don't have a live-embed fallback. An
-    unknown message returns [] regardless of mode."""
-    assert tankekart(
-        conn, "no-such-msg@example.invalid", n_per_branch=3, mode="themes",
-    ) == []
+def test_tankekart_emergent_mode_for_unindexed_returns_empty(conn):
+    """emergent mode doesn't have a live-embed fallback. An
+    unknown message returns []."""
     assert tankekart(
         conn, "no-such-msg@example.invalid", n_per_branch=3, mode="emergent",
     ) == []

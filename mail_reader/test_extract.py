@@ -1,9 +1,8 @@
 """Tests for mail_reader.extract helpers.
 
-Integration-style: needs `mailvec`. Embed calls are mocked so tests
-don't hit gpu-host. Each DB-touching test runs inside a transaction
-that's rolled back at teardown — the helpers don't commit, so nothing
-leaks into `themes` / `entities` / `summary_*` for subsequent runs.
+Integration-style: needs `mailvec`. Each DB-touching test runs inside a
+transaction that's rolled back at teardown — the helpers don't commit, so
+nothing leaks into `entities` / `summary_*` for subsequent runs.
 """
 from __future__ import annotations
 
@@ -105,78 +104,6 @@ def summary_id(conn):
         ins = cur.fetchone()
         assert ins is not None
         return ins[0]
-
-
-# fixed unit-length vectors so cosine distance is deterministic; the
-# real bge-m3 dim is 1024 so pad with zeros.
-def _vec(slot: int) -> list[float]:
-    v = [0.0] * 1024
-    v[slot] = 1.0
-    return v
-
-
-# ---------- upsert_themes ----------
-
-def test_upsert_themes_inserts_and_links(conn, summary_id, monkeypatch):
-    monkeypatch.setattr(extract, "embed_batch",
-                        lambda texts: [_vec(i) for i in range(len(texts))])
-    ids = extract.upsert_themes(conn, summary_id,
-                                ["pytest-theme-a", "pytest-theme-b"])
-    assert len(ids) == 2
-    assert len(set(ids)) == 2  # distinct vectors → distinct rows
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT theme_id FROM summary_themes WHERE summary_id = %s ORDER BY theme_id",
-            (summary_id,),
-        )
-        linked = [r[0] for r in cur.fetchall()]
-    assert linked == sorted(ids)
-
-
-def test_upsert_themes_exact_text_match_reuses(conn, summary_id, monkeypatch):
-    monkeypatch.setattr(extract, "embed_batch",
-                        lambda texts: [_vec(0) for _ in texts])
-    first = extract.upsert_themes(conn, summary_id, ["pytest-exact-match"])
-    second = extract.upsert_themes(conn, summary_id, ["pytest-exact-match"])
-    assert first == second
-
-
-def test_upsert_themes_nn_dedup_reuses(conn, summary_id, monkeypatch):
-    # both calls return the same vector — cosine = 1.0 → above threshold
-    monkeypatch.setattr(extract, "embed_batch",
-                        lambda texts: [_vec(7) for _ in texts])
-    first = extract.upsert_themes(conn, summary_id, ["pytest-theme-original"])
-    second = extract.upsert_themes(conn, summary_id, ["pytest-theme-synonym"])
-    assert second == first, "near-vector should reuse existing theme"
-
-
-def test_upsert_themes_orthogonal_vectors_insert_new(conn, summary_id, monkeypatch):
-    vectors = iter([_vec(11), _vec(22)])  # orthogonal → cosine = 0
-    monkeypatch.setattr(extract, "embed_batch",
-                        lambda texts: [next(vectors) for _ in texts])
-    first = extract.upsert_themes(conn, summary_id, ["pytest-ortho-a"])
-    second = extract.upsert_themes(conn, summary_id, ["pytest-ortho-b"])
-    assert first != second
-
-
-def test_upsert_themes_empty_input_returns_empty(conn, summary_id, monkeypatch):
-    called = []
-    monkeypatch.setattr(extract, "embed_batch",
-                        lambda texts: called.append(texts) or [])
-    assert extract.upsert_themes(conn, summary_id, []) == []
-    assert extract.upsert_themes(conn, summary_id, ["", "   "]) == []
-    assert called == [], "embed_batch should not run for empty input"
-
-
-def test_upsert_themes_dedupes_within_input(conn, summary_id, monkeypatch):
-    seen_texts = []
-    monkeypatch.setattr(extract, "embed_batch",
-                        lambda texts: seen_texts.append(list(texts))
-                                       or [_vec(i) for i in range(len(texts))])
-    ids = extract.upsert_themes(conn, summary_id,
-                                ["pytest-dup", "pytest-dup", "PYTEST-DUP"])
-    assert len(ids) == 1
-    assert seen_texts == [["pytest-dup"]], "duplicates collapse before embed call"
 
 
 # ---------- upsert_entities ----------

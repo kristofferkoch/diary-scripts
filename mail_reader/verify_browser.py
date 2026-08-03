@@ -235,17 +235,6 @@ def check_tankekart_modes(page: Page, out: Path) -> Result:
         return page.locator(".tankekart-modes .mode.active").inner_text().strip()
 
     try:
-        active_after = switch_to("Tema", "themes")
-    except Exception as e:
-        r.error = f"Tema switch failed: {e}"
-        _shot(page, out, "07_themes_fail", r)
-        return r
-    n_themes = page.locator(".branches .branch").count()
-    empty_themes = page.locator(".tankekart-body p.empty").count()
-    r.notes.append(f"themes (active={active_after!r}): branches={n_themes}, empty={empty_themes}")
-    _shot(page, out, "07_tankekart_themes", r)
-
-    try:
         active_after = switch_to("Funn", "emergent")
     except Exception as e:
         r.error = f"Funn switch failed: {e}"

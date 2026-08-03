@@ -9,31 +9,25 @@ Semantic search over embedded mail.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
-import urllib.request
 
 import psycopg
 
-from mail_reader.config import ollama_url
+from scripts.embed_mail import embed_query, vec_literal
 
 PG_DSN = os.environ.get("PG_DSN", "dbname=mailvec")
-OLLAMA = ollama_url()  # $OLLAMA_URL → config hosts.llm (see config.ollama_url)
-MODEL = os.environ.get("EMBED_MODEL", "bge-m3:latest")
 
 
 def embed(text: str) -> list[float]:
-    req = urllib.request.Request(
-        f"{OLLAMA}/api/embeddings",
-        data=json.dumps({"model": MODEL, "prompt": text}).encode(),
-        headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return json.loads(r.read())["embedding"]
+    """Query embedding via the same OpenAI-compatible endpoint + dim
+    enforcement as the indexing pipeline (`scripts.embed_mail`).
+    Qwen3 requires its Instruct/Query prefix on the query side."""
+    return embed_query(text)
 
 
 def vec_lit(v):
-    return "[" + ",".join(f"{x:.6f}" for x in v) + "]"
+    return vec_literal(v)
 
 
 def main(argv=None):

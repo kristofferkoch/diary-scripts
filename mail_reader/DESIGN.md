@@ -31,9 +31,9 @@ Non-goals (v1): compose, reply, attach, label-editing.
 | Inbox listing       | notmuch `tag:inbox` (15-min sync)      | `notmuch search`   |
 | Mail body           | notmuch raw → parsed                   | reuse `mailshow.py` helpers |
 | Attachments         | `attachments` table (already populated) | Postgres           |
-| Embeddings          | `chunks` table (1024-d bge-m3)         | Postgres + pgvector |
+| Embeddings          | `chunks` table (1024-d, qwen3-embedding MRL-truncated; was bge-m3) | Postgres + pgvector |
 | Summaries           | **new** `summaries` table              | Postgres (this app writes it) |
-| Summarisation model | Ollama on `gpu-host:11434`           | `/api/chat`        |
+| Summarisation model | ~~Ollama on `gpu-host:11434`~~ retired 2026-08-02; stored rows still render | — |
 
 ## 4. Schema additions
 
@@ -214,10 +214,12 @@ a brand-new mail, `tankekart()` can't find it in `messages` and returns
 indistinguishable from "no semantic neighbours."
 
 Fix: when the open message is missing from `messages`, fetch its body
-via notmuch, run bge-m3 on the chunks (single `/api/embed` call —
-~250 ms solo), mean-pool, and use as the query vector. Cache nothing —
-the embed pipeline will pick it up on the next 15-min cycle. The
-result: any message in notmuch can be opened, not just embedded ones.
+via notmuch, embed the chunks live (single `/v1/embeddings` call against
+the same OpenAI-compatible server the pipeline uses — was a bge-m3
+`/api/embed` call at the time), mean-pool, and use as the query vector.
+Cache nothing — the embed pipeline will pick it up on the next 15-min
+cycle. The result: any message in notmuch can be opened, not just
+embedded ones.
 
 (This also means the tankekart view itself is robust to
 embed-pipeline lag.)

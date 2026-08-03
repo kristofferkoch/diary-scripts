@@ -86,62 +86,35 @@ def test_cfg_path_default_when_absent(with_config):
 
 def test_host_urls_come_from_config(with_config, monkeypatch: pytest.MonkeyPatch):
     """Regression for 2026-06-02: the host must be read from `hosts.*`, not a
-    hardcoded `gpu-host` default that silently leaked when $OLLAMA_URL was unset."""
-    monkeypatch.delenv("OLLAMA_URL", raising=False)
+    hardcoded `gpu-host` default that silently leaked when $EMBED_URL was unset."""
+    monkeypatch.delenv("EMBED_URL", raising=False)
     monkeypatch.delenv("MLX_BASE", raising=False)
     monkeypatch.delenv("NUEXTRACT_BASE", raising=False)
     with_config(
         """
         [hosts]
-        llm = "studio.example:11434"
+        embed = "studio.example:8081"
         mlx = "studio.example:8080"
-        nuextract = "studio.example:8081"
+        nuextract = "studio.example:8082"
         """
     )
-    assert config.ollama_url() == "http://studio.example:11434"
+    assert config.embed_url() == "http://studio.example:8081"
     assert config.mlx_url() == "http://studio.example:8080"
-    assert config.nuextract_url() == "http://studio.example:8081"
+    assert config.nuextract_url() == "http://studio.example:8082"
 
 
 def test_host_url_env_overrides_config(with_config, monkeypatch: pytest.MonkeyPatch):
-    with_config('[hosts]\nllm = "studio.example:11434"\n')
-    monkeypatch.setenv("OLLAMA_URL", "http://override:9999/")
-    assert config.ollama_url() == "http://override:9999"  # env wins, trailing / trimmed
+    with_config('[hosts]\nembed = "studio.example:8081"\n')
+    monkeypatch.setenv("EMBED_URL", "http://override:9999/")
+    assert config.embed_url() == "http://override:9999"  # env wins, trailing / trimmed
 
 
 def test_host_url_falls_back_to_placeholder_when_unconfigured(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("OLLAMA_URL", raising=False)
+    monkeypatch.delenv("EMBED_URL", raising=False)
     monkeypatch.delenv("DIARY_CONFIG", raising=False)
     monkeypatch.setenv("XDG_CONFIG_HOME", "/nonexistent-xdg-dir")
     config.reload()
-    assert config.ollama_url() == "http://gpu-host:11434"
-
-
-def test_summaries_enabled_defaults_on(monkeypatch: pytest.MonkeyPatch):
-    """Public submodule default: no config, no env → summaries run."""
-    monkeypatch.delenv("SUMMARY_ENABLED", raising=False)
-    monkeypatch.delenv("DIARY_CONFIG", raising=False)
-    monkeypatch.setenv("XDG_CONFIG_HOME", "/nonexistent-xdg-dir")
-    config.reload()
-    assert config.summaries_enabled() is True
-
-
-def test_summaries_disabled_via_config(with_config, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("SUMMARY_ENABLED", raising=False)
-    with_config("[summaries]\nenabled = false\n")
-    assert config.summaries_enabled() is False
-
-
-@pytest.mark.parametrize(
-    "val,expected",
-    [("0", False), ("false", False), ("off", False), ("no", False), ("", False),
-     ("1", True), ("true", True), ("yes", True)],
-)
-def test_summaries_env_overrides_config(with_config, monkeypatch, val, expected):
-    """Env var wins over config, in both directions."""
-    with_config("[summaries]\nenabled = false\n")  # config says off
-    monkeypatch.setenv("SUMMARY_ENABLED", val)
-    assert config.summaries_enabled() is expected
+    assert config.embed_url() == "http://gpu-host:8081"
 
 
 def test_explicit_missing_config_raises(monkeypatch: pytest.MonkeyPatch):

@@ -122,8 +122,8 @@ user had already forwarded to the accountant the day before.
 ### Live pipeline services
 
 `mail-sync.timer` runs every 15 min: `mbsync -a` → `notmuch new`
-(`post-new` hook syncs tags) → `uv run --project diary-scripts embed-mail --tier 1 --quiet` →
-`mail_reader.summarize_inbox` (last two non-fatal). Long-running
+(`post-new` hook syncs tags) → `uv run --project diary-scripts embed-mail --tier 1 --quiet`.
+Long-running
 services: `proton-bridge`, `goimapnotify` (IDLE push), `mail-reader`
 (FastAPI at 127.0.0.1:8800 behind Caddy `/mail/`). Wrapper:
 `~/.local/bin/mail-sync.sh`. Don't manually re-sync to "see new mail" —
@@ -131,7 +131,12 @@ just query notmuch; if something genuinely looks stale, check
 `systemctl --user status mail-sync.service` first. No digest cron yet
 (planned alongside Signal).
 
-### Semantic search — `search-mail` (pgvector + bge-m3)
+(Per-mail LLM **summaries were retired 2026-08-02** — the chat endpoint
+they depended on is gone. The webapp still renders summaries stored
+before that date; nothing new is generated, and the `mail_reader.summarize_inbox`
+hook + background workers were removed.)
+
+### Semantic search — `search-mail` (pgvector + qwen3-embedding)
 
 Use `search-mail` for fuzzy / cross-language / topical queries —
 useful when the exact word probably isn't in the mail (e.g. "byggematerialer"
@@ -174,9 +179,11 @@ Akershus A/L. Bisgaard was tied to a neighbouring søknad in the same
 mail bundle.
 
 **Backend:** Postgres `mailvec` (pg18) + `pgvector` HNSW index, embeddings
-from Ollama `bge-m3:latest` (1024d, multilingual NO/EN) served by
-`gpu-host:11434` (Mac Studio M3 Ultra, 256 GB — GPU-accelerated, much
-faster than CPU-only Ollama on `server`). Quote/signature stripping
+from Qwen3-Embedding served by an OpenAI-compatible llama.cpp `llama-server`
+(`gpu-host:8081`, `/v1/embeddings`). The served model is natively 4096-dim;
+vectors are truncated to the stored 1024 dims MRL-style and L2-renormalized
+client-side (`EMBED_DIMS`). (Pre-2026-08-02 this was Ollama `bge-m3`, also
+1024d.) Quote/signature stripping
 via `mail-parser-reply` (`en`/`da`/`sv` — `da` catches Norwegian "skrev");
 the regex post-pass also strips `-- ` signature blocks.
 
@@ -225,25 +232,45 @@ Per message the script extracts:
     (`text_chars=0`). A future VLM pass (`embed_images.py`, TBD) will
     walk these and describe with `qwen2.5vl:7b`.
 
-Embedding calls the batched `/api/embed` endpoint (`{"input": [...]}`),
-accumulating ~32 chunks across messages per HTTP call. Ollama serialises
-embedding requests per model, so concurrency from the client doesn't help —
-**batch size is the only useful knob.** Measured throughput on gpu-host:
-~27 ms/chunk batched 32 vs ~260 ms/chunk solo. Override the threshold with
-`EMBED_BATCH=N`.
+Embedding calls the OpenAI-compatible `/v1/embeddings` endpoint
+(`{"model": ..., "input": [...]}`), accumulating up to 32 chunks across
+messages per HTTP call, **and** capping each call at `EMBED_BATCH_CHARS`
+(6000) total chars: oversized batched requests (32 × ~2000 chars ≈ 16k
+tokens) corrupt llama-server's embedding state — subsequent calls return
+null vectors / hang until the server idles for several minutes (2026-08-03
+incident; slot KV desync in the server log). Null vectors are detected and
+retried (batch, then per-text) before failing loudly; a *shorter* vector
+fails immediately (wrong model served — never poison the store).
+Responses wider than `EMBED_DIMS` (1024) are truncated MRL-style and
+L2-renormalized. `chunk_text` strips invisible joiner/format chars
+(CGJ/ZWSP/ZWJ/WJ/BOM) — newsletter anti-truncation padding makes the model
+emit NaN.
+
+**Queries need qwen3's instruction prefix.** Without
+`Instruct: …\nQuery: …` on the query side, junk micro-chunks (PDF
+extraction artifacts) outrank genuinely relevant content; with it the
+ranking inverts (verified 2026-08-03). `search_mail` uses
+`scripts.embed_mail.embed_query` (documents are indexed plain, and
+chunk-vs-chunk similarity in `related.py` stays plain too).
+
+A full chunks/attachments rebuild (e.g. after an embedding-model switch)
+uses `--reembed`, which walks `messages` rows that have no chunks/
+attachments and inserts only those tables:
+
+```bash
+psql -d mailvec -c "DROP INDEX chunks_embed_hnsw; TRUNCATE chunks, attachments;"
+uv run embed-mail --reembed            # resumable; re-run if interrupted
+psql -d mailvec -c "CREATE INDEX chunks_embed_hnsw ON chunks USING hnsw (embedding vector_cosine_ops);"
+```
 
 Re-run manually after a big mail import. After a large batch, drop+rebuild
-the HNSW index for best recall:
-
-```sql
-DROP INDEX chunks_embed_hnsw;
-CREATE INDEX chunks_embed_hnsw ON chunks USING hnsw (embedding vector_cosine_ops);
-```
+the HNSW index for best recall (same SQL as above).
 
 Env vars (defaults usually fine, real values from `config/local.toml` via
 `mail_reader.config`): `PG_DSN=dbname=mailvec`,
-`OLLAMA_URL=http://gpu-host:11434`, `EMBED_MODEL=bge-m3:latest`,
-`EMBED_BATCH=32`, `ME_ADDRS=user@example.com`. Do **not** try to
+`EMBED_URL=http://gpu-host:8081` (config `hosts.embed`), `EMBED_MODEL=qwen3-embedding`,
+`EMBED_DIMS=1024`, `EMBED_BATCH=32`, `EMBED_BATCH_CHARS=6000`,
+`EMBED_QUERY_INSTRUCTION` (retrieval prefix; `ME_ADDRS=user@example.com`). Do **not** try to
 install `talon` — won't build on Python 3.14 (`cchardet` needs
 `longintrepr.h`, removed in 3.12+).
 
@@ -595,7 +622,7 @@ uv run finance-ingest /tmp/bulder/eksporterte_transaksjoner.csv
 # Auto-extract latest "Bulder bank eksport" mail and summarise
 uv run finance-ingest --from-mail
 
-# Same, plus cross-reference vs embedded mail and enqueue matches for tier-2
+# Same, plus cross-reference vs embedded mail
 PG_DSN=dbname=mailvec uv run finance-ingest --from-mail --enrich
 ```
 
@@ -606,22 +633,18 @@ top-25 merchants by `Tekst`, recurring (≥2 months), large one-offs (≥20k NOK
 summary leans on `Tekst` (merchant) and `Dato` instead. Don't trust the auto-
 categorization.
 
-**`--enrich` does two things:**
-1. For each "interesting" transaction (large / unlabelled / Ukategorisert),
-   finds matching mail by (a) amount-match against extracted money entities
-   in postgres, (b) notmuch search on date±3d + merchant keyword.
-2. For every matched mail, calls
-   `mail_reader.summarize.claim_for_generation(tier=2)` — enqueuing it for the
-   qwen3.6 structured-extraction pipeline. Workers in `mail-reader.service`
-   process the queue; results show up in the webapp at `/mail/`.
+**`--enrich`:** for each "interesting" transaction (large / unlabelled /
+Ukategorisert), finds matching mail by (a) amount-match against extracted
+money entities in postgres, (b) notmuch search on date±3d + merchant keyword,
+and lists the matches per transaction.
 
 The matches displayed in the output are deliberately broad (any mail in the
 date window with a merchant-keyword hit) — the value isn't precise correlation,
-it's that the bank ledger marks those mails as worth deeper processing.
+it's that the bank ledger marks those mails as worth a closer look.
 
 Cadence: monthly, see `CALENDAR.md`. Always reuse the existing pipeline:
-`mail_reader.db.connect()`, `mail_reader.summarize.claim_for_generation`,
-`scripts.embed_mail.embed_batch` — don't reimplement DSN / OLLAMA / embedding.
+`mail_reader.db.connect()`, `scripts.embed_mail.embed_batch` — don't
+reimplement DSN / embedding.
 
 ---
 
@@ -944,7 +967,7 @@ uv run python -m mail_reader.verify_browser --base http://other.host/mail --keep
 ```
 
 Four independent checks (inbox + agenda dismiss, message-view entity chips +
-`/e/{id}`, tankekart `chunks → themes → emergent` switching, error-path
+`/e/{id}`, tankekart `chunks → emergent` switching, error-path
 status codes) each write numbered screenshots to `/tmp/mr_shots/`. Exits
 non-zero if any failed. Uses system `/usr/lib64/chromium-browser/headless_shell`
 so playwright doesn't fetch its own browser.

@@ -5,16 +5,15 @@ Behind Caddy at `/mail/` — root_path is set on uvicorn so url_for()
 generates `/mail/...` while the proxy-stripped inbound path matches
 routes registered at `/`.
 
-Summary generation runs in background workers (see `workers.py`),
-spawned at app startup via the lifespan. Requesting a summary just
-INSERTs a pending row — the worker queue picks it up.
+Summary *generation* is retired (2026-08-02): no workers, no enqueueing.
+Already-stored `done` summaries still render; mails without one simply
+show no summary card.
 """
 from __future__ import annotations
 
 import os
 import re
 import urllib.parse
-from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import cast
 
@@ -31,7 +30,6 @@ from . import notes as notes_mod
 from . import shopping as shopping_mod
 from . import entities as entities_mod
 from . import summarize as summarize_mod
-from . import workers as workers_mod
 from .config import workspace_root
 from .date_format import relative_day, short_date, short_datetime
 from .thread_id import ThreadId
@@ -52,19 +50,30 @@ TEMPLATES.env.filters["short_datetime"] = short_datetime
 TEMPLATES.env.filters["relative_day"] = relative_day
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    tasks = workers_mod.spawn_all()
-    try:
-        yield
-    finally:
-        for t in tasks:
-            t.cancel()
-
-
-app = FastAPI(lifespan=lifespan)
+app = FastAPI()
 
 app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
+
+
+def _renderable_state(
+    state: summarize_mod.SummaryState | None,
+) -> summarize_mod.SummaryState | None:
+    """Map a stored summary state to what the UI should render, now that
+    generation is retired: any done flavour renders as `done` (no better
+    pass will ever arrive), `failed` stays a static error chip, and legacy
+    `pending` / `streaming` residue renders as no summary at all."""
+    if state is None:
+        return None
+    if state["status"] in ("done", "done_draft", "done_stale"):
+        return {
+            "status": "done",
+            "short": state["short"],
+            "error": None,
+            "action_required": state["action_required"],
+        }
+    if state["status"] == "failed":
+        return state
+    return None
 
 
 @app.get("/healthz")
@@ -75,47 +84,24 @@ def healthz() -> dict[str, str]:
 @app.get("/", response_class=HTMLResponse)
 def get_inbox(request: Request, limit: int = 50):
     threads = inbox_mod.list_inbox(limit=limit)
-    # Attach the best-available summary state to each thread row. Same
-    # scheduling/bump logic as the tankekart endpoint: missing rows get
-    # both passes scheduled, stale rows get a regen, all visible rows
-    # get their requested_at bumped so they rise to the front of the
-    # worker queue.
+    # Attach the best stored summary to each thread row. Nothing is
+    # scheduled anymore — threads without a done summary render no card.
     with db.connect() as conn:
         tids = [t["thread"] for t in threads]
         thread_to_mid = inbox_mod.thread_latest_mids(conn, tids)
-        all_mids: list[str] = []
         for t in threads:
             mid = thread_to_mid.get(t["thread"])
-            if mid is None:
-                # No embedded message yet — render the thread without a
-                # summary card. Embedding catches up via mail-sync.
-                t["summary_status"] = None
-                t["summary"] = None
-                t["summary_error"] = None
-                t["summary_mid_quoted"] = None
-                t["summary_action_required"] = False
-                continue
-            all_mids.append(mid)
-            state = summarize_mod.read_state(conn, mid)
-            if state is None:
-                summarize_mod.schedule_all_passes(conn, mid)
-                state = summarize_mod.SummaryState(
-                    status="pending", short="", error=None,
-                    action_required=False,
-                )
-            elif state["status"] == "done_stale":
-                summarize_mod.schedule_all_passes(conn, mid)
-            t["summary_status"] = state["status"]
-            t["summary"] = state["short"]
-            t["summary_error"] = state["error"]
-            t["summary_mid_quoted"] = urllib.parse.quote(mid, safe="")
-            t["summary_action_required"] = state["action_required"]
-        summarize_mod.bump_priority(conn, all_mids)
+            state = (_renderable_state(summarize_mod.read_state(conn, mid))
+                     if mid is not None else None)
+            t["summary_status"] = state["status"] if state else None
+            t["summary"] = state["short"] if state else None
+            t["summary_error"] = state["error"] if state else None
+            t["summary_action_required"] = (
+                state["action_required"] if state else False)
         agenda = agenda_mod.list_upcoming(conn)
     return TEMPLATES.TemplateResponse(
         request, "inbox.html", {"threads": threads, "agenda": agenda},
     )
-
 
 @app.get("/t/{thread_id}", response_class=HTMLResponse)
 def get_thread(request: Request, thread_id: str):
@@ -156,7 +142,6 @@ def get_entity(request: Request, entity_id: int):
         if ent is None:
             raise HTTPException(404, "entity not found")
         rows = entities_mod.messages_for_entity(conn, entity_id)
-        summarize_mod.bump_priority(conn, [r["message_id"] for r in rows])
     return TEMPLATES.TemplateResponse(
         request, "entity.html",
         {"entity": ent, "rows": rows},
@@ -182,42 +167,24 @@ def post_agenda_dismiss(thread_id: str, kind: str, occurs_at: str):
 
 @app.get("/api/tankekart/{message_id:path}", response_class=HTMLResponse)
 def get_tankekart(request: Request, message_id: str, mode: str = "chunks"):
-    """Render branches in the requested mode. For each leaf, attach
-    summary state. If no row yet, schedule **all** configured passes
-    (draft + final). On stale reads, schedule a regen for the current
-    prompt version. Then bump priority for every leaf so currently-
-    viewed mails rise to the top of the worker queue."""
-    if mode not in ("chunks", "themes", "emergent"):
+    """Render branches in the requested mode. For each leaf, attach the
+    best stored summary (generation is retired — leaves without a done
+    summary render no card)."""
+    if mode not in ("chunks", "emergent"):
         mode = "chunks"
     valid_mode = cast(related_mod.Mode, mode)
     msg_id = urllib.parse.unquote(message_id)
     with db.connect() as conn:
         branches = related_mod.tankekart(conn, msg_id, mode=valid_mode)
-        all_leaf_mids: list[str] = []
         for branch in branches:
             for leaf in branch["leaves"]:
-                lid = leaf["message_id"]
-                all_leaf_mids.append(lid)
-                state = summarize_mod.read_state(conn, lid)
-                if state is None:
-                    summarize_mod.schedule_all_passes(conn, lid)
-                    state = summarize_mod.SummaryState(
-                        status="pending", short="", error=None,
-                        action_required=False,
-                    )
-                elif state["status"] == "done_stale":
-                    # Old prompt version: enqueue regen at current.
-                    summarize_mod.schedule_all_passes(conn, lid)
-                elif state["status"] == "done_draft":
-                    # Lower-tier done, higher-tier still in flight. The
-                    # workers will pick it up; just keep its priority high.
-                    pass
-                leaf["summary_status"] = state["status"]
-                leaf["summary"] = state["short"]
-                leaf["summary_error"] = state["error"]
-                leaf["summary_action_required"] = state["action_required"]
-        # Bump priority for everything visible in this view.
-        summarize_mod.bump_priority(conn, all_leaf_mids)
+                state = _renderable_state(
+                    summarize_mod.read_state(conn, leaf["message_id"]))
+                leaf["summary_status"] = state["status"] if state else "absent"
+                leaf["summary"] = state["short"] if state else None
+                leaf["summary_error"] = state["error"] if state else None
+                leaf["summary_action_required"] = (
+                    state["action_required"] if state else False)
     return TEMPLATES.TemplateResponse(
         request, "_tankekart.html",
         {
@@ -268,46 +235,6 @@ def get_calendar_past(request: Request):
             "rendered_md": rendered,
             "source_name": "CALENDAR-PAST.md",
             "past_url": None,
-        },
-    )
-
-
-@app.get("/api/queue", response_class=HTMLResponse)
-def get_queue_indicator(request: Request):
-    """Tiny topbar fragment showing pending+streaming counts per pass.
-    Polled by HTMX every few seconds via the base template."""
-    with db.connect() as conn:
-        counts = summarize_mod.queue_counts(conn)
-    return TEMPLATES.TemplateResponse(
-        request, "_queue.html", {"counts": counts},
-    )
-
-
-@app.get("/api/sum/{message_id:path}", response_class=HTMLResponse)
-def get_summary_fragment(request: Request, message_id: str):
-    """Single-card summary fragment, used by HTMX polling. Schedules all
-    passes if no row exists; bumps priority on every poll so an active
-    card stays at the front of the worker queue."""
-    msg_id = urllib.parse.unquote(message_id)
-    with db.connect() as conn:
-        state = summarize_mod.read_state(conn, msg_id)
-        if state is None:
-            summarize_mod.schedule_all_passes(conn, msg_id)
-            state = summarize_mod.SummaryState(
-                status="pending", short="", error=None,
-                action_required=False,
-            )
-        elif state["status"] == "done_stale":
-            summarize_mod.schedule_all_passes(conn, msg_id)
-        summarize_mod.bump_priority(conn, [msg_id])
-    return TEMPLATES.TemplateResponse(
-        request, "_sum.html",
-        {
-            "msg_id_quoted": urllib.parse.quote(msg_id, safe=""),
-            "status": state["status"],
-            "short": state["short"],
-            "error": state["error"],
-            "action": state["action_required"],
         },
     )
 

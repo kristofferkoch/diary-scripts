@@ -25,10 +25,7 @@ Caveats:
   this script de-emphasises it. Use `Tekst` (merchant) as the primary signal.
 - With --enrich, every transaction flagged as "interesting" (large, untyped,
   or Ukategorisert) is matched against embedded mail (postgres money entities
-  + notmuch date-window search). Each match is then enqueued for tier-2
-  summarisation via `mail_reader.summarize.claim_for_generation` so the
-  qwen3.6 pipeline pulls structured fields out of the source mail. The
-  results show up in the mail-reader webapp at `/mail/`.
+  + notmuch date-window search) and the matches are listed per transaction.
 
 Money handling: Decimal throughout. Norwegian numbers (1 234,56) are parsed
 on read and rendered NO-style on write (space thousands, comma decimal).
@@ -370,32 +367,6 @@ def find_mail_near(
     return out[:limit]
 
 
-def enqueue_tier2(message_ids: list[str]) -> dict[str, int]:
-    """For each notmuch message_id, enqueue the highest-tier (tier-2) pass.
-
-    Uses `mail_reader.summarize.claim_for_generation` — same code path as the
-    webapp's "summarise now" button and the mail-sync cron. No-op for IDs not
-    in `messages` (not embedded yet) or already enqueued / done.
-
-    Returns {"claimed": n, "already": n, "missing": n}.
-    """
-    if not message_ids:
-        return {"claimed": 0, "already": 0, "missing": 0}
-    from mail_reader.db import connect
-    from mail_reader.summarize import _msg_row_id, claim_for_generation
-    stats = {"claimed": 0, "already": 0, "missing": 0}
-    with connect() as conn:
-        for mid in message_ids:
-            if _msg_row_id(conn, mid) is None:
-                stats["missing"] += 1
-                continue
-            if claim_for_generation(conn, mid):
-                stats["claimed"] += 1
-            else:
-                stats["already"] += 1
-    return stats
-
-
 def enrich(txns: list[Transaction]) -> dict[int, list[MailHit]]:
     """For each interesting transaction (by index), return matched mail hits.
 
@@ -405,11 +376,6 @@ def enrich(txns: list[Transaction]) -> dict[int, list[MailHit]]:
 
     Uses `mail_reader.db.connect()` so PG_DSN, connection lifecycle, and any
     future pooling stay aligned with the webapp.
-
-    Matched mails should be passed through `enqueue_tier2()` so the qwen3.6
-    pipeline extracts structured fields (themes, entities, temporal, money)
-    on the next worker tick. The summary is then visible in the mail-reader
-    webapp under `/mail/`.
     """
     from mail_reader.db import connect
     out: dict[int, list[MailHit]] = {}
@@ -565,8 +531,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--enrich", action="store_true",
                    help="Cross-reference 'interesting' transactions against "
                         "embedded mail (postgres money entities + notmuch). "
-                        "Adds a section listing matching mails per transaction "
-                        "and enqueues each match for tier-2 summarization.")
+                        "Adds a section listing matching mails per transaction.")
     args = p.parse_args(argv)
 
     if args.from_mail:
@@ -580,12 +545,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.enrich:
         hits = enrich(txns)
         print(render_enrichment(txns, hits))
-        # Enqueue each matched mail for tier-2 summarization. The mail-reader
-        # webapp's background workers will pick them up.
-        all_ids = sorted({h.message_id for hs in hits.values() for h in hs})
-        stats = enqueue_tier2(all_ids)
-        print(f"\nTier-2 enqueue: claimed={stats['claimed']} "
-              f"already-known={stats['already']} not-embedded={stats['missing']}")
     return 0
 
 

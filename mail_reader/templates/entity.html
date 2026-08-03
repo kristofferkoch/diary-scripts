@@ -40,7 +40,7 @@
         <span class="from">{{ r.from_addr }}</span>
       </div>
       {% if r.summary_status %}
-        {% with status=r.summary_status, short=r.summary, error=r.summary_error|default(none), msg_id_quoted=r.message_id|urlencode, action=r.summary_action_required %}
+        {% with status=r.summary_status, short=r.summary, error=r.summary_error|default(none), action=r.summary_action_required %}
           {% include "_sum.html" %}
         {% endwith %}
       {% endif %}
