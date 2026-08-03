@@ -31,8 +31,9 @@ Env:
     PG_DSN              postgres://user@host/mailvec      (default: dbname=mailvec)
     EMBED_URL           http://gpu-host:8081              (default; config hosts.embed)
     EMBED_MODEL         qwen3-embedding                   (default; server alias)
-    EMBED_DIMS          1024                              (stored dim; wider native
-                        vectors are truncated MRL-style + L2-renormalized)
+    EMBED_DIMS          4096                              (stored dim = the served
+                        model's native width since 2026-08-03; wider vectors
+                        are truncated MRL-style + L2-renormalized)
     EMBED_BATCH         32                                (default; max chunks/api call)
     EMBED_BATCH_CHARS   6000                              (default; max total chars/api
                         call — oversized calls corrupt llama-server, 2026-08-03)
@@ -112,7 +113,7 @@ ME = [a.strip() for a in os.environ.get(
 PG_DSN = os.environ.get("PG_DSN", "dbname=mailvec")
 EMBED = embed_url()  # $EMBED_URL → config hosts.embed (see config.embed_url)
 MODEL = os.environ.get("EMBED_MODEL", "qwen3-embedding")
-EMBED_DIMS = int(os.environ.get("EMBED_DIMS", "1024"))
+EMBED_DIMS = int(os.environ.get("EMBED_DIMS", "4096"))
 BATCH_CHUNKS = int(os.environ.get("EMBED_BATCH", "32"))
 # Cap total chars per /v1/embeddings call: oversized batched requests
 # (32 × ~2000-char chunks ≈ 16k tokens) corrupt llama-server's embedding
@@ -390,12 +391,13 @@ def chunk_text(text: str) -> list[str]:
 def _fit_dims(v: list[float]) -> list[float]:
     """Force a server vector to the stored dim.
 
-    Qwen3-Embedding is Matryoshka-trained and the server ignores the OpenAI
-    `dimensions` parameter, so a natively wider vector is truncated to
-    EMBED_DIMS and L2-renormalized client-side (sanctioned MRL usage).
-    A *shorter* vector means the wrong model is being served — fail the
-    batch loudly rather than poison the store with a foreign vector space
-    (the 2026-06-02 lesson)."""
+    EMBED_DIMS matches the served model's native width (4096 for
+    Qwen3-Embedding), so vectors normally pass through untouched. The
+    truncate + L2-renormalize path remains as sanctioned MRL handling for a
+    natively wider model — the server ignores the OpenAI `dimensions`
+    parameter. A *shorter* vector means the wrong model is being served —
+    fail the batch loudly rather than poison the store with a foreign
+    vector space (the 2026-06-02 lesson)."""
     if len(v) < EMBED_DIMS:
         raise RuntimeError(
             f"embed: vector dim {len(v)} < EMBED_DIMS {EMBED_DIMS} — "

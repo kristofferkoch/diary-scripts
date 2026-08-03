@@ -460,6 +460,13 @@ class TestPrepareMessage:
 
 
 class TestEmbedBatch:
+    @pytest.fixture(autouse=True)
+    def _pin_dims(self, monkeypatch):
+        """Fake vectors below are 1024-long; pin EMBED_DIMS so they match
+        regardless of the module default (4096 since 2026-08-03). Tests that
+        need another width monkeypatch EMBED_DIMS again themselves."""
+        monkeypatch.setattr("scripts.embed_mail.EMBED_DIMS", 1024)
+
     @staticmethod
     def _fake_urlopen(captured: dict, payload: dict):
         import json

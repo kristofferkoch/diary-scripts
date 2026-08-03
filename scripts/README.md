@@ -180,15 +180,15 @@ mail bundle.
 
 **Backend:** Postgres `mailvec` (pg18) + `pgvector` HNSW index, embeddings
 from Qwen3-Embedding served by an OpenAI-compatible llama.cpp `llama-server`
-(`gpu-host:8081`, `/v1/embeddings`). The served model is natively 4096-dim;
-vectors are truncated to the stored 1024 dims MRL-style and L2-renormalized
-client-side (`EMBED_DIMS`). (Pre-2026-08-02 this was Ollama `bge-m3`, also
-1024d.) Quote/signature stripping
+(`gpu-host:8081`, `/v1/embeddings`). The served model is natively 4096-dim
+and stored at full width since 2026-08-03 (before that, truncated to 1024
+dims MRL-style; pre-2026-08-02 this was Ollama `bge-m3`, also 1024d). Quote/signature stripping
 via `mail-parser-reply` (`en`/`da`/`sv` — `da` catches Norwegian "skrev");
 the regex post-pass also strips `-- ` signature blocks.
 
 Schema lives in `migrations/`:
-- `001_pgvector.sql` — `messages` + `chunks` (1024-d vector).
+- `001_pgvector.sql` — `messages` + `chunks` (1024-d vector; widened to
+  4096-d full model width by `015_full_width_vectors.sql`, 2026-08-03).
 - `002_attachments.sql` — `attachments` (one row per MIME part with a filename
   or `Content-Disposition: attachment`) + `chunks.attachment_id` column.
   Body chunks have `attachment_id IS NULL`; attachment chunks reference the
@@ -241,7 +241,7 @@ null vectors / hang until the server idles for several minutes (2026-08-03
 incident; slot KV desync in the server log). Null vectors are detected and
 retried (batch, then per-text) before failing loudly; a *shorter* vector
 fails immediately (wrong model served — never poison the store).
-Responses wider than `EMBED_DIMS` (1024) are truncated MRL-style and
+Responses wider than `EMBED_DIMS` (4096) are truncated MRL-style and
 L2-renormalized. `chunk_text` strips invisible joiner/format chars
 (CGJ/ZWSP/ZWJ/WJ/BOM) — newsletter anti-truncation padding makes the model
 emit NaN.
@@ -269,7 +269,7 @@ the HNSW index for best recall (same SQL as above).
 Env vars (defaults usually fine, real values from `config/local.toml` via
 `mail_reader.config`): `PG_DSN=dbname=mailvec`,
 `EMBED_URL=http://gpu-host:8081` (config `hosts.embed`), `EMBED_MODEL=qwen3-embedding`,
-`EMBED_DIMS=1024`, `EMBED_BATCH=32`, `EMBED_BATCH_CHARS=6000`,
+`EMBED_DIMS=4096`, `EMBED_BATCH=32`, `EMBED_BATCH_CHARS=6000`,
 `EMBED_QUERY_INSTRUCTION` (retrieval prefix; `ME_ADDRS=user@example.com`). Do **not** try to
 install `talon` — won't build on Python 3.14 (`cchardet` needs
 `longintrepr.h`, removed in 3.12+).
