@@ -23,4 +23,11 @@ RUN dnf install -y \
 COPY build.sh /usr/local/bin/qcow-build
 RUN chmod +x /usr/local/bin/qcow-build
 
+# M3 first-boot reconstitution: handler + offline/online units, baked into
+# the produced image by build.sh step 5b.
+COPY firstboot-reconstitute.sh \
+     firstboot-reconstitute-offline.service \
+     firstboot-reconstitute-online.service \
+     /usr/local/share/qcow-builder/
+
 ENTRYPOINT ["/usr/local/bin/qcow-build"]

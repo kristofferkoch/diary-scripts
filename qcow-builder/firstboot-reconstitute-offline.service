@@ -1,0 +1,24 @@
+# First-boot reconstitution, offline phase — rebuilds the backup-excluded
+# live state that needs NO network: host Postgres cluster (initdb + pg_dumpall
+# restore) and the notmuch Xapian index (+ tag restore).
+#
+# Runs once (sentinel /var/lib/firstboot.done, written by the handler only on
+# success — a failed run is retried on the next boot). Ordered Before the data
+# services so postgresql.service finds an initialised cluster; deliberately no
+# network dependencies — this phase must succeed on an isolated (-net none)
+# verify boot. TimeoutStartSec=0: a cold-maildir `notmuch new` takes 10s of
+# minutes.
+[Unit]
+Description=First-boot reconstitution of backup-excluded state (offline)
+ConditionPathExists=!/var/lib/firstboot.done
+After=local-fs.target systemd-tmpfiles-setup.service
+Before=postgresql.service docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=0
+ExecStart=/usr/local/sbin/firstboot-reconstitute offline
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,24 @@
+# First-boot reconstitution, online phase — the network-dependent remainder:
+# NFS photo library + fscache, Immich docker stack (compose pull/up + in-
+# container pg_dumpall restore), the gitignored diary-scripts .venv and
+# Playwright browsers.
+#
+# Runs after the offline phase and network-online. On an ISOLATED verify boot
+# this unit is EXPECTED to fail (the NFS mount can't succeed with no route) —
+# the sentinel is only written on success, so the unit simply retries on the
+# next boot and completes on the real production boot. Verify harnesses must
+# therefore exclude this unit from any "no failed units" assertion.
+[Unit]
+Description=First-boot reconstitution of backup-excluded state (online)
+ConditionPathExists=!/var/lib/firstboot-online.done
+After=network-online.target docker.service firstboot-reconstitute-offline.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=0
+ExecStart=/usr/local/sbin/firstboot-reconstitute online
+
+[Install]
+WantedBy=multi-user.target

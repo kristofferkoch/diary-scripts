@@ -7,6 +7,7 @@
 #   3. create qcow2, attach (qemu-nbd or loop+raw), replay the GPT
 #   4. mkfs with the ORIGINAL filesystem UUIDs (from the manifest)
 #   5. rsync the tree in, recreate excluded dirs empty, /.autorelabel
+#   5b. bake in the firstboot-reconstitute handler + units (milestone 3)
 #   6. bootloader: ESP copy + EFI/BOOT/BOOTAA64.EFI removable path
 #
 # No hostnames, snapshot ids, paths or credentials are baked in — everything
@@ -363,6 +364,30 @@ for home in "$MNT"/home/*/; do
     esac
   done
 done
+
+# --------------------------------------------------------------------------
+# Step 5b — bake in the first-boot reconstitution units (milestone 3)
+# --------------------------------------------------------------------------
+# The handler + unit files ship inside the builder image (Dockerfile COPY).
+# Installed here — after the excluded dirs exist, BEFORE the setfiles pass —
+# so the offline relabel labels the script, the units and the enable-symlinks
+# in the same run. Enablement is done with hand-created wants symlinks rather
+# than chroot `systemctl enable` — equivalent output, zero chroot.
+FIRSTBOOT_SRC=/usr/local/share/qcow-builder
+[ -f "$FIRSTBOOT_SRC/firstboot-reconstitute.sh" ] \
+  || die "firstboot files missing at $FIRSTBOOT_SRC (broken builder image?)"
+install -D -m 755 "$FIRSTBOOT_SRC/firstboot-reconstitute.sh" \
+  "$MNT/usr/local/sbin/firstboot-reconstitute"
+install -D -m 644 "$FIRSTBOOT_SRC/firstboot-reconstitute-offline.service" \
+  "$MNT/etc/systemd/system/firstboot-reconstitute-offline.service"
+install -D -m 644 "$FIRSTBOOT_SRC/firstboot-reconstitute-online.service" \
+  "$MNT/etc/systemd/system/firstboot-reconstitute-online.service"
+mkdir -p "$MNT/etc/systemd/system/multi-user.target.wants"
+ln -sf /etc/systemd/system/firstboot-reconstitute-offline.service \
+  "$MNT/etc/systemd/system/multi-user.target.wants/"
+ln -sf /etc/systemd/system/firstboot-reconstitute-online.service \
+  "$MNT/etc/systemd/system/multi-user.target.wants/"
+log "step 5b: firstboot-reconstitute handler + offline/online units baked in (enabled via wants symlinks)"
 
 touch "$MNT/.autorelabel"
 log "step 5: excluded dirs recreated empty; /.autorelabel set"

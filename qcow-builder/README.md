@@ -83,6 +83,84 @@ A qcow2 that boots to a login prompt when pointed at the host hypervisor
 (manual boot, isolated network). Live DB / docker / notmuch state is absent
 by design — the first-boot reconstitute unit (milestone 3) rebuilds those.
 
+## First-boot reconstitution (milestone 3)
+
+Step 5b of `build.sh` bakes a handler + two systemd units into the image
+(after the excluded dirs are recreated, **before** `setfiles`, so the offline
+relabel labels them in-pass; enabled via hand-created
+`multi-user.target.wants` symlinks — no chroot):
+
+- `/usr/local/sbin/firstboot-reconstitute` (from `firstboot-reconstitute.sh`)
+  — the handler, `$1 = offline|online`. Everything machine-specific is
+  **discovered from the restored tree at runtime** (PGDATA from the
+  postgresql unit, maildir/tag-dumps/compose-file by scanning `/home`, NFS
+  mountpoints from `/etc/fstab`, DB user/name from the Immich `.env`).
+- `firstboot-reconstitute-offline.service` — oneshot,
+  `ConditionPathExists=!/var/lib/firstboot.done`,
+  `Before=postgresql.service docker.service`, no network deps. Host PG:
+  major-version guard (dump vs installed), `postgresql-setup --initdb`,
+  cluster started with `pg_ctl` directly (a `systemctl start` here would
+  deadlock against the `Before=`), pg_dumpall load, row-count assert on the
+  mail `messages` table, cluster stopped again for postgresql.service.
+  notmuch: extract the M6 fast-restore artifact if present, else full
+  `notmuch new` (the long pole — `TimeoutStartSec=0`), then `notmuch
+  restore` from the newest tag dump.
+- `firstboot-reconstitute-online.service` — oneshot,
+  `ConditionPathExists=!/var/lib/firstboot-online.done`,
+  `After=network-online.target docker.service firstboot-reconstitute-offline.service`.
+  NFS + fscache (mkfs a blank second virtio disk as the cache disk if
+  present), `docker compose pull && up -d`, `pg_dumpall` restore into the
+  fresh `immich_postgres` container (skipped if `asset` already has rows),
+  then the two live-only tooling gaps: `uv sync --frozen` for the gitignored
+  diary-scripts `.venv` and `playwright install chromium-headless-shell`.
+
+**Failure semantics:** sentinels are written **only on success**, and each
+step is individually idempotent (skip-if-present), so a failed phase retries
+on the next boot and a half-completed phase self-heals. On an isolated
+verify boot the online unit is **expected to fail** (NFS unreachable) —
+exclude it from any "no failed units" assertion; it completes on the real
+production boot instead.
+
+### Restore-gap coverage decision (2026-08-04)
+
+The 2026-06-22 restore-gap log was checked against the qcow path. Most gaps
+don't exist here because whole-`/` captures them: the kindle-dashboard
+signing key, goimapnotify binary + config (`~/go` is not excluded),
+firewalld zones, and the semanage port config all ride along in the image.
+The two remaining live-only gaps — the gitignored `.venv` and
+`~/.cache/ms-playwright` (excluded) — are folded into the online phase
+(above). Note: the host PG cluster's `postgresql.conf`/`pg_hba.conf` live in
+the excluded data dir, so the reconstituted cluster runs **stock config** —
+re-apply any tuning manually if the box had any.
+
+Two first-boot wrinkles found by the isolated verify (both handled in the
+handler): `/var/lib/restic-backup` is mode 0700 root, so the dumps are fed to
+psql via inherited stdin; and the maildir's `post-new` notmuch hook calls
+into the not-yet-built `.venv`, so the hooks dir is parked for the
+first-boot `notmuch new` and restored right after.
+
+### Isolated-boot assertion matrix (verified 2026-08-04, snapshot 1cd677f4)
+
+- reached `multi-user.target` (degraded only by the expected failures)
+- `/var/lib/firstboot.done` present; `/var/lib/firstboot-online.done` absent
+- `postgresql.service` active; `mailvec.messages` = 68,977 rows
+- `notmuch count '*'` = 206,755; tags restored from the newest dump
+- offline unit: ran once, self-disabled; `inactive (dead)` on the next boot
+- online unit: failed **only** at the NFS mount (no route on the isolated
+  net) — expected; no sentinel, retries next boot
+- unit files labeled `systemd_unit_file_t`, SELinux `Enforcing`
+- also expected-failed on an isolated boot: `caddy.service` (its Caddyfile
+  binds the tailnet IP, which doesn't exist without tailscale)
+
+### RTO expectation
+
+Image boots to login in <2 min; the offline phase then runs before
+`multi-user.target` completes — host PG + notmuch ready within ~15–45 min of
+first boot (`notmuch new` against a cold ~800k-file maildir is the long
+pole; the M6 Xapian artifact cuts it to ~1 min). Immich stack ready within
+~5 min of the first boot with real network (docker pull + in-container
+restore + vchord index build dominate).
+
 **Never** boot a produced image on the live LAN alongside the real machine —
 it's an identity-faithful clone (SSH host keys, tailscale node, …). Isolated
 network only.
