@@ -102,8 +102,15 @@ def fetch_thumbs(client: httpx.Client, assets: list[dict], dest: Path) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     for i, a in enumerate(assets, 1):
         name = f"{i:02d}-{Path(a['originalFileName']).stem}.jpg"
-        r = client.get(f"/api/assets/{a['id']}/thumbnail", params={"size": "preview"})
-        r.raise_for_status()
+        try:
+            r = client.get(
+                f"/api/assets/{a['id']}/thumbnail", params={"size": "preview"}
+            )
+            r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            # e.g. encoded-video companions 404 — skip, keep going
+            print(f"!! thumb {i} ({a['originalFileName']}): {e}", file=sys.stderr)
+            continue
         (dest / name).write_bytes(r.content)
 
 
