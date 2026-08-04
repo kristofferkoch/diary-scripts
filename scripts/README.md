@@ -1041,6 +1041,8 @@ original.
 Auth: API key from `$IMMICH_API_KEY`, else `immich.api_key_cmd` in the
 private config (a `pass` reference, same pattern as `spond.password_cmd`
 — the key is never committed). Create the key in Immich → user avatar →
-Account Settings → API Keys; grant at least `asset.read` + `asset.view`
-+ `asset.download` (Select All is fine for a single-user instance).
+Account Settings → API Keys; check exactly **`asset.read`** (search) +
+**`asset.view`** (thumbnails) — keep it read-only. `asset.download` is
+only needed if originals must ever be fetched via the API (they're
+normally read over NFS).
 Base URL: `$IMMICH_URL`, else `hosts.immich` in config.

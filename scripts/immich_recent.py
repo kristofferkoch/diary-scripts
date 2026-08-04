@@ -15,7 +15,9 @@ over NFS or fetch a small preview thumbnail over HTTP.
 
 Auth: API key from ``$IMMICH_API_KEY``, else ``immich.api_key_cmd`` in
 the private config (a ``pass`` reference — the key itself is never
-committed; grant it at least asset.read + asset.view + asset.download).
+committed). The key needs only ``asset.read`` (search) + ``asset.view``
+(thumbnails) — keep it read-only; add ``asset.download`` only if
+originals must ever be fetched via the API.
 Base URL: ``$IMMICH_URL``, else ``hosts.immich`` in config. Thumbnails
 are written as ``NN-<originalFileName>.jpg`` so names match the listing
 order; ``originalPath`` is the container-side path — the library root is
