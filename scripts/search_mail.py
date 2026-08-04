@@ -73,11 +73,11 @@ def main(argv=None):
 
     query = _sql.SQL("""
         SELECT m.date, m.from_addr, m.subject, m.message_id,
-               c.embedding <=> %s::vector AS dist,
+               subvector(c.embedding, 1, 4000)::halfvec(4000) <=> subvector(%s::vector, 1, 4000)::halfvec(4000) AS dist,
                left(c.text, 240) AS snippet
         FROM chunks c JOIN messages m ON m.id = c.message_id
         WHERE {where_clause}
-        ORDER BY c.embedding <=> %s::vector
+        ORDER BY subvector(c.embedding, 1, 4000)::halfvec(4000) <=> subvector(%s::vector, 1, 4000)::halfvec(4000)
         LIMIT %s
     """).format(where_clause=_sql.SQL(" AND ").join(clauses))
     with psycopg.connect(PG_DSN) as conn, conn.cursor() as cur:

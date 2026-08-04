@@ -260,7 +260,9 @@ attachments and inserts only those tables:
 ```bash
 psql -d mailvec -c "DROP INDEX chunks_embed_hnsw; TRUNCATE chunks, attachments;"
 uv run embed-mail --reembed            # resumable; re-run if interrupted
-psql -d mailvec -c "CREATE INDEX chunks_embed_hnsw ON chunks USING hnsw (embedding vector_cosine_ops);"
+# 4096-d storage exceeds the HNSW dim caps (2000 vector / 4000 halfvec) —
+# index an MRL-truncated 4000-d prefix at half precision instead:
+psql -d mailvec -c "CREATE INDEX chunks_embed_hnsw ON chunks USING hnsw ((subvector(embedding, 1, 4000)::halfvec(4000)) halfvec_cosine_ops);"
 ```
 
 Re-run manually after a big mail import. After a large batch, drop+rebuild

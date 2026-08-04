@@ -427,6 +427,11 @@ def _post_embeddings(texts: list[str]) -> list[list[float]]:
 def _has_nulls(v: list[float] | None) -> bool:
     return not isinstance(v, list) or not v or any(x is None for x in v)
 
+# Null-vector retry events, for observing the llama-server slot-corruption
+# bug (2026-08-03): the retry loop below is otherwise silent, and a hot
+# loop shows up server-side as ~3-4 embed tasks per stored message.
+_NULL_RETRIES = 0
+
 def embed_batch(texts: list[str]) -> list[list[float]]:
     """POST a list of strings, get a list of EMBED_DIMS embedding vectors back.
 
@@ -455,6 +460,7 @@ def embed_batch(texts: list[str]) -> list[list[float]]:
 
 def _embed_group(texts: list[str]) -> list[list[float]]:
     """Embed one size-capped group of texts, with null-retry handling."""
+    global _NULL_RETRIES
     vecs = None
     for attempt in range(3):
         try:
@@ -466,6 +472,10 @@ def _embed_group(texts: list[str]) -> list[list[float]]:
             continue
         if not any(_has_nulls(v) for v in vecs):
             break
+        _NULL_RETRIES += 1
+        print(f"  embed: null vector in group of {len(texts)} — batch "
+              f"retry {attempt + 1}/3 (null retries: {_NULL_RETRIES})",
+              file=sys.stderr)
         time.sleep(2 * (attempt + 1))
     if vecs is None:  # unreachable (3rd transport failure re-raises)
         raise RuntimeError("embed: no response after retries")
@@ -473,6 +483,10 @@ def _embed_group(texts: list[str]) -> list[list[float]]:
     for i, v in enumerate(vecs):
         if _has_nulls(v):
             for attempt in range(3):
+                _NULL_RETRIES += 1
+                print(f"  embed: null vector for text {i}/{len(texts)} — "
+                      f"isolate retry {attempt + 1}/3 "
+                      f"(null retries: {_NULL_RETRIES})", file=sys.stderr)
                 v = _post_embeddings([texts[i]])[0]
                 if not _has_nulls(v):
                     break

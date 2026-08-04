@@ -20,5 +20,8 @@ ALTER TABLE chunks
     ALTER COLUMN embedding TYPE vector(4096);
 
 -- Rebuild after `embed-mail --reembed` has completed (build after bulk
--- insert for speed):
--- CREATE INDEX chunks_embed_hnsw ON chunks USING hnsw (embedding vector_cosine_ops);
+-- insert for speed). pgvector's HNSW caps indexes at 2000 dims (vector) /
+-- 4000 dims (halfvec), so the index uses an MRL-truncated prefix (4000 of
+-- 4096 dims, sanctioned for Qwen3-Embedding) cast to halfvec; search_mail
+-- matches the index expression on both sides:
+-- CREATE INDEX chunks_embed_hnsw ON chunks USING hnsw ((subvector(embedding, 1, 4000)::halfvec(4000)) halfvec_cosine_ops);
