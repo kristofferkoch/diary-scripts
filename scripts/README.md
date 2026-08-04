@@ -1015,3 +1015,32 @@ try/except, add a template section that renders gracefully when empty.
 PNGs are 1448×1072 landscape composed, rotated −90° → 1072×1448 portrait,
 mode "L" — render.py's `_ensure_kindle_format()` enforces this. **Do not
 bypass it**; raw RGBA out the door breaks `eips` on-device.
+
+## Immich — `immich-recent`
+
+`immich_recent.py` lists recently-added Immich assets via the API —
+the fast replacement for crawling the NFS-mounted library with
+`find -newermt` (multi-minute over RAID6) when the user says "I've
+uploaded new photos" (innbo rounds, receipts, …). It searches
+`POST /api/search/metadata` with `createdAfter` (upload time, indexed
+in Postgres), ascending:
+
+```bash
+uv run immich-recent                              # added in the last 24 h
+uv run immich-recent --since "2026-08-04 14:20"   # naive = local time
+uv run immich-recent --limit 40
+uv run immich-recent --thumbs /tmp/im-thumbs      # + preview JPEGs over HTTP
+```
+
+`--thumbs` writes `NN-<originalFileName>.jpg` in listing order — read
+those instead of multi-MB originals over NFS. `originalPath` in the
+listing is the container-side path (`/data/…`); the library root is
+`UPLOAD_LOCATION` (NFS mount, see diary PHOTOS.md) when you need the
+original.
+
+Auth: API key from `$IMMICH_API_KEY`, else `immich.api_key_cmd` in the
+private config (a `pass` reference, same pattern as `spond.password_cmd`
+— the key is never committed). Create the key in Immich → user avatar →
+Account Settings → API Keys; grant at least `asset.read` + `asset.view`
++ `asset.download` (Select All is fine for a single-user instance).
+Base URL: `$IMMICH_URL`, else `hosts.immich` in config.

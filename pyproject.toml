@@ -40,6 +40,7 @@ retire-calendar   = "scripts.retire_calendar:main"
 notes             = "scripts.notes:main"
 shopping          = "scripts.shopping:main"
 kindle-dashboard  = "scripts.kindle_dashboard.serve:main"
+immich-recent     = "scripts.immich_recent:main"
 
 [build-system]
 requires = ["hatchling"]

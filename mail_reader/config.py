@@ -152,3 +152,8 @@ def mlx_url() -> str:
 def nuextract_url() -> str:
     """pr_compose NuExtract extractor server, e.g. ``http://gpu-host:8081``."""
     return _host_url("NUEXTRACT_BASE", "hosts.nuextract", "gpu-host:8081")
+
+
+def immich_url() -> str:
+    """Immich photo server API base, e.g. ``http://server:2283``."""
+    return _host_url("IMMICH_URL", "hosts.immich", "server:2283")
