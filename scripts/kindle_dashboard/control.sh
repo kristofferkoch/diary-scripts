@@ -22,10 +22,15 @@ BASE="${BASE:-http://192.0.2.10:8801}"
 KIOSK="${KIOSK:-1}"
 DECISION=/tmp/kindle_decision
 LOG=/mnt/us/dashboard/dashboard.log
-TMP=/tmp/dashboard.png
+# last PNG lives on FAT (/mnt/us), not tmpfs: after a reboot the framebuffer
+# is wiped white but the ETag cache also survives, so a 304 would otherwise
+# leave the device with no image to repaint (white screen until the content
+# next changed — seen 2026-08-05).
+TMP=/mnt/us/dashboard/last.png
 ETAG_FILE=/mnt/us/dashboard/last.etag
 HEADERS=/tmp/dashboard.headers
 FULL_DONE=/mnt/us/dashboard/last-full-refresh
+RENDERED=/tmp/.rendered-this-boot   # tmpfs on purpose: cleared each reboot
 
 # --- policy knobs (server-tunable: edit here, lands next wake) ---
 FULL_HOUR=3                       # daily full e-ink refresh after this local hour
@@ -55,8 +60,12 @@ if [ "$maint" = "1" ]; then
 fi
 
 # --- kiosk kill (these can (re)start late at boot) ---
+# bootactions: stock boot-progress splash app; if it never gets "boot
+# complete" (framework is stopped below, so it never does) it can wedge in
+# an error loop and keep re-painting its progress bar over our render
+# (seen 2026-08-05 after a hard power-cycle).
 if [ "$KIOSK" = "1" ]; then
-  for svc in framework pillow statusbar webreader appmgrd; do
+  for svc in framework pillow statusbar webreader appmgrd bootactions; do
     initctl stop "$svc" >/dev/null 2>&1
   done
 fi
@@ -70,7 +79,15 @@ else
   status=$(curl -sSL --max-time 30 $BATT_HDRS -D "$HEADERS" -w '%{http_code}' -o "$TMP.new" "$BASE/dashboard.png" 2>/dev/null)
 fi
 case "$status" in
-  304) log "unchanged (304)" ;;
+  304)
+    if [ ! -f "$RENDERED" ] && [ -s "$TMP" ]; then
+      # first fetch after a reboot: boot wiped the framebuffer, so repaint
+      # from the persisted PNG even though the content is unchanged.
+      eips -c >/dev/null 2>&1; eips -g "$TMP" -f >/dev/null 2>&1
+      touch "$RENDERED"; log "unchanged (304) but nothing rendered this boot — render (full)"
+    else
+      log "unchanged (304)"
+    fi ;;
   200)
     if [ -s "$TMP.new" ]; then
       mv "$TMP.new" "$TMP"
@@ -83,6 +100,7 @@ case "$status" in
       else
         eips -g "$TMP" >/dev/null 2>&1; log "render (partial)"
       fi
+      touch "$RENDERED"
     else
       log "200 but empty body"
     fi
