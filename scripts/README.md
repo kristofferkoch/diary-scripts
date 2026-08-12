@@ -282,6 +282,15 @@ install `talon` — won't build on Python 3.14 (`cchardet` needs
 against the local mail store (skipped if absent). `uv run ty check scripts/`
 runs Astral's `ty` typechecker. Both should pass clean before commit.
 
+**Bug fixes must be red/green TDD.** Write the regression test **first** and
+confirm it fails against the un-fixed code (red), then apply the fix and
+confirm it passes (green). This proves the test actually pins the bug instead
+of passing trivially. Practical way to show red against the current tree:
+`git stash -- <impl>` (or `git stash push <impl>`), run the new test to see it
+fail, then `git stash pop` and run again to see it pass. (Regression test
+added for the weekday-parenthetical ordering bug in `kindle_dashboard/data.py`
+was verified this way.)
+
 ### Auto-archiving the inbox — `archive-inbox`
 
 For "archive after N days" workflows, use `archive-inbox`. Rules

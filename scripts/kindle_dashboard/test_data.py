@@ -149,6 +149,20 @@ def test_struck_through_event_is_skipped():
     assert data.parse_calendar(line) == []
 
 
+def test_weekday_paren_before_time_parses():
+    """Regression: `- **2026-08-11 (tirsdag) 09:15** — …` (weekday parenthetical
+    BEFORE the time) was silently dropped because the regex only matched the
+    parenthetical AFTER the time — which is why the passtime never reached the
+    Kindle. Both orderings must parse and keep the time."""
+    for line in (
+        "- **2026-08-11 (tirsdag) 09:15** — Passtime K",
+        "- **2026-08-11 09:15 (tirsdag)** — Passtime K",
+    ):
+        (ev,) = data.parse_calendar(line)
+        assert ev["time"] == "09:15", ev
+        assert ev["title"] == "Passtime K", ev
+
+
 def test_live_event_with_inline_strike_keeps_markers_for_the_filter():
     """A still-live event that strikes only a sub-span (e.g. a corrected day)
     stays visible and keeps its `~~` markers — the template's ``strike`` filter

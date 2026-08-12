@@ -34,15 +34,20 @@ CALENDAR_MD = REPO_ROOT / "CALENDAR.md"
 #   - **<date>[ – <end-date>][ <time>[–<time>]][ (note)]** — <title>[ frieksttekst]
 # Date(s): YYYY-MM-DD, range separated by en-dash "–".
 # Times: HH:MM, range separated by en-dash "–" (we also tolerate ASCII "-").
+# Parentheticals like `(tirsdag)` / `(uke 27)` are human-help and ignored, so we
+# accept them EITHER before or after the time — both `09:15 (tirsdag)` and
+# `(tirsdag) 09:15` must parse (the latter is how weekday notes are commonly
+# written; a regression that dropped such events is why the passtime vanished).
 _EVENT_RE = re.compile(
     r"""
     ^-\s\*\*
     (?P<d1>\d{4}-\d{2}-\d{2})
     (?:\s*[–-]\s*(?P<d2>\d{4}-\d{2}-\d{2}))?      # optional date range
+    (?:\s*\((?P<paren_before>[^)]+)\))?           # optional parenthetical before time
     (?:\s+(?P<t1>\d{2}:\d{2})                     # optional start time
         (?:\s*[–-]\s*(?P<t2>\d{2}:\d{2}))?        #   optional end time
     )?
-    (?:\s*\((?P<paren>[^)]+)\))?                  # optional parenthetical
+    (?:\s*\((?P<paren_after>[^)]+)\))?            # optional parenthetical after time
     \*\*
     \s*—\s*
     (?P<title>.+?)
@@ -171,11 +176,12 @@ def parse_calendar(text: str) -> list[dict[str, Any]]:
         d1 = _dt.date.fromisoformat(m.group("d1"))
         d2 = _dt.date.fromisoformat(m.group("d2")) if m.group("d2") else d1
         title = _clean_title(raw_title)
+        paren = m.group("paren_before") or m.group("paren_after")
         events.append(
             {
                 "start": d1,
                 "end": d2,
-                "time": _fmt_time(m.group("t1"), m.group("t2"), m.group("paren")),
+                "time": _fmt_time(m.group("t1"), m.group("t2"), paren),
                 "title": title,
                 "who": _who(title),
             }
