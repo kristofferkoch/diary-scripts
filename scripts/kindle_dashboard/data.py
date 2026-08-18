@@ -208,6 +208,8 @@ _NB_WEEKDAY_INDEX = {
 _RECUR_TITLE_RE = re.compile(r"^-\s+\*\*(?P<title>[^*]+?)\*\*")
 
 # Indented slot bullet: `  - **<Weekday> HH.MM[–HH.MM]** [(note)] — <location>`.
+# The parenthetical may carry a start date `(fra DD.MM[.YYYY])` — the slot is
+# suppressed before that date (seasonal activities resuming mid-year).
 _RECUR_SLOT_RE = re.compile(
     r"""
     ^\s+-\s+\*\*
@@ -216,13 +218,37 @@ _RECUR_SLOT_RE = re.compile(
     (?P<t1>\d{1,2}[.:]\d{2})
     (?:\s*[–-]\s*(?P<t2>\d{1,2}[.:]\d{2}))?
     \*\*
-    (?:\s*\([^)]*\))?
+    (?:\s*\((?P<paren>[^)]*)\))?
     \s*—\s*
     (?P<loc>.+?)
     \s*$
     """,
     re.VERBOSE,
 )
+
+_FRA_RE = re.compile(r"fra\s+(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?")
+
+
+def _slot_from(paren: str | None) -> _dt.date | None:
+    """Parse a `(fra DD.MM[.YYYY])` start date out of the slot parenthetical.
+
+    Year defaults to the current one — slots are edited as seasons change,
+    so a bare `fra 27.08` always means the nearest season.
+
+    >>> _slot_from("fra 27.08") is not None
+    True
+    >>> _slot_from("oppmøte 17:20") is None
+    True
+    >>> _slot_from(None) is None
+    True
+    """
+    if not paren:
+        return None
+    m = _FRA_RE.search(paren)
+    if not m:
+        return None
+    day, month, year = int(m.group(1)), int(m.group(2)), m.group(3)
+    return _dt.date(int(year) if year else _dt.date.today().year, month, day)
 
 
 def _weekday_index(word: str) -> int | None:
@@ -274,7 +300,8 @@ def parse_recurring_weekly(text: str) -> list[dict[str, Any]]:
     """Extract weekly-recurring slots from the `## Recurring weekly` section.
 
     Returns one record per slot:
-        {"weekday": int (Mon=0), "time": str, "title": str, "who": str}
+        {"weekday": int (Mon=0), "time": str, "title": str, "who": str,
+         "from": date | None}
 
     Only the `## Recurring weekly` section is read — the monthly/quarterly
     maintenance sections are deliberately excluded (ops reminders, not family
@@ -296,6 +323,7 @@ def parse_recurring_weekly(text: str) -> list[dict[str, Any]]:
                 "time": time,
                 "title": current_title,
                 "who": _who(current_title),
+                "from": _slot_from(slot.group("paren")),
             })
             continue
         title = _RECUR_TITLE_RE.match(line)
@@ -390,6 +418,7 @@ def calendar_block(today: _dt.date, *, days_ahead: int = 3) -> list[dict[str, An
             {"time": r["time"], "who": r["who"], "text": r["title"]}
             for r in recurring
             if r["weekday"] == d.weekday()
+            and (r.get("from") is None or d >= r["from"])
         ]
         # Sort: timed events by start time, all-day to the bottom.
         items.sort(

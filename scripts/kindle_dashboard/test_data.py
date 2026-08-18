@@ -58,6 +58,27 @@ def test_slot_with_meetup_parenthetical_parses():
     ]
 
 
+def test_slot_with_start_date_is_suppressed_before(tmp_path, monkeypatch):
+    """A slot may carry `(fra DD.MM)` — it only enters the agenda on/after
+    that date (seasonal activities like swimming that resume mid-year)."""
+    md = """\
+## Recurring weekly
+
+- **Svømming Hans** (Lambertseter svømmeklubb):
+  - **Torsdager 17:45** (fra 27.08) — Oppsal skole
+"""
+    cal = tmp_path / "CALENDAR.md"
+    cal.write_text(md)
+    monkeypatch.setattr(data, "CALENDAR_MD", cal)
+
+    before = data.calendar_block(_dt.date(2026, 8, 20), days_ahead=0)  # tor 20.08
+    assert before[0]["events"] == []
+    on = data.calendar_block(_dt.date(2026, 8, 27), days_ahead=0)      # tor 27.08
+    assert [(e["time"], e["text"]) for e in on[0]["events"]] == [
+        ("17:45", "Svømming Hans")
+    ]
+
+
 def test_recurring_excludes_monthly_section():
     """The `Mandager 09.00` bullet lives under `## Recurring — månedlig`."""
     recs = data.parse_recurring_weekly(RECURRING_MD)
