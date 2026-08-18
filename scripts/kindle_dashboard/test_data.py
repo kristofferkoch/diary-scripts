@@ -41,6 +41,23 @@ def test_parse_recurring_weekly_extracts_slots():
     }
 
 
+def test_slot_with_meetup_parenthetical_parses():
+    """Slot lines may carry a parenthetical between the time and the `—`
+    (e.g. `**Onsdager 17:30** (oppmøte 17:20) — Ekebergsletta`). Regression:
+    Einar's football slot was silently dropped from the wall agenda because
+    the regex required `**` directly before the dash."""
+    md = """\
+## Recurring weekly
+
+- **Fotballtrening Einar** (KFUM):
+  - **Onsdager 17:30** (oppmøte 17:20) — **Ekebergsletta**
+"""
+    recs = data.parse_recurring_weekly(md)
+    assert [(r["weekday"], r["time"], r["title"]) for r in recs] == [
+        (2, "17:30", "Fotballtrening Einar")
+    ]
+
+
 def test_recurring_excludes_monthly_section():
     """The `Mandager 09.00` bullet lives under `## Recurring — månedlig`."""
     recs = data.parse_recurring_weekly(RECURRING_MD)

@@ -207,7 +207,7 @@ _NB_WEEKDAY_INDEX = {
 # Top-level activity bullet: `- **Title** ...` (no indent).
 _RECUR_TITLE_RE = re.compile(r"^-\s+\*\*(?P<title>[^*]+?)\*\*")
 
-# Indented slot bullet: `  - **<Weekday> HH.MM[–HH.MM]** — <location>`.
+# Indented slot bullet: `  - **<Weekday> HH.MM[–HH.MM]** [(note)] — <location>`.
 _RECUR_SLOT_RE = re.compile(
     r"""
     ^\s+-\s+\*\*
@@ -216,6 +216,7 @@ _RECUR_SLOT_RE = re.compile(
     (?P<t1>\d{1,2}[.:]\d{2})
     (?:\s*[–-]\s*(?P<t2>\d{1,2}[.:]\d{2}))?
     \*\*
+    (?:\s*\([^)]*\))?
     \s*—\s*
     (?P<loc>.+?)
     \s*$
