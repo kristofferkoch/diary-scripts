@@ -330,6 +330,13 @@ mbsync run**. Other related gotchas:
 - After moving files, `notmuch new` detects them as renames (content hash),
   no re-index needed. The `post-new` hook then reconciles tags.
 - Lesson learned 2026-05-15 archiving the Filter newsletters.
+- **`~/.mbsyncrc` must keep `Expunge None`** (changed from `Expunge Both`
+  2026-09-13): Proton Bridge rejects expunge/CLOSE in `All Mail`
+  ("operation not allowed"), so any deletion propagated there made every
+  mbsync run exit 1 — which silently blocked the whole `mail-sync.sh`
+  chain (`notmuch new` + `embed-mail`) for days. The residual
+  "Notice: conflicting changes in (<far>,<near>)" line after such an
+  episode is non-fatal.
 
 ### Extracting attachments — `mailshow --attachment-text` / `--attachments`
 

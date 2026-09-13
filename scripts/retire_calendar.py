@@ -49,6 +49,7 @@ MONTH_INDEX = {name: i for i, name in enumerate(MONTHS_EN, start=1)}
 EVENT_RE = re.compile(
     r"^-\s\*\*"
     r"(?P<start>\d{4}-\d{2}-\d{2})"
+    r"(?:\s+\d{1,2}:\d{2})?"
     r"(?:\s*–\s*(?P<end>\d{4}-\d{2}-\d{2}))?"
     r".*?\*\*\s*—\s*"
 )
@@ -63,6 +64,10 @@ def event_dates(line: str) -> tuple[dt.date, dt.date] | None:
     (datetime.date(2026, 5, 26), datetime.date(2026, 5, 26))
     >>> event_dates("- **2026-06-29 – 2026-07-03 (uke 27)** — Sommerskolen")
     (datetime.date(2026, 6, 29), datetime.date(2026, 7, 3))
+    >>> event_dates("- **2026-09-12 08:30 – 2026-09-13 17:00** — Fotballcup")
+    (datetime.date(2026, 9, 12), datetime.date(2026, 9, 13))
+    >>> event_dates("- **2026-09-12 08:30 – 17:00** — Kamp")
+    (datetime.date(2026, 9, 12), datetime.date(2026, 9, 12))
     >>> event_dates("- **2026-05-29 (all day)** — Planleggingsdag")
     (datetime.date(2026, 5, 29), datetime.date(2026, 5, 29))
     >>> event_dates("- **Bulder bank-ingest** (siste søndag — neste: 2026-06-28).") is None
