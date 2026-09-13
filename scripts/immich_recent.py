@@ -87,25 +87,35 @@ def _parse_since(raw: str | None) -> str:
 def search_recent(
     client: httpx.Client, since: str | None, limit: int, place: dict
 ) -> list[dict]:
-    """POST /api/search/metadata with createdAfter, ascending, paginated."""
+    """POST /api/search/metadata, ascending, cursor-paginated.
+
+    Uses the v3.2.0 structured filter shape (``filter``/``orderBy``/
+    ``cursor``) — the old flat fields (``createdAfter``, ``page``, …)
+    still work but are deprecated and mutually exclusive with the new
+    shape.
+    """
     out: list[dict] = []
-    page = 1
-    body: dict = {"order": "asc", **place}
+    filt: dict = {k: {"eq": v} for k, v in place.items()}
     if since:
-        body["createdAfter"] = since
+        filt["createdAt"] = {"gte": since}
+    body: dict = {
+        "filter": filt,
+        "orderBy": {"field": "fileCreatedAt", "direction": "asc"},
+    }
     if place:
         body["withExif"] = True  # city + lat/lon for the location column
+    cursor: str | None = None
     while len(out) < limit:
-        r = client.post(
-            "/api/search/metadata",
-            json={**body, "page": page, "size": min(250, limit - len(out))},
-        )
+        req = {**body, "size": min(250, limit - len(out))}
+        if cursor:
+            req["cursor"] = cursor
+        r = client.post("/api/search/metadata", json=req)
         r.raise_for_status()
         payload = r.json()["assets"]
         out.extend(payload["items"])
-        if not payload.get("nextPage"):
+        cursor = payload.get("nextCursor")
+        if not cursor:
             break
-        page = int(payload["nextPage"])
     return out[:limit]
 
 

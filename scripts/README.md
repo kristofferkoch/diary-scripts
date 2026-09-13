@@ -1084,8 +1084,10 @@ bypass it**; raw RGBA out the door breaks `eips` on-device.
 the fast replacement for crawling the NFS-mounted library with
 `find -newermt` (multi-minute over RAID6) when the user says "I've
 uploaded new photos" (innbo rounds, receipts, …). It searches
-`POST /api/search/metadata` with `createdAfter` (upload time, indexed
-in Postgres), ascending:
+`POST /api/search/metadata` with the v3.2.0 structured filter
+(`filter.createdAt.gte` — upload time, indexed in Postgres),
+ascending (`orderBy fileCreatedAt`), cursor-paginated (`nextCursor`;
+the old flat fields and `page`/`nextPage` are deprecated):
 
 ```bash
 uv run immich-recent                              # added in the last 24 h
