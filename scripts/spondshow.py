@@ -132,6 +132,16 @@ def _trim(s: str, n: int = 80) -> str:
 
 
 def render_header(rec: dict[str, Any]) -> str:
+    """One-line summary of a record. Events carry their cancellation state.
+
+    >>> render_header({"kind": "event", "data": {
+    ...     "id": "E1", "heading": "Mandagstrening", "startTimestamp": "2026-10-12T15:15:00Z"}})
+    "[event] 2026-10-12T15:15:00Z id=E1 loc='' name='Mandagstrening'"
+    >>> render_header({"kind": "event", "data": {
+    ...     "id": "E1", "heading": "Mandagstrening", "startTimestamp": "2026-10-12T15:15:00Z",
+    ...     "cancelled": True, "cancelledReason": "Avlyst grunnet kollisjon"}})
+    "[event AVLYST] 2026-10-12T15:15:00Z id=E1 loc='' name='Mandagstrening' reason='Avlyst grunnet kollisjon'"
+    """
     kind = rec.get("kind", "?")
     data = rec.get("data") or {}
     if kind == "chat":
@@ -149,6 +159,14 @@ def render_header(rec: dict[str, Any]) -> str:
         start = data.get("startTimestamp") or ""
         loc = (data.get("location") or {}).get("feature", "")
         eid = data.get("id") or "?"
+        if data.get("cancelled"):
+            # A cancelled event keeps its startTimestamp, so a listing that
+            # only shows the RSVP marker reads like a normal, still-relevant
+            # event — the `--future` reconciliation in the sjekk SOP then
+            # can't see the cancellation at all. Mark it loudly instead.
+            reason = _trim(str(data.get("cancelledReason") or ""), 60)
+            return (f"[event AVLYST] {start} id={eid} loc={_trim(str(loc), 30)!r} "
+                    f"name={_trim(str(name))!r} reason={reason!r}")
         if _RSVP_MEMBER_ID:
             s = rsvp_status(data, _RSVP_MEMBER_ID)
             mark = RSVP_MARK.get(s or "", "—")

@@ -620,6 +620,12 @@ last time we wrote a digest".
    marker that disagrees with the calendar (or a calendar line still
    saying "RSVP: svar?" for an event user has since answered) is the
    signal to update. Catches anything the cursor logic misses.
+   **`[event AVLYST]`** (with the organiser's `reason=`) is a cancelled
+   event: it keeps its original start time, so mark the `CALENDAR.md` line
+   avlyst (or drop it) rather than reading it as a live commitment. These
+   were invisible before 2026-10-11 — `--future` rendered a cancelled
+   event exactly like an active one, so a cancelled training stayed in the
+   calendar through two sjekker after it was called off.
 3. **Distil into the daily note** — for *actionable* items
    (kampendringer, oppmøtefrister, betalingskrav, foreldredugnad), add a
    `## Spond` section to today's `memory/YYYY-MM-DD.md`. Posts from the
