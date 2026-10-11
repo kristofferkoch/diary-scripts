@@ -193,8 +193,8 @@ def parse_calendar(text: str) -> list[dict[str, Any]]:
 #
 # The `## Recurring weekly` section nests one slot per indented bullet under a
 # top-level activity bullet:
-#     - **Fotballtrening Hans** (KFUM ...):
-#       - **Mandager 17.15–18.45** — Treningsfelt B2
+#     - **Fotballtrening Astrid** (Example FK ...):
+#       - **Mandager 17.15–18.45** — Treningsfelt B
 #       - **Lørdager 10.30–12.00** — Kunstgresset
 # We expand these into concrete days so weekly activities (training, swimming)
 # show in the agenda alongside the dated one-off events.

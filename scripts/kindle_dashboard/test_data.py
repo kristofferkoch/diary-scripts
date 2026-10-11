@@ -10,13 +10,13 @@ RECURRING_MD = """\
 
 ## Recurring weekly
 
-- **Fotballtrening Hans** (KFUM G2018, Lag 2):
-  - **Mandager 17.15–18.45** — Treningsfelt B2
+- **Fotballtrening Astrid** (Example FK):
+  - **Mandager 17.15–18.45** — Treningsfelt B
   - **Lørdager 10.30–12.00** — Kunstgresset
   - Kilde: Spond-post 2026-05-03.
 
-- **Svømming Hans** (Lambertseter svømmeklubb):
-  - **Tirsdager 17.35–18.05** — Rustad skole, Paal Bergs vei 30
+- **Svømming Astrid** (Example svømmeklubb):
+  - **Tirsdager 17.35–18.05** — Eksempelskolen, Eksempelveien 1
 
 ## Recurring — månedlig
 
@@ -35,26 +35,26 @@ def test_parse_recurring_weekly_extracts_slots():
     # must NOT leak in.
     keyed = {(r["weekday"], r["time"]): r["title"] for r in recs}
     assert keyed == {
-        (0, "17:15–18:45"): "Fotballtrening Hans",  # Monday
-        (5, "10:30–12:00"): "Fotballtrening Hans",  # Saturday
-        (1, "17:35–18:05"): "Svømming Hans",         # Tuesday
+        (0, "17:15–18:45"): "Fotballtrening Astrid",  # Monday
+        (5, "10:30–12:00"): "Fotballtrening Astrid",  # Saturday
+        (1, "17:35–18:05"): "Svømming Astrid",         # Tuesday
     }
 
 
 def test_slot_with_meetup_parenthetical_parses():
     """Slot lines may carry a parenthetical between the time and the `—`
-    (e.g. `**Onsdager 17:30** (oppmøte 17:20) — Ekebergsletta`). Regression:
-    Einar's football slot was silently dropped from the wall agenda because
+    (e.g. `**Onsdager 17:30** (oppmøte 17:20) — Example Arena`). Regression:
+    Robin's football slot was silently dropped from the wall agenda because
     the regex required `**` directly before the dash."""
     md = """\
 ## Recurring weekly
 
-- **Fotballtrening Einar** (KFUM):
-  - **Onsdager 17:30** (oppmøte 17:20) — **Ekebergsletta**
+- **Fotballtrening Robin** (Example FK):
+  - **Onsdager 17:30** (oppmøte 17:20) — **Example Arena**
 """
     recs = data.parse_recurring_weekly(md)
     assert [(r["weekday"], r["time"], r["title"]) for r in recs] == [
-        (2, "17:30", "Fotballtrening Einar")
+        (2, "17:30", "Fotballtrening Robin")
     ]
 
 
@@ -64,8 +64,8 @@ def test_slot_with_start_date_is_suppressed_before(tmp_path, monkeypatch):
     md = """\
 ## Recurring weekly
 
-- **Svømming Hans** (Lambertseter svømmeklubb):
-  - **Torsdager 17:45** (fra 27.08) — Oppsal skole
+- **Svømming Astrid** (Example svømmeklubb):
+  - **Torsdager 17:45** (fra 27.08) — Eksempelskolen
 """
     cal = tmp_path / "CALENDAR.md"
     cal.write_text(md)
@@ -75,7 +75,7 @@ def test_slot_with_start_date_is_suppressed_before(tmp_path, monkeypatch):
     assert before[0]["events"] == []
     on = data.calendar_block(_dt.date(2026, 8, 27), days_ahead=0)      # tor 27.08
     assert [(e["time"], e["text"]) for e in on[0]["events"]] == [
-        ("17:45", "Svømming Hans")
+        ("17:45", "Svømming Astrid")
     ]
 
 
@@ -98,7 +98,7 @@ def test_calendar_block_shows_recurring_on_matching_weekday(tmp_path, monkeypatc
     tuesday = _dt.date(2026, 6, 2)  # a Tuesday
     block = data.calendar_block(tuesday, days_ahead=0)
     texts = {(ev["time"], ev["text"]) for ev in block[0]["events"]}
-    assert ("17:35–18:05", "Svømming Hans") in texts   # recurring Tuesday slot
+    assert ("17:35–18:05", "Svømming Astrid") in texts   # recurring Tuesday slot
     assert ("19:00", "Et engangsmøte") in texts         # one-off still present
 
 

@@ -62,7 +62,7 @@ def _load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
         "/usr/share/fonts/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        # Liberation / Noto — what baglernissen (Fedora) actually ships. Without
+        # Liberation / Noto — what the server (Fedora) actually ships. Without
         # one of these, the loop fell through to load_default(), a fixed ~8px
         # bitmap that ignores `size`, so every placeholder string came out
         # unreadably tiny on the wall regardless of the size we asked for.
