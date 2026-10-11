@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Semantic search over embedded mail.
+Semantic search over embedded messages (mail + signal/spond/vigilo).
 
     scripts/search_mail.py "examplefund utbetaling 2025"
     scripts/search_mail.py --k 20 --tier 1 "hans skolesvømming"
     scripts/search_mail.py --since 2025-01-01 "fakturaer fra strøm"
+    scripts/search_mail.py --source signal "pickup friday"
+    scripts/search_mail.py --source mail --source spond "trening"
 """
 from __future__ import annotations
 
@@ -14,7 +16,7 @@ import sys
 
 import psycopg
 
-from scripts.embed_mail import embed_query, vec_literal
+from scripts.embed_mail import QUERY_INSTRUCTION_GENERIC, embed_query, vec_literal
 
 PG_DSN = os.environ.get("PG_DSN", "dbname=mailvec")
 
@@ -22,8 +24,9 @@ PG_DSN = os.environ.get("PG_DSN", "dbname=mailvec")
 def embed(text: str) -> list[float]:
     """Query embedding via the same OpenAI-compatible endpoint + dim
     enforcement as the indexing pipeline (`scripts.embed_mail`).
-    Qwen3 requires its Instruct/Query prefix on the query side."""
-    return embed_query(text)
+    Qwen3 requires its Instruct/Query prefix on the query side; the generic
+    ("message passages") variant covers mail and the non-mail sources."""
+    return embed_query(text, QUERY_INSTRUCTION_GENERIC)
 
 
 def vec_lit(v):
@@ -38,6 +41,9 @@ def main(argv=None):
     ap.add_argument("--tier", type=int, choices=[1, 2, 3])
     ap.add_argument("--since")
     ap.add_argument("--from", dest="from_addr")
+    ap.add_argument("--source", action="append",
+                    choices=["mail", "signal", "spond", "vigilo"], default=None,
+                    help="Restrict to a source (repeatable; default: all).")
     ap.add_argument("--not-from", dest="not_from", action="append", default=[],
                     help="Exclude messages whose From matches this substring (repeatable).")
     ap.add_argument("--minus", action="append", default=[],
@@ -61,6 +67,9 @@ def main(argv=None):
     if args.tier:
         clauses.append(_sql.SQL("m.tier = %s"))
         params.append(args.tier)
+    if args.source:
+        clauses.append(_sql.SQL("m.source = ANY(%s)"))
+        params.append(args.source)
     if args.since:
         clauses.append(_sql.SQL("m.date >= %s"))
         params.append(args.since)
@@ -72,7 +81,7 @@ def main(argv=None):
         params.append(f"%{nf}%")
 
     query = _sql.SQL("""
-        SELECT m.date, m.from_addr, m.subject, m.message_id,
+        SELECT m.date, m.from_addr, m.subject, m.message_id, m.source,
                subvector(c.embedding, 1, 4000)::halfvec(4000) <=> subvector(%s::vector, 1, 4000)::halfvec(4000) AS dist,
                left(c.text, 240) AS snippet
         FROM chunks c JOIN messages m ON m.id = c.message_id
@@ -82,8 +91,8 @@ def main(argv=None):
     """).format(where_clause=_sql.SQL(" AND ").join(clauses))
     with psycopg.connect(PG_DSN) as conn, conn.cursor() as cur:
         cur.execute(query, [qv, *params, qv, args.k])
-        for date, frm, subj, mid, dist, snip in cur:
-            print(f"[{dist:.3f}] {date}  {frm}")
+        for date, frm, subj, mid, source, dist, snip in cur:
+            print(f"[{dist:.3f}] ({source}) {date}  {frm}")
             print(f"        {subj}")
             print(f"        id:{mid}")
             print(f"        {snip.strip()[:220]!r}")

@@ -12,8 +12,8 @@ uv run <entry-point> …
 uv run --project diary-scripts <entry-point> …
 ```
 
-Entry-point names: `mailshow`, `search-mail`, `embed-mail`, `archive-inbox`,
-`notmuch-sync-tags`, `spond-sync`, `spondshow`, `finance-ingest`,
+Entry-point names: `mailshow`, `search-mail`, `embed-mail`, `embed-messages`,
+`archive-inbox`, `notmuch-sync-tags`, `spond-sync`, `spondshow`, `finance-ingest`,
 `retire-calendar`, `sjekk-collect`, `kindle-dashboard`, `immich-recent`,
 `dsh-web-notify`. Server modules are
 invoked as `uv run python -m mail_reader.server` and
@@ -210,13 +210,22 @@ uv run search-mail --from astrid "ukeplan"
 # exclude a sender (substring, repeatable)
 uv run search-mail --not-from exampleconcrete "byggematerialer"
 
+# restrict to a source (repeatable; default searches mail + signal + spond
+# + vigilo — everything embed-messages indexes)
+uv run search-mail --source signal "henting fredag"
+uv run search-mail --source mail --source spond "trening"
+
 # semantic minus — subtract a concept (default --weight 0.3; 0.7+ breaks query)
 uv run search-mail --minus mikrosement "byggematerialer"
 uv run search-mail --weight 0.5 --minus dogs "animals"
 ```
 
-Each hit prints distance, date, sender, subject, `id:<message-id>`, and a
-240-char snippet. Pipe an `id:` into `uv run mailshow` for the full body.
+Each hit prints distance, a `(source)` tag, date, sender, subject,
+`id:<message-id>`, and a 240-char snippet. Pipe a mail `id:` into `uv run
+mailshow` for the full body (non-mail ids are synthesized —
+`signal:…`/`spond:…`/`vigilo:…` — and point back at the JSONL record, not
+notmuch). Queries use the generic qwen3 instruction prefix ("retrieve
+relevant message passages") since the store is cross-source.
 
 **Caveat — snippets can stitch chunks across attachments.** A single mail
 with multiple attachments produces chunks from each attachment under the
@@ -248,6 +257,9 @@ Schema lives in `migrations/`:
   or `Content-Disposition: attachment`) + `chunks.attachment_id` column.
   Body chunks have `attachment_id IS NULL`; attachment chunks reference the
   attachment.
+- `016_sources.sql` — `messages.source` (`'mail'` for everything pre-016;
+  `signal`/`spond`/`vigilo` for embed-messages rows) + `messages.content_hash`
+  (embed-messages' upsert key; NULL for immutable mail).
 
 **Tier definitions** (`messages.tier`, filterable in search):
 
@@ -305,8 +317,11 @@ emit NaN.
 `Instruct: …\nQuery: …` on the query side, junk micro-chunks (PDF
 extraction artifacts) outrank genuinely relevant content; with it the
 ranking inverts (verified 2026-08-03). `search_mail` uses
-`scripts.embed_mail.embed_query` (documents are indexed plain, and
-chunk-vs-chunk similarity in `related.py` stays plain too).
+`scripts.embed_mail.embed_query` with the cross-source
+`QUERY_INSTRUCTION_GENERIC` prefix ("message passages" — the store holds
+more than mail since 016); mail-only callers keep the default
+`QUERY_INSTRUCTION`. Documents are indexed plain, and chunk-vs-chunk
+similarity in `related.py` stays plain too.
 
 A full chunks/attachments rebuild (e.g. after an embedding-model switch)
 uses `--reembed`, which walks `messages` rows that have no chunks/
@@ -330,6 +345,56 @@ Env vars (defaults usually fine, real values from `config/local.toml` via
 `EMBED_QUERY_INSTRUCTION` (retrieval prefix; `ME_ADDRS=user@example.com`). Do **not** try to
 install `talon` — won't build on Python 3.14 (`cchardet` needs
 `longintrepr.h`, removed in 3.12+).
+
+### Embedding Signal/Spond/Vigilo — `embed-messages`
+
+`uv run embed-messages` indexes the three non-mail JSONL sinks into the
+same `mailvec` store (schema: `016_sources.sql`), so `search-mail` covers
+conversations too. Sources under `memory/`:
+
+- `signal/*.jsonl` — signal-capture records. `message_id =
+  signal:{ts}:{hash12}`; subject is the conversation label (group name or
+  peer); a reply quote folds in as a `> author: text` line. Attachment
+  blobs are read from the signal-cli store
+  (`~/.local/share/signal-cli/attachments/<id>`, override with
+  `$SIGNAL_CLI_ATTACHMENTS`) when the MIME type is text-extractable;
+  images/missing blobs stay metadata-only, same as mail.
+- `spond/*.jsonl` — `message_id = spond:{kind}:{id}`. Chat → name + newest
+  message; event → heading + description + location + start + RSVP counts
+  (`Cancelled` marked); post → title + body.
+- `vigilo/*.jsonl` — `message_id = vigilo:{kind}:{id}`
+  (`message`/`message_update` deliberately share `vigilo:message:{uid}` —
+  an update re-emits the whole thread and must upsert over the original,
+  not duplicate it). Thread kinds embed title + per-message
+  sender/time/body; news/consent embed title + body. Message attachments
+  resolve via the local path vigilo-sync recorded; news attachments are
+  metadata-only (they download over the API at show time).
+
+All rows get `tier = 0` and a `content_hash` (sha1 of assembled text +
+attachment texts). Upsert per record: no row → insert; same hash → skip
+(the common case on the 15-min full-history rescan); hash changed →
+`DELETE` (cascades chunks/attachments) + re-insert. Embedding batches
+across records with embed_mail's `BATCH_CHUNKS`/`BATCH_CHARS` caps, one
+transaction per record. Flags: `--source signal|spond|vigilo` (repeatable,
+default all), `--limit N` (per source), `--quiet` (silent on success,
+`!!` + exit 1 on failure — same contract as embed-mail).
+
+Scheduling: ship-ready systemd user pair `scripts/embed-messages.service`
++ `.timer` (`OnCalendar=*:3/15`, offset from mail-sync's `*:0/15`,
+`Persistent=true`). Install with
+`install -m644 scripts/embed-messages.{service,timer} ~/.config/systemd/user/`
+then `systemctl --user daemon-reload && systemctl --user enable --now
+embed-messages.timer`. First manual run backfills full history; idempotent
+by design.
+
+Per-source freshness (the sjekk health query):
+
+```sql
+SELECT source, now() - max(embedded_at) FROM messages GROUP BY source;
+```
+
+signal should track the JSONL tail closely; spond/vigilo only advance
+after their syncs run.
 
 ### Typechecking + tests
 

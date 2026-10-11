@@ -39,6 +39,8 @@ Env:
                         call — oversized calls corrupt llama-server, 2026-08-03)
     EMBED_QUERY_INSTRUCTION                               (query-side Instruct prefix;
                         default retrieval instruction, required by qwen3)
+    EMBED_QUERY_INSTRUCTION_GENERIC                       (cross-source variant used
+                        by search-mail: "message passages", not "email passages")
     ME_ADDRS            comma-separated; default: user@example.com
 
 Examples:
@@ -63,7 +65,7 @@ import time
 import urllib.request
 import zipfile
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from datetime import datetime, timedelta, timezone
 from email.policy import default as email_default
 from email.utils import parsedate_to_datetime
@@ -126,6 +128,12 @@ BATCH_CHARS = int(os.environ.get("EMBED_BATCH_CHARS", "6000"))
 QUERY_INSTRUCTION = os.environ.get(
     "EMBED_QUERY_INSTRUCTION",
     "Instruct: Given a search query, retrieve relevant email passages that "
+    "answer the query\nQuery: ")
+# Cross-source variant (mail + signal/spond/vigilo share the store since
+# migration 016): "message passages" instead of "email passages".
+QUERY_INSTRUCTION_GENERIC = os.environ.get(
+    "EMBED_QUERY_INSTRUCTION_GENERIC",
+    "Instruct: Given a search query, retrieve relevant message passages that "
     "answer the query\nQuery: ")
 
 # ---------- notmuch helpers ----------
@@ -288,6 +296,26 @@ def extract_docx(data: bytes) -> str:
 
 def extract_odt(data: bytes) -> str:
     return _extract_from_zip(data, "content.xml")
+
+def is_extractable_mime(mime: str) -> bool:
+    """MIME types extract_attachment_text can produce text from.
+
+    Lets callers skip reading a blob they would only throw away (a Signal
+    video attachment can be tens of MB; reading it to get '' back is waste).
+    >>> is_extractable_mime("application/pdf")
+    True
+    >>> is_extractable_mime("text/plain")
+    True
+    >>> is_extractable_mime("image/jpeg")
+    False
+    >>> is_extractable_mime("")
+    False
+    """
+    mime = (mime or "").lower()
+    return (mime.startswith("text/")
+            or mime in _PLAIN_TEXT_MIMES
+            or mime in {"application/pdf", _DOCX_MIME, _ODT_MIME,
+                        "application/ics"})
 
 def extract_attachment_text(mime: str, data: bytes) -> str:
     """
@@ -498,15 +526,18 @@ def _embed_group(texts: list[str]) -> list[list[float]]:
         fixed.append(v)
     return [_fit_dims(v) for v in fixed]
 
-def embed_query(text: str) -> list[float]:
+def embed_query(text: str, instruction: str = QUERY_INSTRUCTION) -> list[float]:
     """Query-side embedding with Qwen3-Embedding's instruction prefix.
 
     Without it the model ranks junk micro-chunks (control-char PDF
     extraction artifacts) above genuinely relevant content; with it the
     ranking inverts correctly (2026-08-03 verification). Documents are
     indexed plain — the prefix belongs to queries only, per the model's
-    training. Chunk-vs-chunk similarity (tankekart) also goes plain."""
-    return embed_batch([QUERY_INSTRUCTION + text])[0]
+    training. Chunk-vs-chunk similarity (tankekart) also goes plain.
+
+    `instruction` defaults to the mail-specific prefix; cross-source
+    search passes QUERY_INSTRUCTION_GENERIC instead."""
+    return embed_batch([instruction + text])[0]
 
 def vec_literal(v: list[float]) -> str:
     """
@@ -587,7 +618,7 @@ def _prepare_message(mid: str) -> MessagePayload | None:
 Slot = tuple[str, int] | tuple[str, int, int]   # ("body", ci) or ("att", ai, ci)
 
 
-def _embed_pending(batch: list[MessagePayload]) -> dict[int, dict[Slot, list[float]]]:
+def _embed_pending(batch: Sequence[MessagePayload]) -> dict[int, dict[Slot, list[float]]]:
     """Flatten every chunk in the batch, embed in one HTTP call, and map the
     vectors back to their (batch index, slot)."""
     flat: list[str] = []

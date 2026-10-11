@@ -1,0 +1,15 @@
+[Unit]
+Description=embed-messages (Signal/Spond/Vigilo JSONL -> mailvec pgvector)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/diary/diary-scripts
+Environment=DIARY_CONFIG=%h/diary/config/local.toml
+# Full-history rescan of memory/{signal,spond,vigilo}/*.jsonl each run;
+# idempotent via content_hash (skip on match, delete+reinsert on change).
+# --quiet: silent on success, `!!` stderr lines + nonzero exit on failure,
+# so the journal surfaces breakage. Separate from mail-sync so Signal embeds
+# aren't gated on mbsync.
+ExecStart=%h/.local/bin/uv run --frozen --no-sync embed-messages --quiet

@@ -1,0 +1,12 @@
+[Unit]
+Description=Run embed-messages.service every 15 minutes (offset from mail-sync)
+
+[Timer]
+# mail-sync.timer runs *:0/15; offset by 3 minutes so the two embed passes
+# don't hit the llama-server embedding endpoint in the same breath.
+# Persistent so a powered-off box catches up after boot.
+OnCalendar=*:3/15
+Persistent=true
+
+[Install]
+WantedBy=timers.target

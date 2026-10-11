@@ -17,6 +17,10 @@ If the open message isn't in `mailvec` yet (`embed_mail.py` runs every
 15 min — newest mail is often not indexed), the chunks mode falls back
 to live-embedding on the fly. The emergent mode requires existing tier-2
 theme rows and returns [] otherwise.
+
+The store also holds signal/spond/vigilo rows (embed-messages, migration
+016); both whole-store queries filter `m.source = 'mail'` — non-mail
+leaves would link nowhere in the mail UI.
 """
 from __future__ import annotations
 
@@ -119,6 +123,7 @@ def _branches_indexed(conn: psycopg.Connection, msg_row_id: int,
                 FROM chunks c
                 JOIN messages m ON m.id = c.message_id
                 WHERE c.attachment_id IS NULL
+                  AND m.source = 'mail'
                   AND m.id <> %s::bigint
                   AND (m.thread_id IS NULL
                        OR %s::text IS NULL
@@ -170,6 +175,7 @@ def _branches_live(conn: psycopg.Connection,
                 FROM chunks c
                 JOIN messages m ON m.id = c.message_id
                 WHERE c.attachment_id IS NULL
+                  AND m.source = 'mail'
                 GROUP BY m.id, m.message_id, m.date, m.from_addr, m.subject
                 ORDER BY dist ASC
                 LIMIT %s

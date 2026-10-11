@@ -31,6 +31,7 @@ dependencies = [
 mailshow          = "scripts.mailshow:main"
 search-mail       = "scripts.search_mail:main"
 embed-mail        = "scripts.embed_mail:main"
+embed-messages    = "scripts.embed_messages:main"
 archive-inbox     = "scripts.archive_inbox:main"
 notmuch-sync-tags = "scripts.notmuch_sync_tags:main"
 spond-sync        = "scripts.spond_sync:main"
