@@ -257,7 +257,9 @@ def token_request(
 
     Raises :class:`ConfigError` on ``invalid_client`` (wrong id/secret) and
     :class:`AuthExpiredError` on ``invalid_grant`` (expired / used / already
-    rotated) — both arrive as HTTP 400, so the ``error`` field decides.
+    rotated) — both arrive as HTTP 400, so the ``error`` field decides. Any
+    *unrecognised* error on a 400/401 is also :class:`ConfigError` (our bug,
+    named loudly), never a silent auth expiry.
     """
     client_id, client_secret = client_credentials()
     basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
@@ -272,13 +274,28 @@ def token_request(
         with contextlib.suppress(ValueError):
             error = str(r.json().get("error", ""))
         detail = f"HTTP {r.status_code} {error or r.text[:200]}"
+        # Branch on the ``error`` field, never the status alone — the token
+        # endpoint answers 400 for a bad secret *and* an expired grant.
         if error == "invalid_client":
             raise ConfigError(
                 "Vigilo rejected the client credentials (invalid_client) — check "
                 "vigilo/client-id and vigilo/client-secret in pass"
             )
-        if error in ("invalid_grant", "invalid_request") or r.status_code in (400, 401):
+        if error in ("invalid_grant", "invalid_request"):
+            # invalid_grant: expired / used / rotated-away grant — a dead
+            # login. invalid_request lands in the same bucket here: Duende
+            # uses it for grants it can no longer accept as given (e.g. an
+            # already-consumed code), and the remedy is identical — re-login.
             raise AuthExpiredError(f"token request refused: {detail}")
+        if r.status_code in (400, 401):
+            # Any OTHER error value is our bug (bad scope, wrong request
+            # shape), not an expired login — say its name, loudly, instead of
+            # quietly flagging auth_required and waiting for a re-login that
+            # fixes nothing.
+            raise ConfigError(
+                f"token endpoint answered an unrecognised error: {detail} — "
+                "treat as a config/code bug, NOT an expired login"
+            )
         raise ApiError(f"token request failed: {detail}")
     payload: dict[str, Any] = r.json()
     return payload

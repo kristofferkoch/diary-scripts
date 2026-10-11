@@ -221,6 +221,17 @@ def test_invalid_client_is_a_config_error_not_an_expired_login(creds: None):
         va.token_request({"grant_type": "refresh_token", "refresh_token": "x"}, transport=t)
 
 
+def test_an_unrecognised_token_error_is_a_config_error_not_an_expired_login(creds: None):
+    """Branch on `error`, not status: an unknown 400 (bad scope, changed
+    request shape) is our bug — naming it beats a re-login that fixes nothing."""
+    t = transport({"POST /connect/token": Resp(400, {"error": "invalid_scope"})})
+    with pytest.raises(ConfigError, match="invalid_scope"):
+        va.token_request({"grant_type": "refresh_token", "refresh_token": "x"}, transport=t)
+    t = transport({"POST /connect/token": Resp(401, {"error": "some_future_error"})})
+    with pytest.raises(ConfigError, match="some_future_error"):
+        va.token_request({"grant_type": "refresh_token", "refresh_token": "x"}, transport=t)
+
+
 def test_exchange_code_without_refresh_token_fails_loudly(creds: None):
     t = transport({"POST /connect/token": {"access_token": make_jwt(), "expires_in": 3600}})
     with pytest.raises(AuthExpiredError, match="offline_access"):

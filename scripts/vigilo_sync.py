@@ -20,7 +20,8 @@ Output: ``memory/vigilo/YYYY-MM-DD.jsonl``, one record per line::
 sender/time/body, attachment refs) rather than raw: the raw thread carries
 pre-signed Azure Blob URLs that expire in ~6 h, and persisting those would put
 a usable URL for someone else's school documents into a git-tracked file.
-Attachments are downloaded next run… immediately — to
+Attachments are downloaded immediately — in the same run that fetches the
+thread detail, because the SAS URLs expire in ~6 h — to
 ``memory/vigilo/attachments/<threadUid>/<name>``, which is git-ignored.
 
 State: ``memory/vigilo-state.json``::
@@ -82,6 +83,11 @@ VALID_KINDS = {"message", "message_update", "news", "consent"}
 PAGE_SIZE = 100
 ATTACH_RETRY_BUDGET = 3
 NEWS_WINDOW_DAYS = 30
+# Cap on per-post detail fetches when the feed doesn't inline attachments:
+# without it, the first sync after a long silence fires one extra request
+# per post in the window. Beyond the cap the ids/names stay empty and the
+# reader just shows the header.
+NEWS_DETAIL_FETCH_CAP = 200
 
 _UNSAFE = re.compile(r"[^\w.()\[\]-]+")
 
@@ -355,7 +361,7 @@ def fetch_news(api: VigiloApi, state: dict[str, Any], out: list[dict[str, Any]],
                     if isinstance(a, dict)
                 ],
             }
-            if not data["attachments"] and len(seen) < 200:
+            if not data["attachments"] and len(seen) < NEWS_DETAIL_FETCH_CAP:
                 try:
                     detail = api.post(str(pid))
                     data["attachments"] = [

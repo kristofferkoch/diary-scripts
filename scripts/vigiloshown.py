@@ -85,7 +85,7 @@ def save_state(state: dict[str, Any]) -> None:
 
 def iter_records(since: datetime | None, until: datetime | None, kinds: set[str] | None,
                  child: str | None) -> Iterator[dict[str, Any]]:
-    """Stream JSONL records, newest-file-first like the other readers."""
+    """Stream JSONL records, oldest file first (``sorted`` on the date names)."""
     if not JSONL_DIR.exists():
         return
     for fp in sorted(JSONL_DIR.glob("*.jsonl")):
@@ -347,7 +347,12 @@ def main(argv: list[str] | None = None) -> int:
             since = parse_iso(str(raw))
             print(f"(cursor: {since.isoformat()})", file=sys.stderr)
         else:
-            print("(no cursor yet — showing everything; --bump to set it)",
+            # Line shape is load-bearing: sjekk_collect forgives exit 1 only
+            # when every output line matches its "(cursor: …)" /
+            # "(no matching …)" quiet-track pattern — a first run before any
+            # --bump (or before the first login) must read as a quiet track,
+            # not a FAILED one.
+            print("(cursor: none yet — showing everything; --bump to set it)",
                   file=sys.stderr)
     elif args.since:
         since = parse_iso(args.since)

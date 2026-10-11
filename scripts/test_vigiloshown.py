@@ -280,7 +280,30 @@ def test_bump_advances_the_cursor_and_the_next_read_is_empty(workspace: dict[str
 def test_missing_state_file_is_not_an_error(workspace: dict[str, Path], capsys):
     write_records(workspace, message_record())
     assert vw.main(["--since-cursor", "--headers-only"]) == 0
-    assert "no cursor yet" in capsys.readouterr().err
+    assert "cursor: none yet" in capsys.readouterr().err
+
+
+def test_empty_and_no_cursor_is_a_forgiven_quiet_track(workspace: dict[str, Path], capsys):
+    """Before the first login (or first --bump) there is no state and nothing
+    to show — sjekk_collect must read that as a quiet track, not FAILED."""
+    from scripts.sjekk_collect import _is_nothing_new
+
+    assert vw.main(["--since-cursor", "--headers-only"]) == 1
+    quiet = capsys.readouterr()
+    assert _is_nothing_new(quiet.out + quiet.err), (
+        "every line must match sjekk_collect's (cursor: …)/(no matching …) shape"
+    )
+
+
+def test_auth_required_with_no_records_stays_loud(workspace: dict[str, Path], capsys):
+    """The opposite case: a dead login must surface as FAILED in the bundle."""
+    from scripts.sjekk_collect import _is_nothing_new
+
+    workspace["state"].write_text(json.dumps({"auth_required": True}))
+    assert vw.main(["--since-cursor", "--headers-only"]) == 1
+    loud = capsys.readouterr()
+    assert "VIGILO AUTH REQUIRED" in loud.err
+    assert not _is_nothing_new(loud.out + loud.err)
 
 
 def test_expired_auth_shouts_before_anything_else(workspace: dict[str, Path], capsys):
