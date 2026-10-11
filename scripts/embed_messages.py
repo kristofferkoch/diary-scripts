@@ -89,13 +89,20 @@ def _content_hash(text: str, attachments: list[AttachmentPayload]) -> str:
     """Stable hash over everything that ends up embedded for this record.
 
     A changed body OR a newly extracted attachment text flips the hash and
-    triggers the delete + re-insert upsert path.
+    triggers the delete + re-insert upsert path. Parts are length-prefixed
+    into one digest, so the concatenation stays unambiguous even if a body
+    or filename contains the separator byte.
     """
     parts = [text]
     for a in attachments:
         parts.append(a["filename"])
         parts.extend(a["chunks"])
-    return _sha1("\x00".join(parts))
+    h = hashlib.sha1()
+    for part in parts:
+        b = part.encode("utf-8")
+        h.update(len(b).to_bytes(8, "big"))
+        h.update(b)
+    return h.hexdigest()
 
 
 def _payload(source: str, mid: str, *, date: str | None, from_addr: str,
@@ -469,23 +476,41 @@ def process(conn: psycopg.Connection, source: str, limit: int | None,
     Returns (done, skipped, failed)."""
     builder = BUILDERS[source]
     done = skipped = failed = replaced = 0
-    pending: list[SourcePayload] = []
+    # Pending payloads keyed by mid: one message_id can appear several times
+    # in the JSONL history (spond re-emits on RSVP change, vigilo
+    # message_update re-emits the whole thread), and files iterate oldest
+    # first, so the LAST sighting is the newest version. Without this, a
+    # stale sighting would DELETE the current row while both versions sat in
+    # the batch and collided on the UNIQUE constraint at flush time.
+    pending: dict[str, SourcePayload] = {}
     pending_chunks = 0
+    seen: dict[str, str] = {}   # mid -> content_hash of newest sighting so far
     t0 = time.time()
 
+    def chunk_count(p: SourcePayload) -> int:
+        return (len(p["body_chunks"])
+                + sum(len(a["chunks"]) for a in p["attachments"]))
+
+    def delete_row(mid: str) -> None:
+        # DELETE cascades chunks/attachments; the re-insert rebuilds them.
+        # If the run dies in between, the next one sees no row and inserts
+        # fresh — resumable either way.
+        with conn.cursor() as cur, conn.transaction():
+            cur.execute("DELETE FROM messages WHERE message_id = %s", (mid,))
+
     def flush() -> None:
-        nonlocal done, failed, pending, pending_chunks
+        nonlocal done, failed, pending_chunks
         if not pending:
             return
         try:
-            d, f = _flush_batch(conn, pending, verbose)
+            d, f = _flush_batch(conn, list(pending.values()), verbose)
             done += d
             failed += f
         except Exception as e:
             failed += len(pending)
             print(f"  !! batch embed failed ({len(pending)} records): {e}",
                   file=sys.stderr)
-        pending = []
+        pending.clear()
         pending_chunks = 0
 
     for n, rec in enumerate(iter_records(source, verbose), 1):
@@ -500,25 +525,39 @@ def process(conn: psycopg.Connection, source: str, limit: int | None,
         if payload is None:
             skipped += 1
             continue
+        mid = payload["mid"]
+        if mid in seen:
+            if seen[mid] == payload["content_hash"]:
+                skipped += 1
+                continue
+            # A newer version of an already-handled mid — it always wins.
+            seen[mid] = payload["content_hash"]
+            if mid in pending:
+                # Still queued: swap the payload, no extra DB work.
+                pending_chunks += chunk_count(payload) - chunk_count(pending[mid])
+                pending[mid] = payload
+            else:
+                # The earlier sighting matched the stored row (or flushed
+                # already); this one differs, so rebuild the row after all.
+                delete_row(mid)
+                replaced += 1
+                pending[mid] = payload
+                pending_chunks += chunk_count(payload)
+            continue
+        seen[mid] = payload["content_hash"]
         with conn.cursor() as cur:
             cur.execute("SELECT content_hash FROM messages WHERE message_id = %s",
-                        (payload["mid"],))
+                        (mid,))
             row = cur.fetchone()
         action = decide(row[0] if row else None, payload["content_hash"])
         if action == "skip":
             skipped += 1
             continue
         if action == "replace":
-            # DELETE cascades chunks/attachments; the re-insert below rebuilds
-            # them. If the run dies in between, the next one sees no row and
-            # inserts fresh — resumable either way.
-            with conn.cursor() as cur, conn.transaction():
-                cur.execute("DELETE FROM messages WHERE message_id = %s",
-                            (payload["mid"],))
+            delete_row(mid)
             replaced += 1
-        pending.append(payload)
-        pending_chunks += (len(payload["body_chunks"])
-                           + sum(len(a["chunks"]) for a in payload["attachments"]))
+        pending[mid] = payload
+        pending_chunks += chunk_count(payload)
         if pending_chunks >= BATCH_CHUNKS:
             flush()
 

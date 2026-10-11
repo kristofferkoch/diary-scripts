@@ -1,6 +1,11 @@
 """Tests for embed_messages.py. Run with `uv run pytest scripts/`."""
 from __future__ import annotations
 
+import contextlib
+from typing import Any, cast
+
+import psycopg
+
 from scripts.embed_mail import AttachmentPayload
 from scripts.embed_messages import (
     SourcePayload,
@@ -326,3 +331,133 @@ class TestDecide:
 
     def test_replace_on_different_hash(self):
         assert decide("old", "abc") == "replace"
+
+
+# ---------- process-level upsert (multi-version records in one scan) ----------
+
+class _FakeDb:
+    """In-memory stand-in for the messages table, enforcing the
+    message_id UNIQUE constraint like Postgres does."""
+    def __init__(self, hashes: dict[str, str] | None = None):
+        self.hashes = dict(hashes or {})   # message_id -> content_hash
+        self.next_id = 0
+
+
+class _FakeCursor:
+    def __init__(self, db: _FakeDb):
+        self.db = db
+        self._row: tuple | None = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params: tuple[Any, ...] = ()):
+        s = " ".join(str(sql).split())
+        if s.startswith("SELECT content_hash"):
+            h = self.db.hashes.get(params[0])
+            self._row = (h,) if h is not None else None
+        elif s.startswith("DELETE FROM messages"):
+            self.db.hashes.pop(params[0], None)
+        elif s.startswith("INSERT INTO messages"):
+            mid, content_hash = params[0], params[-1]
+            if mid in self.db.hashes:
+                raise psycopg.errors.UniqueViolation(
+                    f'duplicate key value violates unique constraint ({mid})')
+            self.db.next_id += 1
+            self.db.hashes[mid] = content_hash
+            self._row = (self.db.next_id,)
+        elif s.startswith("INSERT INTO attachments"):
+            self._row = (1,)
+        # chunk inserts: no-op
+
+    def fetchone(self):
+        return self._row
+
+
+class _FakeConn:
+    def __init__(self, db: _FakeDb):
+        self.db = db
+
+    def cursor(self):
+        return _FakeCursor(self.db)
+
+    def transaction(self):
+        return contextlib.nullcontext()
+
+
+def _spond_event(responses: dict) -> dict:
+    return {"kind": "event", "fetched_at": "2026-05-26T11:30:00Z",
+            "data": {"id": "e1", "heading": "Training",
+                     "startTimestamp": "2026-05-30T08:30:00Z",
+                     "responses": responses}}
+
+
+def _fake_embed_pending(batch):
+    return {mi: {("body", ci): [0.1, 0.2]
+                 for ci in range(len(p["body_chunks"]))}
+            for mi, p in enumerate(batch)}
+
+
+class TestProcessMultiVersion:
+    """Regression: two versions of one message_id in the JSONL history must
+    embed the newest version exactly once — never DELETE the current row and
+    then collide on the UNIQUE constraint at flush time."""
+
+    def _run(self, monkeypatch, db: _FakeDb, records: list[dict]):
+        from scripts.embed_messages import process
+        monkeypatch.setattr("scripts.embed_messages.iter_records",
+                            lambda source, verbose: iter(records))
+        monkeypatch.setattr("scripts.embed_messages._embed_pending",
+                            _fake_embed_pending)
+        return process(cast(Any, _FakeConn(db)), "spond", None, False)
+
+    def test_stale_sighting_does_not_clobber_newer_db_row(self, monkeypatch):
+        v1 = _spond_event({"unansweredIds": ["A"]})   # older file
+        v2 = _spond_event({"acceptedIds": ["A"]})     # newer file
+        v2_hash = _must(spond_payload(v2))["content_hash"]
+        db = _FakeDb({"spond:event:e1": v2_hash})     # DB already has v2
+        done, skipped, failed = self._run(monkeypatch, db, [v1, v2])
+        assert failed == 0
+        assert done == 1      # embedded exactly once
+        assert db.hashes["spond:event:e1"] == v2_hash   # newest version won
+
+    def test_skip_then_newer_version_replaces(self, monkeypatch):
+        v1 = _spond_event({"unansweredIds": ["A"]})
+        v2 = _spond_event({"acceptedIds": ["A"]})
+        v1_hash = _must(spond_payload(v1))["content_hash"]
+        db = _FakeDb({"spond:event:e1": v1_hash})     # DB has the old version
+        done, skipped, failed = self._run(monkeypatch, db, [v1, v2])
+        assert failed == 0
+        assert done == 1
+        assert skipped == 1   # v1 matched the DB row
+        assert db.hashes["spond:event:e1"] == _must(spond_payload(v2))["content_hash"]
+
+    def test_identical_reemission_embeds_once(self, monkeypatch):
+        v1 = _spond_event({"unansweredIds": ["A"]})
+        db = _FakeDb()
+        done, skipped, failed = self._run(monkeypatch, db, [v1, v1])
+        assert failed == 0
+        assert done == 1
+        assert skipped == 1
+        assert db.hashes["spond:event:e1"] == _must(spond_payload(v1))["content_hash"]
+
+    def test_flush_straddle_still_newest_wins(self, monkeypatch):
+        # Versions separated by a batch flush: v1 flushes (inserted), then
+        # v2 arrives — it must delete the just-inserted v1 and take its
+        # place, not fail on the constraint.
+        v1 = _spond_event({"unansweredIds": ["A"]})
+        v2 = _spond_event({"acceptedIds": ["A"]})
+        other = {"kind": "post", "fetched_at": "f",
+                 "data": {"id": "p1", "title": "Info night",
+                          "body": "Thursday at 18:00"}}
+        db = _FakeDb()
+        monkeypatch.setattr("scripts.embed_messages.BATCH_CHUNKS", 1)
+        done, skipped, failed = self._run(monkeypatch, db, [v1, other, v2])
+        assert failed == 0
+        # v1 is flushed (inserted) before v2 arrives, so v2 costs a
+        # delete + re-insert — three writes total, but the newest wins.
+        assert done == 3
+        assert db.hashes["spond:event:e1"] == _must(spond_payload(v2))["content_hash"]

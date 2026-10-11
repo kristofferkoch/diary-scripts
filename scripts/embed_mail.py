@@ -302,20 +302,21 @@ def is_extractable_mime(mime: str) -> bool:
 
     Lets callers skip reading a blob they would only throw away (a Signal
     video attachment can be tens of MB; reading it to get '' back is waste).
+    Mirrors extract_attachment_text's dispatch exactly — keep them in sync.
     >>> is_extractable_mime("application/pdf")
     True
     >>> is_extractable_mime("text/plain")
     True
+    >>> is_extractable_mime("text/x-weird")
+    False
     >>> is_extractable_mime("image/jpeg")
     False
     >>> is_extractable_mime("")
     False
     """
     mime = (mime or "").lower()
-    return (mime.startswith("text/")
-            or mime in _PLAIN_TEXT_MIMES
-            or mime in {"application/pdf", _DOCX_MIME, _ODT_MIME,
-                        "application/ics"})
+    return mime in (_PLAIN_TEXT_MIMES
+                    | {"application/pdf", _DOCX_MIME, _ODT_MIME, "text/html"})
 
 def extract_attachment_text(mime: str, data: bytes) -> str:
     """
