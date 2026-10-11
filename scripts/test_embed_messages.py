@@ -341,6 +341,8 @@ class _FakeDb:
     def __init__(self, hashes: dict[str, str] | None = None):
         self.hashes = dict(hashes or {})   # message_id -> content_hash
         self.next_id = 0
+        self.deletes: list[str] = []
+        self.inserts: list[str] = []
 
 
 class _FakeCursor:
@@ -360,6 +362,7 @@ class _FakeCursor:
             h = self.db.hashes.get(params[0])
             self._row = (h,) if h is not None else None
         elif s.startswith("DELETE FROM messages"):
+            self.db.deletes.append(params[0])
             self.db.hashes.pop(params[0], None)
         elif s.startswith("INSERT INTO messages"):
             mid, content_hash = params[0], params[-1]
@@ -368,6 +371,7 @@ class _FakeCursor:
                     f'duplicate key value violates unique constraint ({mid})')
             self.db.next_id += 1
             self.db.hashes[mid] = content_hash
+            self.db.inserts.append(mid)
             self._row = (self.db.next_id,)
         elif s.startswith("INSERT INTO attachments"):
             self._row = (1,)
@@ -402,9 +406,11 @@ def _fake_embed_pending(batch):
 
 
 class TestProcessMultiVersion:
-    """Regression: two versions of one message_id in the JSONL history must
-    embed the newest version exactly once — never DELETE the current row and
-    then collide on the UNIQUE constraint at flush time."""
+    """Regression: when the JSONL history holds several versions of one
+    message_id, the decide must run against the NEWEST version only —
+    otherwise a stale sighting DELETEs + re-inserts the current row on
+    every single run (observed live: done=94 replaced=94 for spond on a
+    fully backfilled DB)."""
 
     def _run(self, monkeypatch, db: _FakeDb, records: list[dict]):
         from scripts.embed_messages import process
@@ -414,17 +420,20 @@ class TestProcessMultiVersion:
                             _fake_embed_pending)
         return process(cast(Any, _FakeConn(db)), "spond", None, False)
 
-    def test_stale_sighting_does_not_clobber_newer_db_row(self, monkeypatch):
+    def test_newest_version_matching_db_is_a_pure_skip(self, monkeypatch):
+        # The live scenario: DB is fully backfilled (holds v2), the rescan
+        # sees v1 (older file) then v2. Zero writes, one skip.
         v1 = _spond_event({"unansweredIds": ["A"]})   # older file
         v2 = _spond_event({"acceptedIds": ["A"]})     # newer file
         v2_hash = _must(spond_payload(v2))["content_hash"]
         db = _FakeDb({"spond:event:e1": v2_hash})     # DB already has v2
         done, skipped, failed = self._run(monkeypatch, db, [v1, v2])
-        assert failed == 0
-        assert done == 1      # embedded exactly once
-        assert db.hashes["spond:event:e1"] == v2_hash   # newest version won
+        assert (done, failed) == (0, 0)
+        assert skipped == 1
+        assert db.deletes == [] and db.inserts == []
+        assert db.hashes["spond:event:e1"] == v2_hash
 
-    def test_skip_then_newer_version_replaces(self, monkeypatch):
+    def test_older_db_row_replaced_once_by_newest(self, monkeypatch):
         v1 = _spond_event({"unansweredIds": ["A"]})
         v2 = _spond_event({"acceptedIds": ["A"]})
         v1_hash = _must(spond_payload(v1))["content_hash"]
@@ -432,7 +441,8 @@ class TestProcessMultiVersion:
         done, skipped, failed = self._run(monkeypatch, db, [v1, v2])
         assert failed == 0
         assert done == 1
-        assert skipped == 1   # v1 matched the DB row
+        assert db.deletes == ["spond:event:e1"]       # replaced exactly once
+        assert db.inserts == ["spond:event:e1"]
         assert db.hashes["spond:event:e1"] == _must(spond_payload(v2))["content_hash"]
 
     def test_identical_reemission_embeds_once(self, monkeypatch):
@@ -441,13 +451,12 @@ class TestProcessMultiVersion:
         done, skipped, failed = self._run(monkeypatch, db, [v1, v1])
         assert failed == 0
         assert done == 1
-        assert skipped == 1
+        assert db.inserts == ["spond:event:e1"]
         assert db.hashes["spond:event:e1"] == _must(spond_payload(v1))["content_hash"]
 
     def test_flush_straddle_still_newest_wins(self, monkeypatch):
-        # Versions separated by a batch flush: v1 flushes (inserted), then
-        # v2 arrives — it must delete the just-inserted v1 and take its
-        # place, not fail on the constraint.
+        # Tiny batches force flushes between records; pre-grouping by mid
+        # means the stale version never reaches the queue at all.
         v1 = _spond_event({"unansweredIds": ["A"]})
         v2 = _spond_event({"acceptedIds": ["A"]})
         other = {"kind": "post", "fetched_at": "f",
@@ -457,7 +466,7 @@ class TestProcessMultiVersion:
         monkeypatch.setattr("scripts.embed_messages.BATCH_CHUNKS", 1)
         done, skipped, failed = self._run(monkeypatch, db, [v1, other, v2])
         assert failed == 0
-        # v1 is flushed (inserted) before v2 arrives, so v2 costs a
-        # delete + re-insert — three writes total, but the newest wins.
-        assert done == 3
+        assert done == 2      # event + post, each exactly once
+        assert sorted(db.inserts) == ["spond:event:e1", "spond:post:p1"]
+        assert db.deletes == []
         assert db.hashes["spond:event:e1"] == _must(spond_payload(v2))["content_hash"]
