@@ -157,3 +157,11 @@ def nuextract_url() -> str:
 def immich_url() -> str:
     """Immich photo server API base, e.g. ``http://server:2283``."""
     return _host_url("IMMICH_URL", "hosts.immich", "server:2283")
+
+
+def dsh_web_url() -> str:
+    """Public base URL of the dsh web UI (behind the Caddy tailnet proxy),
+    e.g. ``https://server:8444``. Full URL incl. scheme, unlike the
+    ``host:port`` keys above."""
+    return (os.environ.get("DSH_WEB_URL")
+            or cfg("hosts.dsh_web", "https://server:8444")).rstrip("/")
