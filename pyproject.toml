@@ -8,7 +8,6 @@ dependencies = [
     "mail-parser-reply>=1.0",
     # mail_reader webapp
     "fastapi>=0.115",
-    "python-multipart>=0.0.9",  # multipart/form-data for the /notes/ photo upload
     "uvicorn[standard]>=0.32",
     "jinja2>=3.1",
     "nh3>=0.2",
@@ -37,8 +36,7 @@ signal-capture    = "scripts.signal_capture:main"
 signalshow        = "scripts.signalshow:main"
 finance-ingest    = "scripts.finance_ingest:main"
 retire-calendar   = "scripts.retire_calendar:main"
-notes             = "scripts.notes:main"
-shopping          = "scripts.shopping:main"
+sjekk-collect     = "scripts.sjekk_collect:main"
 kindle-dashboard  = "scripts.kindle_dashboard.serve:main"
 immich-recent     = "scripts.immich_recent:main"
 

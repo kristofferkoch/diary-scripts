@@ -1,6 +1,6 @@
 # diary-scripts
 
-Personal mail/calendar/notes automation tooling, extracted from a private
+Personal mail/calendar automation tooling, extracted from a private
 long-term-memory workspace and published as a reference for anyone building
 similar local-first plumbing on top of [notmuch](https://notmuchmail.org/),
 Postgres + [pgvector](https://github.com/pgvector/pgvector), and a local LLM.
@@ -19,8 +19,8 @@ Postgres + [pgvector](https://github.com/pgvector/pgvector), and a local LLM.
 
 | Path | What it is |
 |------|------------|
-| `scripts/` | CLI helpers: mail embedding pipeline, notmuch tag sync, inbox auto-archive, mail/Spond viewers, calendar retirement, notes & shopping queues, a per-mail GitHub-PR composer, and the Kindle wall-dashboard generator. Start at [`scripts/README.md`](scripts/README.md). |
-| `mail_reader/` | A FastAPI web app: inbox summaries, structured extraction, agenda/calendar views, a notes capture page, and priority scoring. See [`mail_reader/DESIGN.md`](mail_reader/DESIGN.md) and [`mail_reader/IDEAS.md`](mail_reader/IDEAS.md). |
+| `scripts/` | CLI helpers: mail embedding pipeline, notmuch tag sync, inbox auto-archive, mail/Spond/Signal viewers, calendar retirement, the sjekk collector, a per-mail GitHub-PR composer, and the Kindle wall-dashboard generator. Start at [`scripts/README.md`](scripts/README.md). |
+| `mail_reader/` | A FastAPI web app: inbox summaries, structured extraction, agenda/calendar views, and priority scoring. See [`mail_reader/DESIGN.md`](mail_reader/DESIGN.md) and [`mail_reader/IDEAS.md`](mail_reader/IDEAS.md). |
 | `migrations/` | Postgres schema (pgvector, attachments, summaries, queues, notes, shopping). |
 | `pyproject.toml` / `uv.lock` | The [uv](https://docs.astral.sh/uv/) project that ties it together. Includes `[build-system]` (hatchling) and `[project.scripts]` console entry points. |
 
@@ -33,8 +33,7 @@ than by path:
 
 ```bash
 uv run mailshow                        # view a mail message
-uv run notes                           # notes queue
-uv run shopping                        # shopping list
+uv run sjekk-collect                   # parallel sjekk collector (mail/Spond/Signal/health)
 uv run search-mail                     # full-text / semantic mail search
 uv run embed-mail                      # embed new messages into pgvector
 uv run archive-inbox                   # auto-archive processed inbox
@@ -45,7 +44,7 @@ uv run finance-ingest                  # ingest bank/finance exports
 uv run retire-calendar                 # retire past calendar entries
 uv run kindle-dashboard                # regenerate Kindle wall display
 uv run python -m mail_reader.server    # start the FastAPI web app
-uv run pytest scripts/ mail_reader/   # the test suite (486 tests, all green)
+uv run pytest scripts/ mail_reader/   # the test suite (356 tests, all green)
 ```
 
 **Configuration.** The code reads real deployment values from a private TOML

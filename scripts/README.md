@@ -14,7 +14,7 @@ uv run --project diary-scripts <entry-point> …
 
 Entry-point names: `mailshow`, `search-mail`, `embed-mail`, `archive-inbox`,
 `notmuch-sync-tags`, `spond-sync`, `spondshow`, `finance-ingest`,
-`retire-calendar`, `notes`, `shopping`, `kindle-dashboard`. Server modules are
+`retire-calendar`, `sjekk-collect`, `kindle-dashboard`. Server modules are
 invoked as `uv run python -m mail_reader.server` and
 `uv run python -m scripts.kindle_dashboard.serve`.
 
@@ -33,6 +33,56 @@ config `paths.project`) — not by walking `__file__`.
 > **`scripts/` is a stopgap name.** Once we add scripts that aren't
 > mail-related, this whole folder will get split by subsystem (e.g.
 > `mail/`, …). Don't write naming around the current layout.
+
+---
+
+## Sjekk collector — `sjekk_collect.py`
+
+Every **sjekk** opens with this: it front-loads the mechanical half of all
+the per-track SOPs below into one parallel run.
+
+```bash
+uv run sjekk-collect                 # freshness check + collect
+uv run sjekk-collect --force-sync    # always restart mail-sync first
+uv run sjekk-collect --no-sync       # skip the freshness phase
+uv run sjekk-collect --timeout 60    # per-command cap (default 120 s)
+```
+
+**Phase A — freshness (parallel):** checks when `mail-sync.service` last
+ran (`systemctl --user show mail-sync.service -p ExecMainExitTimestamp
+--value`); if older than ~15 min (or `--force-sync`), the unit is started
+and awaited (300 s cap) before any mail is read. In parallel,
+`spond-sync --once` fetches new Spond activity (idempotent, auto-bumps its
+own cursor).
+
+**Phase B — collect (parallel):** one output file per track, written to
+`memory/sjekk/<UTC-timestamp>/` with a `latest` symlink repointed at the
+new run:
+
+| file | command |
+|---|---|
+| `mail.txt` | `mailshow --since-cursor --headers-only` |
+| `spond.txt` | `spondshow --since-cursor --headers-only` |
+| `spond-events.txt` | `spondshow --kind event --future --headers-only` |
+| `signal.txt` | `signalshow --since-cursor --headers-only` (cursor bump stays agent-side) |
+| `calendar-retire.txt` | `retire-calendar` (real run — idempotent; moved lines captured for enrichment) |
+| `backup-health.txt` | `systemctl show restic-backup.service -p Result -p ExecMainExitTimestamp --value` |
+| `embed-health.txt` | `psql -d mailvec -t -c "SELECT now() - max(embedded_at) FROM messages;"` |
+| `services.txt` | `systemctl --user is-active signal-capture.service` + mail-sync timestamp |
+
+Each command has its own timeout; a failure or timeout never aborts the
+run — the track's file keeps whatever partial output arrived plus a
+`!! FAILED (exit N)` / `!! TIMEOUT` marker. `INDEX.md` in the run dir has
+one line per track (size / EMPTY / failure marker) — **read INDEX first,
+open only files with content.**
+
+`memory/sjekk/` is git-ignored in the diary repo (mail/signal content —
+same treatment as `memory/signal/`).
+
+Stays agent-side (the collector deliberately does none of this): cursor
+bumps (`memory/mail-state.json`, `signalshow --bump`), calendar
+enrichment, daily-note / topic-file filing, receipt digesting into
+`RECEIPTS.md`.
 
 ---
 
@@ -78,6 +128,10 @@ The cursor `memory/mail-state.json` → `last_successful_run` is the start
 point. It's **hand-maintained** and easy to forget — the cursor has
 drifted multiple times because earlier passes wrote the daily note but
 never bumped the JSON.
+
+In a sjekk, `sjekk-collect` has already done step 0 (freshness check +
+conditional sync) and produced `memory/sjekk/latest/mail.txt` (step 1's
+output) — read that file instead of re-running.
 
 0. **Check when mail last synced — FIRST.** Before reading the cursor,
    confirm the local index is current, otherwise you triage a stale
@@ -412,6 +466,9 @@ last time we wrote a digest".
    Prints a one-line `new records: total=N, by_kind={...}` summary on
    stderr; appends new records to `memory/spond/YYYY-MM-DD.jsonl`.
    Idempotent — re-running with no new activity is a no-op.
+   (In a sjekk, `sjekk-collect` already ran this in Phase A, and its
+   Phase B produced `memory/sjekk/latest/spond.txt` — step 2's output —
+   and `spond-events.txt` — step 2b's output.)
 2. **Triage new records** — `uv run spondshow --since-cursor
    --headers-only` for a one-line summary per record; drop
    `--headers-only` to see full JSON bodies. Filter with `--kind
@@ -482,6 +539,8 @@ lost a whole conversation on 2026-06-07).
 1. `uv run signalshow --since-cursor --headers-only` — one line per new
    message (`ISO  ←/→  peer  sender: text`). Filter with `--from <name>`,
    `--with <peer>` (whole thread incl. your replies), `--group`/`--no-group`.
+   (In a sjekk, `sjekk-collect` already produced this listing at
+   `memory/sjekk/latest/signal.txt` — read that file.)
 2. Triage substantive messages as first-class sjekk input (same weight as
    mail/Spond) — surface anything actionable, file durable facts to the
    right topic file. The threshold is fuzzy; the line is roughly **"would
@@ -498,10 +557,17 @@ lost a whole conversation on 2026-06-07).
 
    **Note to Self is a first-class capture channel.** The user's own
    Signal *Note to Self* messages (peer == self) are deliberate captured
-   reminders — treat them exactly like a `/notes/` queue item: act on each
-   one, then file/route it. The user finds Note to Self easier than the
-   custom notes page, so expect real reminders to arrive here; never skip
-   a self-note as "noise."
+   reminders — act on each one, then file/route it; never skip a
+   self-note as "noise." (This channel replaced the retired `/notes/`
+   web capture page in 2026-10.)
+
+   **Receipt photos arrive here too.** The user photographs paper
+   receipts straight into Note to Self, where they show up in the
+   `signalshow` triage as image attachments. Handle them like finance
+   Route A (below): the JSONL record carries attachment metadata only —
+   pull the on-disk blob from
+   `~/.local/share/signal-cli/attachments/<id>`, view it, and digest it
+   into `RECEIPTS.md` (date, vendor, amount, what it was for).
 
    **Do NOT mention insignificant messages at all** — real-time
    coordination ("kom hit litt", "ja"), greetings, acknowledgements,
@@ -521,105 +587,14 @@ signal-capture`. Setup/rebuild of the underlying mirror:
 
 ---
 
-## Notes queue — `notes.py`
+## Retired: notes queue & shopping list
 
-Part of the daily **sjekk-flow**. The `/notes/` page on server
-(`https://server.example.ts.net/mail/notes/`, reachable from the
-"Notater" topbar link) is a capture inbox: the user types free-text
-reminders — "things I don't want to forget" — into a textarea and they
-land in the `notes_queue` Postgres table (migration
-`migrations/011_notes_queue.sql`). The page lists pending notes
-newest-first with inline **edit** and **delete**. The webapp side is
-`mail_reader/notes.py` (CRUD) + routes in `mail_reader/server.py`.
-
-**Photo notes.** The capture form also takes a picture (`<input
-type=file accept=image/* capture>` — on a phone it offers "take photo"
-directly). The image is processed by `mail_reader/note_images.py` (Pillow:
-EXIF-orient → downscale to ≤1600px → re-encode JPEG, preserving GPS/EXIF
-as a signal — see "GPS as a signal" in `mail_reader/IDEAS.md`)
-and stored as web + thumbnail BYTEA in the `note_attachments` table
-(migration `migrations/013_note_attachments.sql`). A note may carry a
-photo, text, or both — an image-only note (blank text) is valid. The list
-renders the thumbnail; tapping opens the full image. If the photo's EXIF
-carries a location it's parsed at upload time into the `gps_lat`/`gps_lon`
-columns (migration `migrations/014_note_attachment_gps.sql`): the page
-shows a "📍 sted" chip linking to an OpenStreetMap pin and the CLI listing
-prints the coordinates + map URL. Location is optional — screenshots /
-location-off / share-sheet-stripped photos just leave both columns NULL.
-The table also has
-`description` / `description_model` / `described_at` columns reserved for
-a future vision-model pass (e.g. qwen2.5vl) to describe each photo (the
-"image attachment summaries" item in `mail_reader/IDEAS.md`).
-
-The check round **digests** the queue:
-
-```bash
-uv run notes            # list pending notes (default)
-uv run notes list --all # include already-done notes
-uv run notes add "text" # add a note from the terminal
-uv run notes done 42    # mark note 42 handled — drops off the page
-uv run notes rm 42      # hard-delete note 42
-uv run notes image 7    # dump attachment #7's image to a file to view
-```
-
-SOP: run `uv run notes` with no args. For each pending note, do the real
-work it implies — file a `CALENDAR.md` entry, update a topic file, add a
-daily-note section, open a Spond reply, etc. — then `done <id>` it so it
-stops showing on the page but stays in the table as a record of what was
-captured. A note flagged `📎 bilde (vedlegg #N)` carries a photo: until a
-description exists, `uv run notes image N <file>` writes the image out so
-you can open/read it before acting. Use `rm` only for genuine junk (test
-rows, duplicates). If a note is ambiguous, surface it to the user rather
-than guessing. Notes are free-text from a phone on the go: expect terse,
-lower-case, half-sentences.
-
-Tests: `uv run pytest mail_reader/test_notes.py mail_reader/test_note_images.py`
-(the notes CRUD tests skip if the mailvec DB is unreachable; the image
-tests are DB-free).
-
----
-
-## Shopping list — `shopping.py`
-
-Part of the **sjekk-flow**. The `/shopping/` page on server
-(`https://server.example.ts.net/mail/shopping/`, "Handle" in the
-topbar) is a standing, categorised checklist the user works through in the
-store. Items live in the `shopping_items` Postgres table (migration
-`migrations/012_shopping_list.sql`); the webapp side is
-`mail_reader/shopping.py` (CRUD) + routes in `mail_reader/server.py` +
-`templates/shopping*.html`.
-
-**Categories** are a fixed, ordered list defined in `mail_reader/shopping.py`
-(`CATEGORIES`): Frukt & grønt · Kjøl & meieri · Tørrvare & pålegg · Frys ·
-Husholdning · Annet · **Netthandel** (always last, so the in-store
-categories come first and online-order items sit at the bottom). The list
-is **not** a DB CHECK constraint — reorder/extend it in Python without a
-migration. The module validates category on every write.
-
-**Checkbox lifecycle.** Ticking an item sets `checked` (it greys out and
-stays in place on the page); checks **persist and are reversible** on the
-web. They are **not** auto-removed — the **sjekk** garbage-collects bought
-items:
-
-```bash
-uv run shopping                 # list, grouped by category
-uv run shopping add "Bananer" --cat frukt   # category by prefix
-uv run shopping check 42        # tick (bought); uncheck to undo
-uv run shopping mv 42 frys      # move to another category
-uv run shopping rename 42 "..."  # rename
-uv run shopping rm 42           # hard-delete
-uv run shopping uncheck-all     # clear all checks (fresh trip)
-uv run shopping sweep           # delete checked items — THE SJEKK STEP
-```
-
-SOP each sjekk: run `uv run shopping sweep` to remove what the
-user ticked off since the last pass (it prints what it removed). A notes-
-queue item that's really a purchase ("kjøp gråblyanter") → `uv run shopping add`
-it, then `done` the note. `--cat` accepts a case-insensitive prefix of any
-canonical category (`frys`, `kjøl`, `nett`).
-
-Tests: `uv run pytest mail_reader/test_shopping.py` (skips if the mailvec DB
-is unreachable).
+Removed 2026-10: the `/notes/` and `/shopping/` web pages, their routes
+in `mail_reader/server.py`, `mail_reader/notes.py` / `note_images.py` /
+`shopping.py`, and the `notes` / `shopping` CLIs. Capture moved to Signal
+Note-to-Self (see the Signal section above). The Postgres **tables stay**
+— `notes_queue`, `note_attachments`, `shopping_items` (migrations
+011–014) remain in `mailvec` and the historical data stays queryable.
 
 ---
 
@@ -738,6 +713,8 @@ Recurring weekly/monthly/quarterly sections are never touched.
 
 ### Manual step — enrichment
 
+In a sjekk the collector (`sjekk-collect`) has already run the tool — the
+moved lines are captured in `memory/sjekk/latest/calendar-retire.txt`.
 After running the script, look through the lines it moved (printed on
 stderr). For any event the daily-note sweep gave new context to — an
 action's outcome, who showed up, what was decided — open
