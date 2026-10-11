@@ -1,0 +1,16 @@
+[Unit]
+Description=embed-images (VLM descriptions of image attachments -> mailvec pgvector)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/diary/diary-scripts
+Environment=DIARY_CONFIG=%h/diary/config/local.toml
+# Walks pending image attachments (text_chars=0, vlm_model IS NULL,
+# vlm_attempts < 3), newest message first; resumable by construction, so the
+# 15-min trickle doubles as the backfill. --limit 12 keeps worst-case slot
+# occupancy bounded (~12 x 30 s) on the shared VLM server. --quiet: silent
+# on success, `!!` stderr lines + nonzero exit on failure, so the journal
+# surfaces breakage.
+ExecStart=%h/.local/bin/uv run --frozen --no-sync embed-images --quiet --limit 12

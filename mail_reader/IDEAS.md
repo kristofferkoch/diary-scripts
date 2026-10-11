@@ -650,8 +650,9 @@ Things worth considering but not in v1:
 - **Tag editing.** Toggle `tag:digest::keep` from the UI for training data.
 - **Attachment viewer.** Use already-extracted text from `attachments` table
   for quick previews; raw download for non-text.
-- **Image attachment summaries.** Once `embed_images.py` exists, blend VLM
-  descriptions into the tankekart.
+- **Image attachment summaries.** ✅ LANDET 2026-10-11 as `embed-images`
+  (`scripts/embed_images.py`): VLM descriptions embedded as attachment
+  chunks. Blending them into the tankekart is still open.
 - **Thread view.** Group by `thread_id`, show the conversation flat.
 - **"Why is this in my inbox?"** show signals: tier, tags, similar past
   mail that ended up archived vs kept.

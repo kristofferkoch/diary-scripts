@@ -20,7 +20,7 @@ Per message: notmuch raw → email.parse → main text body (plain/html)
 → batched POST /v1/embeddings (≥32 chunks per call) → write rows in one tx per msg.
 
 Image / unsupported attachments still get an `attachments` row with text_chars=0,
-so a later VLM pass (`scripts/embed_images.py`, todo) can find them.
+so the VLM pass (`scripts/embed_images.py`) can find them.
 
 Re-runs are idempotent: messages with an existing message_id are skipped.
 `--reembed` instead walks `messages` rows that have no chunks/attachments

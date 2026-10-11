@@ -260,6 +260,9 @@ Schema lives in `migrations/`:
 - `016_sources.sql` — `messages.source` (`'mail'` for everything pre-016;
   `signal`/`spond`/`vigilo` for embed-messages rows) + `messages.content_hash`
   (embed-messages' upsert key; NULL for immutable mail).
+- `017_vlm.sql` — `attachments.vlm_model` (NULL = pending; model id =
+  described; `'skipped:tiny'`; `'error'` after 3 attempts) +
+  `attachments.vlm_attempts` — embed-images' state markers.
 
 **Tier definitions** (`messages.tier`, filterable in search):
 
@@ -296,8 +299,8 @@ Per message the script extracts:
   - `text/plain`, `text/csv`, `text/markdown`, `text/calendar`,
     `application/ics`, `application/json` → decoded as text
   - Images / `application/octet-stream` / unsupported → metadata-only row
-    (`text_chars=0`). A future VLM pass (`embed_images.py`, TBD) will
-    walk these and describe with `qwen2.5vl:7b`.
+    (`text_chars=0`). The VLM pass (`embed-images`, see below) walks these
+    and stores image descriptions as attachment chunks.
 
 Embedding calls the OpenAI-compatible `/v1/embeddings` endpoint
 (`{"model": ..., "input": [...]}`), accumulating up to 32 chunks across
@@ -395,6 +398,53 @@ SELECT source, now() - max(embedded_at) FROM messages GROUP BY source;
 
 signal should track the JSONL tail closely; spond/vigilo only advance
 after their syncs run.
+
+### Image descriptions — `embed-images`
+
+`uv run embed-images` describes image attachments (mail + Signal + Vigilo)
+with a vision-language model (OpenAI-compatible `/v1/chat/completions`,
+`$VLM_URL` → config `hosts.vlm`; model `$VLM_MODEL` → config `vlm.model` →
+`qwen3.8-flash-next`) and embeds the descriptions into the same `mailvec`
+store — so receipts are findable by their printed text and photos by what's
+in them, through `search-mail`'s normal path.
+
+**Pending** = an `attachments` row with an image MIME
+(jpeg/jpg/png/gif/webp), `text_chars = 0`, `vlm_model IS NULL`,
+`vlm_attempts < 3` (schema: `017_vlm.sql`), newest message first —
+idempotent and resumable by construction. `vlm_model` is the state marker:
+model id = described, `'skipped:tiny'` = under 128 px on the long side
+(icons/tracking pixels, no attempt spent), `'error'` = gave up after 3
+failed attempts.
+
+Pipeline per image: locate the blob (mail via `notmuch show --format=raw` +
+walk-order occurrence matching; Signal via the signal-cli blob dir, mid
+recomputed from the JSONL with embed-messages' builder; Vigilo via the path
+vigilo-sync recorded) → Pillow downscale (long side ≤ 1568 px, GIF first
+frame, JPEG q85, base64 data URL) → Norwegian prompt asking for a concise
+description plus verbatim transcription of all readable text, with one
+context line (attachment filename, message from/subject/date; thinking left
+on — it materially improves small-text transcription) → store
+`Vedlegg <filename> (bilde): <description>` as ordinary chunks with
+`attachment_id` set, batched through embed-mail's `embed_batch` caps, one
+transaction per attachment.
+
+Flags: `--source mail|signal|vigilo` (repeatable, default all), `--limit N`
+(default 25), `--quiet` (silent on success, `!!` + exit 1 on failure —
+same timer contract as embed-mail). Scheduling: `scripts/embed-images.service`
++ `.timer` (`OnCalendar=*:9/15`, offset from mail-sync's `*:0/15` and
+embed-messages' `*:3/15`, `Persistent=true`), running
+`embed-images --quiet --limit 12` — the ~15-min trickle doubles as the
+backfill while bounding occupancy of the shared VLM slot. Install with
+`install -m644 scripts/embed-images.{service,timer} ~/.config/systemd/user/`
+then `systemctl --user daemon-reload && systemctl --user enable --now
+embed-images.timer`.
+
+Health query (pending images waiting on the VLM pass):
+
+```sql
+SELECT count(*) FROM attachments
+WHERE mime_type LIKE 'image/%' AND text_chars = 0 AND vlm_model IS NULL;
+```
 
 ### Typechecking + tests
 

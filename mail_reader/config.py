@@ -154,6 +154,12 @@ def nuextract_url() -> str:
     return _host_url("NUEXTRACT_BASE", "hosts.nuextract", "gpu-host:8081")
 
 
+def vlm_url() -> str:
+    """Vision-language model server (OpenAI-compatible
+    ``/v1/chat/completions`` with image input), e.g. ``http://gpu-host:8080``."""
+    return _host_url("VLM_URL", "hosts.vlm", "gpu-host:8080")
+
+
 def immich_url() -> str:
     """Immich photo server API base, e.g. ``http://server:2283``."""
     return _host_url("IMMICH_URL", "hosts.immich", "server:2283")
