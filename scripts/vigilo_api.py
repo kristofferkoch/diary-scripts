@@ -193,6 +193,7 @@ def authorize_url(
     client_id: str | None = None,
     redirect_uri: str = REDIRECT_URI,
     scope: str = SCOPE,
+    prompt: str | None = "login",
 ) -> str:
     """Build the authorization URL. **No PKCE** — see the module docstring.
 
@@ -200,7 +201,10 @@ def authorize_url(
     space into ``+``, and this client only accepts the ``%20`` form,
     byte-for-byte. ``prompt=login`` forces a fresh ID-porten login instead of
     silently reusing a browser session, ``display=touch`` is what the app asks
-    for (and what the working upstream flow sends).
+    for (and what the working upstream flow sends). Pass ``prompt=None`` when
+    replaying an *already logged-in* browser session (vigilo-login
+    ``--from-curl``): forcing a fresh login there makes authorize answer with
+    a hop to the ID-porten login page instead of the ``app://`` code redirect.
     """
     if client_id is None:
         client_id, _ = client_credentials()
@@ -210,9 +214,10 @@ def authorize_url(
         "response_type": "code",
         "scope": scope,
         "state": state,
-        "prompt": "login",
         "display": "touch",
     }
+    if prompt is not None:
+        params["prompt"] = prompt
     return f"{AUTH_BASE}/connect/authorize?{urlencode(params, quote_via=quote)}"
 
 
@@ -804,14 +809,34 @@ class VigiloApi:
 
     def consent_forms(self, child_id: str, organizational_unit_id: str) -> list[dict[str, Any]]:
         """Samtykker. Note the **singular** ``childId`` — most other endpoints
-        take ``childIds``. The naming varies per endpoint; copy exactly."""
-        return as_items(
-            self.web_json(
-                "/api/consent-forms",
-                {"childId": child_id, "organizationalUnitId": organizational_unit_id},
-            ),
-            "items",
+        take ``childIds``. The naming varies per endpoint; copy exactly.
+
+        **404 with an empty body is how this API says "no forms"** (verified
+        live 2026-10-11: the same route with a wrong param name answers 404
+        *with* an ASP.NET "No HTTP resource was found" body, so the two are
+        distinguishable). The app gateway mirror of this route,
+        ``/api/consent-forms?childPersonId=…``, behaves the same way. Treat
+        any 404 here as an empty list and let :meth:`consent_form_counts`
+        carry the "are there forms at all" truth.
+        """
+        r = self.web_get(
+            "/api/consent-forms",
+            {"childId": child_id, "organizationalUnitId": organizational_unit_id},
         )
+        if r.status_code == 404:
+            return []
+        return as_items(self._json(r, "/api/consent-forms"), "items")
+
+    def consent_form_counts(self) -> dict[str, Any]:
+        """``/api/consent-forms/counts`` on the app gateway — userId only.
+
+        The one consent endpoint verified live to answer 200
+        (``{"totalConsentFormsCount": N, "unreadConsentFormsCount": M,
+        "consentForms": [...]}``, 2026-10-11), so it is the existence check
+        the sync cross-references the per-unit lists against.
+        """
+        data = self.app_json("/api/consent-forms/counts")
+        return data if isinstance(data, dict) else {}
 
     def absences(self, child_id: str, *, include_after_school: bool = True) -> list[dict[str, Any]]:
         return as_items(

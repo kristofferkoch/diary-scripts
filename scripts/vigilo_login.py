@@ -138,7 +138,10 @@ def code_via_cookies(cookie_header: str, state: str, *, timeout: float = 30.0) -
     """
     with httpx.Client(follow_redirects=False, timeout=timeout) as client:
         r = client.get(
-            authorize_url(state),
+            # prompt=None is load-bearing: the pasted cookies ARE the login,
+            # so forcing prompt=login would bounce the replay to the ID-porten
+            # login page instead of the app:// code redirect.
+            authorize_url(state, prompt=None),
             headers={"cookie": cookie_header, "user-agent": "Mozilla/5.0"},
         )
     location = r.headers.get("location", "")

@@ -649,6 +649,19 @@ seen-maps; the **triage cursor is a separate `cursor` key, advanced only
 by `vigiloshown --bump`** — unlike Spond, a sync run never moves what the
 next triage sees.
 
+Endpoint quirks learned live (2026-10-11):
+
+- The consent-form list (`/api/consent-forms`) answers **404 with an empty
+  body** when the child has no forms — that is "empty", not "wrong route"
+  (a wrong param name gets a 404 *with* an ASP.NET "No HTTP resource was
+  found" body). `vigilo_sync.fetch_consents` cross-checks the app gateway's
+  `/api/consent-forms/counts` (verified 200) so a rotted list endpoint
+  can't masquerade as "no forms".
+- A failing web-kind endpoint (news/consent) no longer aborts the run: an
+  API error there is logged and the records/state the other kinds produced
+  still land. Auth expiry still propagates to the `auth_required` path;
+  transport-level outages (DNS/TCP/timeouts) remain fatal to the run.
+
 ### Auth
 
 - One-time login: `uv run vigilo-login` (BankID in a desktop browser,

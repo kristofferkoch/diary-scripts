@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import httpx
 
 from scripts import vigilo_sync as vs
 from scripts.vigilo_api import TokenStore, VigiloApi
@@ -349,6 +350,8 @@ def test_web_kinds_are_recorded_when_the_token_works_there(serve, workspace):
                                                  "mimeType": "application/pdf"}]}],
         "GET /api/consent-forms": [{"id": "c-1", "title": "Samtykke tur",
                                     "status": "pending", "deadline": "2026-10-20"}],
+        "GET /api/consent-forms/counts": {"totalConsentFormsCount": 1,
+                                          "unreadConsentFormsCount": 1},
     }
     serve({**gateway(), **routes})
     assert vs.main(["--once"]) == 0
@@ -393,6 +396,7 @@ def test_news_that_already_rolled_over_is_not_repeated(serve, workspace):
                                   "organizationalUnits": [{"id": UNIT_ID, "name": "AKS"}]}],
         "GET /api/news-feed": [{"id": "post-1", "title": "Ukeplan", "created": "2026-10-10"}],
         "GET /api/consent-forms": [],
+        "GET /api/consent-forms/counts": {"totalConsentFormsCount": 0},
     }
     serve({**gateway(), **routes})
     vs.main(["--once"])
@@ -403,6 +407,62 @@ def test_news_that_already_rolled_over_is_not_repeated(serve, workspace):
     workspace["state"].write_text(json.dumps(state))
     vs.main(["--once"])
     assert len([r for r in records(workspace["jsonl"]) if r["kind"] == "news"]) == 1
+
+
+def web_routes(**overrides: Any) -> dict[str, Any]:
+    routes: dict[str, Any] = {
+        "GET /api/children/my": [{"id": CHILD_ID,
+                                  "organizationalUnits": [{"id": UNIT_ID, "name": "AKS"}]}],
+        "GET /api/news-feed": [],
+        "GET /api/consent-forms": [],
+        "GET /api/consent-forms/counts": {"totalConsentFormsCount": 0},
+    }
+    routes.update(overrides)
+    return routes
+
+
+def test_consent_404_is_empty_not_fatal(serve, workspace):
+    """Live 2026-10-11: no forms → 404 with an empty body, and that 404 used
+    to kill the whole run before any record or state was written."""
+    serve({**gateway(), **web_routes(
+        **{"GET /api/consent-forms": lambda r: httpx.Response(404)})})
+    assert vs.main(["--once"]) == 0
+    kinds = {r["kind"] for r in records(workspace["jsonl"])}
+    assert kinds == {"message"}, kinds
+    assert json.loads(workspace["state"].read_text())["last_successful_run"]
+
+
+def test_a_dying_consent_endpoint_does_not_lose_the_run(serve, workspace, capsys):
+    serve({**gateway(), **web_routes(
+        **{"GET /api/consent-forms": Resp(400, {"error": "bogus"}),
+           "GET /api/news-feed": [{"id": "post-1", "title": "Ukeplan",
+                                   "created": "2026-10-10"}]})})
+    assert vs.main(["--once"]) == 0
+    assert "consent fetch failed" in capsys.readouterr().err
+    kinds = {r["kind"] for r in records(workspace["jsonl"])}
+    assert kinds == {"message", "news"}, kinds
+    assert json.loads(workspace["state"].read_text())["last_successful_run"]
+
+
+def test_counts_vs_empty_list_mismatch_is_loud(serve, workspace, capsys):
+    serve({**gateway(), **web_routes(
+        **{"GET /api/consent-forms": lambda r: httpx.Response(404),
+           "GET /api/consent-forms/counts": {"totalConsentFormsCount": 2}})})
+    assert vs.main(["--once"]) == 0
+    assert "counts say 2 form(s) exist" in capsys.readouterr().err
+
+
+def test_auth_expiry_mid_web_kinds_still_sets_auth_required(serve, workspace, capsys):
+    """Per-kind isolation must not swallow AuthExpiredError: the serve
+    fixture's token endpoint answers invalid_grant, so a 401 here means the
+    refresh token is dead — main() owns that, not the kind guard."""
+    serve({**gateway(), **web_routes(
+        **{"GET /api/news-feed": Resp(401, {"message": "expired"})})})
+    assert vs.main(["--once"]) == 0
+    assert "auth expired" in capsys.readouterr().err
+    state = json.loads(workspace["state"].read_text())
+    assert state["auth_required"] is True
+    assert "last_successful_run" not in state
 
 
 def test_dry_run_touches_nothing(serve, workspace):

@@ -190,6 +190,14 @@ def test_authorize_url_is_the_shape_that_actually_works(creds: None):
     assert "redirect_uri=app%3A%2F%2Fch-parent-android.vigilo.no" in url
 
 
+def test_authorize_url_omits_prompt_for_session_replays(creds: None):
+    # --from-curl replays an already-logged-in browser session; prompt=login
+    # would bounce it to the ID-porten login page instead of the code redirect.
+    url = authorize_url("state-123", prompt=None)
+    assert "prompt" not in url
+    assert "state=state-123" in url
+
+
 def test_code_from_redirect_takes_the_failed_url_or_a_bare_code():
     assert code_from_redirect("app://ch-parent-android.vigilo.no?code=XYZ&state=S") == "XYZ"
     assert code_from_redirect("XYZ") == "XYZ"
@@ -437,6 +445,32 @@ def test_consent_forms_sends_the_singular_child_id(api_factory):
     api.consent_forms(CHILD_ID, "unit-1")
     assert seen[0].url.params["childId"] == CHILD_ID
     assert "childIds" not in seen[0].url.params
+
+
+def test_consent_forms_404_means_no_forms(api_factory):
+    # Verified live 2026-10-11: this route answers 404 with an EMPTY body when
+    # the child has no forms (a wrong param name gets 404 with an ASP.NET
+    # "No HTTP resource was found" body instead).
+    api = api_factory({"GET /api/consent-forms": lambda r: httpx.Response(404)})
+    assert api.consent_forms(CHILD_ID, "unit-1") == []
+
+
+def test_consent_form_counts_reads_the_app_gateway(api_factory):
+    seen: list[httpx.Request] = []
+
+    def _ok(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"totalConsentFormsCount": 2,
+                                         "unreadConsentFormsCount": 1,
+                                         "consentForms": []})
+
+    api = api_factory({"GET /api/consent-forms/counts": _ok})
+    counts = api.consent_form_counts()
+    assert counts["totalConsentFormsCount"] == 2
+    assert counts["unreadConsentFormsCount"] == 1
+    # userId injection is the app gateway's fingerprint — the web gateway
+    # takes Bearer only.
+    assert "userId" in seen[0].url.params
 
 
 def test_lessons_asks_with_an_iso_week(api_factory):

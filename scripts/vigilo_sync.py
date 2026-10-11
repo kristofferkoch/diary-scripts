@@ -380,12 +380,19 @@ def fetch_news(api: VigiloApi, state: dict[str, Any], out: list[dict[str, Any]],
 
 def fetch_consents(api: VigiloApi, state: dict[str, Any], out: list[dict[str, Any]],
                    units: list[tuple[str, str, str]]) -> dict[str, int]:
-    """Samtykker, with deadlines surfaced — the kind most likely to need action."""
+    """Samtykker, with deadlines surfaced — the kind most likely to need action.
+
+    Cross-checks the per-unit lists against the app gateway's counts
+    endpoint: the list answers 404-as-empty, so without the counts a rotted
+    list endpoint would silently look like "no forms".
+    """
     seen: dict[str, Any] = state.setdefault("consents", {})
     fetched_at = utcnow_iso()
     new = 0
+    listed = 0
     for child_id, unit_id, unit_label_text in units:
         for form in api.consent_forms(child_id, unit_id):
+            listed += 1
             fid = form.get("id") or form.get("consentFormId")
             if not fid:
                 continue
@@ -412,6 +419,23 @@ def fetch_consents(api: VigiloApi, state: dict[str, Any], out: list[dict[str, An
                 }
             )
             new += 1
+    # Cross-check against the counts endpoint (the one consent route verified
+    # to answer 200 live): the per-unit list answers 404-as-empty, so without
+    # this a rotted list endpoint would silently look like "no forms".
+    try:
+        total = int(api.consent_form_counts().get("totalConsentFormsCount") or 0)
+    except AuthExpiredError:
+        raise  # a dead refresh token is main()'s job, not a fetch failure
+    except (ApiError, VigiloError, TypeError, ValueError) as e:
+        print(f"!! vigilo: consent-form counts probe failed: {e}", file=sys.stderr)
+    else:
+        if total and not listed:
+            print(
+                f"!! vigilo: consent-form counts say {total} form(s) exist but "
+                "the per-unit lists came back empty — the list endpoint "
+                "mapping may have rotted",
+                file=sys.stderr,
+            )
     return {"consent": new}
 
 
@@ -491,10 +515,25 @@ def run_once(
                     units = []
 
                 if units:
+                    # Per-kind isolation: a dying endpoint (the consent 404
+                    # took down whole runs on 2026-10-11) must not lose the
+                    # records and state the other kinds already produced.
+                    # AuthExpiredError must still propagate — main() turns it
+                    # into the auth_required flag + "run vigilo-login".
                     if "news" in kinds:
-                        counts.update(fetch_news(api, state, records, child_ids))
+                        try:
+                            counts.update(fetch_news(api, state, records, child_ids))
+                        except AuthExpiredError:
+                            raise
+                        except (ApiError, VigiloError) as e:
+                            print(f"!! vigilo: news fetch failed: {e}", file=sys.stderr)
                     if "consent" in kinds:
-                        counts.update(fetch_consents(api, state, records, units))
+                        try:
+                            counts.update(fetch_consents(api, state, records, units))
+                        except AuthExpiredError:
+                            raise
+                        except (ApiError, VigiloError) as e:
+                            print(f"!! vigilo: consent fetch failed: {e}", file=sys.stderr)
     finally:
         api.close()
     return sum(counts.values()), records, counts
