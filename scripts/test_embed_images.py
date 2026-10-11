@@ -310,7 +310,7 @@ class TestDescribeImage:
         out = ei.describe_image("data:image/jpeg;base64,AAAA", "prompt")
         assert out == "Et bilde av en kvittering."
         assert captured["model"] == ei.VLM_MODEL
-        assert captured["max_tokens"] == 1024
+        assert captured["max_tokens"] == 4096
         assert "enable_thinking" not in captured
         content = captured["messages"][0]["content"]
         assert content[0] == {"type": "text", "text": "prompt"}

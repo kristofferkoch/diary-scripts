@@ -373,7 +373,10 @@ def describe_image(data_url: str, prompt: str) -> str:
     text (receipt amounts), so no enable_thinking flag is sent."""
     payload = {
         "model": VLM_MODEL,
-        "max_tokens": 1024,
+        # Generous cap: reasoning tokens count toward it, and a long thinking
+        # chain can otherwise consume the whole budget and return empty
+        # content (seen live at 1024, 2026-10-11).
+        "max_tokens": 4096,
         "messages": [{"role": "user", "content": [
             {"type": "text", "text": prompt},
             {"type": "image_url", "image_url": {"url": data_url}},
