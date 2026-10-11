@@ -413,8 +413,12 @@ in them, through `search-mail`'s normal path.
 `vlm_attempts < 3` (schema: `017_vlm.sql`), newest message first —
 idempotent and resumable by construction. `vlm_model` is the state marker:
 model id = described, `'skipped:tiny'` = under 128 px on the long side
-(icons/tracking pixels, no attempt spent), `'error'` = gave up after 3
-failed attempts.
+(icons/tracking pixels, no attempt spent), `'skipped:no-blob'` = no local
+blob can ever exist (Vigilo news attachments download over the API at show
+time — terminal mark, no attempts burned), `'error'` = gave up after 3
+failed attempts. The failure/skip stamps are guarded `WHERE … AND
+vlm_model IS NULL` so a manual run racing the timer can't re-pend a row
+the other already described.
 
 Pipeline per image: locate the blob (mail via `notmuch show --format=raw` +
 walk-order occurrence matching; Signal via the signal-cli blob dir, mid
@@ -428,6 +432,16 @@ on — it materially improves small-text transcription) → store
 `attachment_id` set, batched through embed-mail's `embed_batch` caps, one
 transaction per attachment.
 
+Known limitations / trade-offs:
+
+- embed-messages' delete + re-insert upsert (Spond/Vigilo content changes)
+  cascades away the VLM chunks and the stamp, so images on updated items
+  get re-described. Accepted for now; carrying descriptions over an upsert
+  is a possible future optimization.
+- Duplicate same-key attachments within one Signal/Vigilo record (same
+  filename + size) resolve to the first matching blob — rare in practice,
+  and a mismatch just describes the wrong twin once, no retry loop.
+
 Flags: `--source mail|signal|vigilo` (repeatable, default all), `--limit N`
 (default 25), `--quiet` (silent on success, `!!` + exit 1 on failure —
 same timer contract as embed-mail). Scheduling: `scripts/embed-images.service`
@@ -439,11 +453,14 @@ backfill while bounding occupancy of the shared VLM slot. Install with
 then `systemctl --user daemon-reload && systemctl --user enable --now
 embed-images.timer`.
 
-Health query (pending images waiting on the VLM pass):
+Health query (pending images waiting on the VLM pass — scoped to the five
+handled MIME types so the count converges to 0; a bare `LIKE 'image/%'`
+would keep counting tiff/heic/etc. the pass never touches):
 
 ```sql
 SELECT count(*) FROM attachments
-WHERE mime_type LIKE 'image/%' AND text_chars = 0 AND vlm_model IS NULL;
+WHERE mime_type = ANY(ARRAY['image/jpeg','image/jpg','image/png','image/gif','image/webp'])
+  AND text_chars = 0 AND vlm_model IS NULL;
 ```
 
 ### Typechecking + tests

@@ -356,6 +356,17 @@ class TestMarkError:
         assert ei.mark_error(1) == (2, None)
         assert ei.mark_error(2) == (3, "error")
 
+    def test_marks_guarded_against_racing_success(self):
+        # A manual run racing the timer: the loser's failure/skip stamps
+        # must not re-pend a row the winner already described.
+        conn = _FakeConn()
+        ei._mark_failure(cast(Any, conn), _pending_row())
+        ei._mark_terminal(cast(Any, conn), 7, "skipped:tiny")
+        ei._mark_terminal(cast(Any, conn), 8, "skipped:no-blob")
+        assert len(conn.executed) == 3
+        for sql, _ in conn.executed:
+            assert "AND vlm_model IS NULL" in sql
+
     def test_process_third_strike_marks_error(self, monkeypatch):
         row = _pending_row()
         monkeypatch.setattr(ei, "select_pending",
@@ -366,9 +377,9 @@ class TestMarkError:
         for expected_attempts, expected_model in ((1, None), (2, None),
                                                   (3, "error")):
             conn.executed.clear()
-            done, tiny, failed = ei.process(cast(Any, conn), ("mail",), 25,
-                                            False)
-            assert (done, tiny, failed) == (0, 0, 1)
+            done, skipped, failed = ei.process(cast(Any, conn), ("mail",),
+                                               25, False)
+            assert (done, skipped, failed) == (0, 0, 1)
             upd = [p for s, p in conn.executed
                    if s.startswith("UPDATE attachments SET vlm_attempts")]
             assert upd == [(expected_attempts, expected_model,
@@ -382,8 +393,8 @@ class TestProcess:
         conn = _FakeConn()
         rows = [_pending_row()]
         _patch_pipeline(monkeypatch, rows, blob=_png_bytes(300, 300))
-        done, tiny, failed = ei.process(cast(Any, conn), ("mail",), 25, False)
-        assert (done, tiny, failed) == (1, 0, 0)
+        done, skipped, failed = ei.process(cast(Any, conn), ("mail",), 25, False)
+        assert (done, skipped, failed) == (1, 0, 0)
         chunk_inserts = [p for s, p in conn.executed
                          if s.startswith("INSERT INTO chunks")]
         assert len(chunk_inserts) == 1
@@ -400,10 +411,34 @@ class TestProcess:
         conn = _FakeConn()
         rows = [_pending_row()]
         _patch_pipeline(monkeypatch, rows, blob=_png_bytes(32, 32))
-        done, tiny, failed = ei.process(cast(Any, conn), ("mail",), 25, False)
-        assert (done, tiny, failed) == (0, 1, 0)
-        tiny_updates = [p for s, p in conn.executed if "skipped:tiny" in s]
-        assert tiny_updates == [(rows[0]["att_id"],)]
+        done, skipped, failed = ei.process(cast(Any, conn), ("mail",), 25,
+                                           False)
+        assert (done, skipped, failed) == (0, 1, 0)
+        marks = [p for s, p in conn.executed
+                 if s.startswith("UPDATE attachments SET vlm_model")]
+        assert marks == [("skipped:tiny", rows[0]["att_id"])]
+        assert not [s for s, _ in conn.executed
+                    if s.startswith("UPDATE attachments SET vlm_attempts")]
+
+    def test_vigilo_news_marked_no_blob_without_attempt(self, monkeypatch):
+        # News attachments are metadata-only by design (no local blob ever)
+        # — terminal 'skipped:no-blob' right away, no attempts burned.
+        conn = _FakeConn()
+        row = _pending_row(source="vigilo", mid="vigilo:news:n1",
+                           filename="plan.jpg", mime="image/jpeg")
+        monkeypatch.setattr(ei, "select_pending",
+                            lambda conn, sources, limit: [row])
+        monkeypatch.setattr(ei, "_record_index", lambda source: {
+            "vigilo:news:n1": {"kind": "news", "data": {
+                "postId": "n1", "attachments": [
+                    {"id": "a1", "name": "plan.jpg",
+                     "mimeType": "image/jpeg"}]}}})
+        done, skipped, failed = ei.process(cast(Any, conn), ("vigilo",), 25,
+                                           False)
+        assert (done, skipped, failed) == (0, 1, 0)
+        marks = [p for s, p in conn.executed
+                 if s.startswith("UPDATE attachments SET vlm_model")]
+        assert marks == [("skipped:no-blob", row["att_id"])]
         assert not [s for s, _ in conn.executed
                     if s.startswith("UPDATE attachments SET vlm_attempts")]
 
@@ -418,9 +453,9 @@ class TestProcess:
         monkeypatch.setattr(ei, "iter_records",
                             lambda source, verbose: scans.append(source)
                             or iter([]))
-        done, tiny, failed = ei.process(cast(Any, conn), ("signal",), 25,
+        done, skipped, failed = ei.process(cast(Any, conn), ("signal",), 25,
                                         False)
-        assert (done, tiny, failed) == (2, 0, 0)
+        assert (done, skipped, failed) == (2, 0, 0)
         assert scans == ["signal"]     # cached across rows, not per row
 
     def test_batch_embed_failure_marks_attempts(self, monkeypatch):
@@ -432,8 +467,8 @@ class TestProcess:
             raise RuntimeError("embed endpoint down")
 
         monkeypatch.setattr(ei, "embed_batch", boom)
-        done, tiny, failed = ei.process(cast(Any, conn), ("mail",), 25, False)
-        assert (done, tiny, failed) == (0, 0, 2)
+        done, skipped, failed = ei.process(cast(Any, conn), ("mail",), 25, False)
+        assert (done, skipped, failed) == (0, 0, 2)
         attempts = [p for s, p in conn.executed
                     if s.startswith("UPDATE attachments SET vlm_attempts")]
         assert attempts == [(1, None, 7), (1, None, 8)]

@@ -5,10 +5,13 @@
 -- Apply with:  psql -d mailvec -f migrations/017_vlm.sql
 --
 -- vlm_model is the state marker:
---   NULL           not attempted yet (pending)
---   <model id>     described by this model (e.g. 'qwen3.8-flash-next')
---   'skipped:tiny' below the size floor (icons / tracking pixels)
---   'error'        gave up after vlm_attempts reached 3
+--   NULL              not attempted yet (pending)
+--   <model id>        described by this model (e.g. 'qwen3.8-flash-next')
+--   'skipped:tiny'    below the size floor (icons / tracking pixels)
+--   'skipped:no-blob' no local blob can ever exist (vigilo news attachments
+--                     download over the API at show time) — terminal mark,
+--                     no attempts burned
+--   'error'           gave up after vlm_attempts reached 3
 -- vlm_attempts counts failures, so a permanently broken blob or endpoint
 -- eventually leaves the pending set instead of clogging every run.
 

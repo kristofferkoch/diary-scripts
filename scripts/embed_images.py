@@ -21,9 +21,12 @@ prefixed `Vedlegg <filename> (bilde): ` as ordinary chunks with
 transaction per attachment.
 
 Images whose longest side is under 128 px are icons / tracking pixels:
-marked `vlm_model = 'skipped:tiny'` without spending an attempt. Any other
-failure (blob gone, VLM error, write error) increments `vlm_attempts`;
-at 3 the row is marked `vlm_model = 'error'` and leaves the hot loop.
+marked `vlm_model = 'skipped:tiny'` without spending an attempt. Vigilo
+news attachments never have a local blob (they download over the API at
+show time) and are marked terminal `'skipped:no-blob'` right away. Any
+other failure (blob gone, VLM error, write error) increments
+`vlm_attempts`; at 3 the row is marked `vlm_model = 'error'` and leaves
+the hot loop.
 
 Env:
     PG_DSN              postgres://user@host/mailvec      (default: dbname=mailvec)
@@ -261,10 +264,16 @@ def vigilo_blob(rec: dict[str, Any], filename: str, mime: str) -> Path | None:
     return None
 
 
+class NoLocalBlob(Exception):
+    """The blob can never be on disk for this row — the caller marks it
+    terminal ('skipped:no-blob') instead of burning attempts to 'error'."""
+
+
 def resolve_blob(conn: psycopg.Connection, row: PendingRow,
                  indexes: dict[str, dict[str, dict[str, Any]]]) -> bytes | None:
     """Raw bytes of the attachment, from wherever its source keeps blobs.
-    None when it can't be found (counts as a failed attempt upstream)."""
+    None when it can't be found right now (counts as a failed attempt
+    upstream); NoLocalBlob when it never will be."""
     if row["source"] == "mail":
         raw = nm_raw(row["mid"])
         return mail_blob(raw, row["filename"], row["mime"], row["size"],
@@ -275,6 +284,12 @@ def resolve_blob(conn: psycopg.Connection, row: PendingRow,
     if row["source"] == "signal":
         p = signal_blob(rec, row["filename"], row["size"])
     else:
+        # Vigilo news attachments are metadata-only by design — embed_messages
+        # stores no blob and they download over the API at show time, so a
+        # local copy will never appear.
+        if rec.get("kind") == "news":
+            raise NoLocalBlob(
+                f"vigilo news attachment {row['filename']!r} has no local copy")
         p = vigilo_blob(rec, row["filename"], row["mime"])
     return p.read_bytes() if p is not None else None
 
@@ -386,19 +401,29 @@ def mark_error(attempts: int) -> tuple[int, str | None]:
     return attempts, "error" if attempts >= MAX_ATTEMPTS else None
 
 
-def _mark_skipped_tiny(conn: psycopg.Connection, att_id: int) -> None:
+def _mark_terminal(conn: psycopg.Connection, att_id: int, mark: str) -> None:
+    """Stamp a terminal vlm_model ('skipped:tiny' / 'skipped:no-blob').
+
+    The `AND vlm_model IS NULL` guard keeps a racing failure path (manual
+    run vs timer) from re-pending a row the winner already described —
+    an unguarded stamp would null the model, re-select the row, and the
+    duplicate chunk INSERT would then burn 3 strikes to a terminal 'error'
+    on a successfully described attachment."""
     with conn.cursor() as cur, conn.transaction():
         cur.execute(
-            "UPDATE attachments SET vlm_model = 'skipped:tiny' WHERE id = %s",
-            (att_id,))
+            "UPDATE attachments SET vlm_model = %s WHERE id = %s "
+            "AND vlm_model IS NULL",
+            (mark, att_id))
 
 
 def _mark_failure(conn: psycopg.Connection, row: PendingRow) -> None:
     attempts, model = mark_error(row["vlm_attempts"])
     with conn.cursor() as cur, conn.transaction():
+        # Same race guard as _mark_terminal: never touch a row that already
+        # carries a stamp (success or terminal-skip).
         cur.execute(
             "UPDATE attachments SET vlm_attempts = %s, vlm_model = %s "
-            "WHERE id = %s",
+            "WHERE id = %s AND vlm_model IS NULL",
             (attempts, model, row["att_id"]))
     row["vlm_attempts"] = attempts
 
@@ -455,7 +480,7 @@ def flush(conn: psycopg.Connection, batch: list[Prepared],
 
 def process(conn: psycopg.Connection, sources: tuple[str, ...], limit: int,
             verbose: bool) -> tuple[int, int, int]:
-    """Walk pending image rows once. Returns (done, tiny, failed)."""
+    """Walk pending image rows once. Returns (done, skipped, failed)."""
     rows = select_pending(conn, sources, limit)
     if verbose:
         print(f"[embed-images] {len(rows)} pending image attachments "
@@ -465,7 +490,7 @@ def process(conn: psycopg.Connection, sources: tuple[str, ...], limit: int,
     indexes: dict[str, dict[str, dict[str, Any]]] = {}
     pending: list[Prepared] = []
     pending_chunks = 0
-    done = tiny = failed = 0
+    done = skipped = failed = 0
     t0 = time.time()
 
     def do_flush() -> None:
@@ -500,8 +525,8 @@ def process(conn: psycopg.Connection, sources: tuple[str, ...], limit: int,
                 raise FileNotFoundError(f"no blob for {row['filename']!r}")
             data_url = prepare_image(blob)
             if data_url is None:
-                _mark_skipped_tiny(conn, row["att_id"])
-                tiny += 1
+                _mark_terminal(conn, row["att_id"], "skipped:tiny")
+                skipped += 1
                 if verbose:
                     print(f"  {n}/{len(rows)} {src} {row['filename']} "
                           f"— skipped:tiny", file=sys.stderr)
@@ -509,6 +534,13 @@ def process(conn: psycopg.Connection, sources: tuple[str, ...], limit: int,
             prompt = build_prompt(row["filename"], row["from_addr"],
                                   row["subject"], row["date"])
             description = describe_image(data_url, prompt)
+        except NoLocalBlob as e:
+            skipped += 1
+            _mark_terminal(conn, row["att_id"], "skipped:no-blob")
+            if verbose:
+                print(f"  {n}/{len(rows)} {row['source']} {row['filename']} "
+                      f"— skipped:no-blob ({e})", file=sys.stderr)
+            continue
         except Exception as e:
             failed += 1
             print(f"  !! {row['mid']} {row['filename']}: {e}", file=sys.stderr)
@@ -529,9 +561,9 @@ def process(conn: psycopg.Connection, sources: tuple[str, ...], limit: int,
 
     do_flush()
     if verbose or failed:
-        print(f"[embed-images] done={done} tiny={tiny} failed={failed} "
+        print(f"[embed-images] done={done} skipped={skipped} failed={failed} "
               f"elapsed={(time.time() - t0):.0f}s", file=sys.stderr)
-    return done, tiny, failed
+    return done, skipped, failed
 
 
 def main(argv: list[str] | None = None) -> int:
