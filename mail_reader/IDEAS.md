@@ -127,7 +127,7 @@ er multipart med `<input type=file accept=image/* capture>`; et notat kan ha bil
 tekst eller begge — bildeløst-tekst og tekstløst-bilde er begge gyldige. Thumbnail
 vises i `_note.html`, full størrelse ved klikk (`/notes/attachment/{id}`). Sjekk-CLI:
 listingen flagger `📎 bilde (vedlegg #N)`, og `uv run notes image N <fil>` dumper bildet
-så det kan åpnes. Se `diary-scripts/scripts/README.md` → "Notes queue — notes".
+så det kan åpnes. Se `diary-scripts/scripts/docs/retired-notes-shopping.md`.
 
 ## 2026-05-31 — notater: vis klokkeslett (user) ✅ LANDET 2026-06-02
 
@@ -169,7 +169,7 @@ output is a git branch with diffs against `CALENDAR.md` / `BILLS.md`
 in a follow-up turn. Same trust model as `ultrareview`: agent
 proposes, human disposes.
 
-**Context interface (per addendum).** Don't dump CLAUDE.md +
+**Context interface (per addendum).** Don't dump AGENTS.md +
 USER.md + CALENDAR.md + ... into the escalator's prompt — it'll
 drown and the bills will scale poorly. Instead:
 

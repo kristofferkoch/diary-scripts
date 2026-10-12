@@ -226,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--since-cursor", action="store_true",
                     help="Start from memory/mail-state.json's last_successful_run "
                          "(builds `tag:inbox and date:@<unix>..`). The cursor is hand-maintained "
-                         "— see CLAUDE.md 'How to process new mail'.")
+                         "— see scripts/docs/mail.md → 'Processing new mail (SOP)'.")
     ap.add_argument("--limit", type=int, default=20, help="Max messages to render for non-id queries (default: 20).")
     ap.add_argument("--max-chars", type=int, default=4000, help="Truncate each body at N chars (default: 4000, 0 = no truncation).")
     ap.add_argument("--headers-only", action="store_true", help="Print headers + attachment list, skip body.")
