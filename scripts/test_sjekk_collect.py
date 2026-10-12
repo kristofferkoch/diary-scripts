@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime as dt
 
 from scripts.sjekk_collect import (
+    TRACKS,
     TrackResult,
     render_index,
     run_tracks,
@@ -115,3 +116,12 @@ def test_write_run_layout_and_latest_symlink(tmp_path) -> None:
     run2 = write_run(tmp_path, results,
                      now=dt.datetime(2026, 10, 11, 13, 0, 0, tzinfo=dt.UTC))
     assert latest.resolve() == run2
+
+
+def test_embed_health_track_is_per_source() -> None:
+    """The runbook calls a source green on its own gap, so the collector must
+    group by source — one aggregate would let a stale source hide behind a
+    fresh one."""
+    [argv] = TRACKS["embed-health.txt"]
+    assert "GROUP BY source" in argv[-1]
+

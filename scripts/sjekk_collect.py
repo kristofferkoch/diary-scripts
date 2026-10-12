@@ -81,8 +81,11 @@ TRACKS: dict[str, list[list[str]]] = {
     "backup-health.txt": [["systemctl", "show", "restic-backup.service",
                            "-p", "Result", "-p", "ExecMainExitTimestamp",
                            "--value"]],
+    # Per source: the runbook's green/not-green rule is per source, and a
+    # single aggregate hides one stale source behind the others.
     "embed-health.txt": [["psql", "-d", "mailvec", "-t", "-c",
-                          "SELECT now() - max(embedded_at) FROM messages;"]],
+                          "SELECT source, now() - max(embedded_at) "
+                          "FROM messages GROUP BY source ORDER BY source;"]],
     "services.txt": [
         ["systemctl", "--user", "is-active", "signal-capture.service"],
         ["systemctl", "--user", "show", "mail-sync.service",

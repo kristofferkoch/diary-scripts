@@ -31,7 +31,7 @@ new run:
 | `signal.txt` | `signalshow --since-cursor --headers-only` (cursor bump stays agent-side) |
 | `calendar-retire.txt` | `retire-calendar` (real run — idempotent; moved lines captured for enrichment) |
 | `backup-health.txt` | `systemctl show restic-backup.service -p Result -p ExecMainExitTimestamp --value` |
-| `embed-health.txt` | `psql -d mailvec -t -c "SELECT now() - max(embedded_at) FROM messages;"` |
+| `embed-health.txt` | `psql -d mailvec -t -c "SELECT source, now() - max(embedded_at) FROM messages GROUP BY source ORDER BY source;"` (per-source, so one stale source can't hide behind the others) |
 | `services.txt` | `systemctl --user is-active signal-capture.service` + mail-sync timestamp |
 
 Each command has its own timeout; a failure or timeout never aborts the
