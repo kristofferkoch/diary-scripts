@@ -1,5 +1,18 @@
 # kindle_dashboard
 
+## Contents
+
+- [Files](#files)
+- [Endpoints](#endpoints)
+- [Output contract](#output-contract)
+- [What's on the screen](#whats-on-the-screen)
+- [Config](#config)
+- [Running locally](#running-locally)
+- [Production](#production)
+- [Pointing the Kindle at this server](#pointing-the-kindle-at-this-server)
+- [Customizing the layout](#customizing-the-layout)
+- [Adding new content blocks](#adding-new-content-blocks)
+
 PNG generator + HTTP server that feeds the wall-mounted Kindle Paperwhite
 (`KINDLE.md`). Runs on server as a systemd user unit; reverse-proxied
 to the tailnet via caddy.

@@ -1,5 +1,13 @@
 # qcow-builder
 
+## Contents
+
+- [How it works](#how-it-works)
+- [Build & run](#build--run)
+- [Assembly backend (probe result)](#assembly-backend-probe-result)
+- [Definition of done (milestone 2)](#definition-of-done-milestone-2)
+- [First-boot reconstitution (milestone 3)](#first-boot-reconstitution-milestone-3)
+
 Turn a restic whole-`/` snapshot into a **bootable qcow2** whose filesystem
 UUIDs, GPT and btrfs subvolumes match the original machine — so fstab and GRUB
 work unchanged and the image boots as a faithful replacement. The restore
