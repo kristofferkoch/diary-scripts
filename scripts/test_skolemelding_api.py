@@ -143,6 +143,14 @@ def test_code_from_redirect_rejects_a_stale_state():
         code_from_redirect("com.cgi.oslomelding.foresatte://oauth?code=XYZ&state=OLD", "NEW")
 
 
+def test_code_from_redirect_rejects_a_missing_state_when_we_issued_one():
+    """The redirect must answer *our* authorize request — no state = no proof."""
+    with pytest.raises(ValueError, match="does not match"):
+        code_from_redirect("com.cgi.oslomelding.foresatte://oauth?code=XYZ", "EXPECTED")
+    # …but without an expected state (bare re-paste flows) anything goes.
+    assert code_from_redirect("com.cgi.oslomelding.foresatte://oauth?code=XYZ") == "XYZ"
+
+
 def test_code_from_redirect_says_so_for_a_login_page():
     with pytest.raises(ValueError, match="no code"):
         code_from_redirect("https://idporten.no/login?signin=abc")
@@ -483,6 +491,30 @@ def test_oversize_attachments_are_refused(api_factory):
     api = api_factory({"GET /globalassets/attachments/x/big.pdf": _big})
     with pytest.raises(ApiError, match="limit"):
         api.attachment("/globalassets/attachments/x/big.pdf")
+
+
+def test_the_streaming_cap_catches_a_body_bigger_than_its_content_length(api_factory):
+    """content-length is only an early exit; the byte counter is the real guard."""
+    def _lying(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"x" * 100,
+                              headers={"content-type": "application/pdf",
+                                       "content-length": "10"})
+
+    api = api_factory({"GET /globalassets/attachments/x/big.pdf": _lying})
+    with pytest.raises(ApiError, match="limit"):
+        api.attachment("/globalassets/attachments/x/big.pdf", max_bytes=50)
+
+
+def test_a_malformed_content_length_is_unknown_not_an_error(api_factory):
+    def _junk(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"%PDF-1.4",
+                              headers={"content-type": "application/pdf",
+                                       "content-length": "junk"})
+
+    api = api_factory({"GET /globalassets/attachments/x/skjema.pdf": _junk})
+    content, mime = api.attachment("/globalassets/attachments/x/skjema.pdf")
+    assert content == b"%PDF-1.4"
+    assert mime == "application/pdf"
 
 
 # --- Failure handling on the API client -------------------------------------

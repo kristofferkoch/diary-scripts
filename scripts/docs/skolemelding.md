@@ -24,6 +24,11 @@ uv run skolemelding-login --paste 'com.cgi.oslomelding.foresatte://oauth?code=�
 Do this from a machine **without** the Skolemelding app installed — otherwise
 the OS hands the redirect to the app and it redeems the single-use code.
 
+The PKCE verifier and `state` must survive between printing the URL and
+pasting the redirect, so they live in `skolemelding-pending.json` next to the
+token file (0600, one-hour TTL) — `--print-url` and `--paste` can be separate
+invocations, and a paste with a missing or stale pending file is refused.
+
 Chain: ID-porten code → OIDC token → portal `authCode`
 (`/api/exchange-app-token`) → app token pair (`/token`, `grant_type=password`
 with the literal password `code`) → one `/api/deviceinfo/save`. The login is

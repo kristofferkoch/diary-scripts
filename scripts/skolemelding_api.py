@@ -212,13 +212,19 @@ def code_from_redirect(target: str, expected_state: str | None = None) -> str:
     Traceback (most recent call last):
         ...
     ValueError: state in the redirect does not match — stale capture
+    >>> code_from_redirect("com.cgi.oslomelding.foresatte://oauth?code=ABC", "XY")
+    Traceback (most recent call last):
+        ...
+    ValueError: state in the redirect does not match — stale capture
     """
     target = target.strip()
     if "://" not in target and "?" not in target and "=" not in target:
         return target  # a bare code, pasted by hand
     params = parse_qs(urlsplit(target).query)
     state = (params.get("state") or [None])[0]
-    if expected_state and state and state != expected_state:
+    # A missing state is a mismatch too when we issued one — the redirect must
+    # prove it answers *our* authorize request.
+    if expected_state and state != expected_state:
         raise ValueError("state in the redirect does not match — stale capture")
     code = (params.get("code") or [None])[0]
     if not code:
@@ -765,8 +771,41 @@ class SkolemeldingApi:
 
         An HTML answer means the token died and the portal handed us a login
         page instead of the file — that is an auth failure, not a document.
+        The size cap is enforced while streaming: the content-length pre-check
+        is only an early exit, and a missing or malformed one just defers to
+        the byte counter (the download aborts mid-body past ``max_bytes``).
         """
-        r = self._request("GET", path)
+        for attempt in range(MAX_ATTEMPTS):
+            with self._client.stream("GET", path, headers=self._headers()) as r:
+                if r.status_code == 401:
+                    # Once only: a second 401 after a forced refresh is terminal.
+                    with self._client.stream(
+                        "GET", path, headers=self._headers(force_refresh=True)
+                    ) as r2:
+                        if r2.status_code == 401:
+                            raise AuthExpiredError(
+                                "401 even after refreshing the token — "
+                                "run skolemelding-login again"
+                            )
+                        return self._read_attachment(r2, path, max_bytes)
+                if r.status_code in RETRY_STATUSES and attempt < MAX_ATTEMPTS - 1:
+                    delay = self._retry_after(r) or min(
+                        BACKOFF_BASE * (2**attempt), BACKOFF_CAP
+                    )
+                    print(
+                        f"skolemelding: HTTP {r.status_code} on {path} — "
+                        f"waiting {delay:.0f}s",
+                        file=sys.stderr,
+                    )
+                    time.sleep(delay)
+                    continue
+                return self._read_attachment(r, path, max_bytes)
+        raise AssertionError("unreachable")  # MAX_ATTEMPTS >= 1
+
+    @staticmethod
+    def _read_attachment(
+        r: httpx.Response, path: str, max_bytes: int
+    ) -> tuple[bytes, str]:
         if r.status_code >= 400:
             raise ApiError(f"HTTP {r.status_code} on attachment {path}")
         mime = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
@@ -777,12 +816,22 @@ class SkolemeldingApi:
                 "run skolemelding-login again"
             )
         declared = r.headers.get("content-length")
-        if declared and int(declared) > max_bytes:
-            raise ApiError(f"attachment {path} exceeds the {max_bytes}-byte limit")
-        content = r.content
-        if len(content) > max_bytes:
-            raise ApiError(f"attachment {path} exceeds the {max_bytes}-byte limit")
-        return content, mime
+        if declared:
+            # Early exit only; an unparseable value means "unknown", and the
+            # streaming cap below stays the real guard.
+            with contextlib.suppress(ValueError):
+                if int(declared) > max_bytes:
+                    raise ApiError(
+                        f"attachment {path} exceeds the {max_bytes}-byte limit"
+                    )
+        chunks: list[bytes] = []
+        size = 0
+        for chunk in r.iter_bytes():
+            size += len(chunk)
+            if size > max_bytes:
+                raise ApiError(f"attachment {path} exceeds the {max_bytes}-byte limit")
+            chunks.append(chunk)
+        return b"".join(chunks), mime
 
 
 # --- Debug CLI ---------------------------------------------------------------
