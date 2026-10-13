@@ -131,3 +131,122 @@ def test_skolemelding_track_reads_the_triage_cursor() -> None:
     [argv] = TRACKS["skolemelding.txt"]
     assert argv == ["skolemeldingshow", "--since-cursor", "--headers-only"]
 
+
+
+# --- Phase-A gating: vigilo / skolemelding sync only on notification mail --
+
+import json
+
+import pytest
+
+from scripts import sjekk_collect
+
+
+def _write_state(tmp_path, track: str, last_run: str) -> None:
+    (tmp_path / f"{track}-state.json").write_text(
+        json.dumps({"last_successful_run": last_run}))
+
+
+def test_last_sync_epoch_parses_state(tmp_path) -> None:
+    _write_state(tmp_path, "vigilo", "2026-10-13T11:16:28Z")
+    got = sjekk_collect._last_sync_epoch(tmp_path / "vigilo-state.json")
+    assert got == dt.datetime(
+        2026, 10, 13, 11, 16, 28, tzinfo=dt.UTC).timestamp()
+
+
+def test_last_sync_epoch_unknown_states(tmp_path) -> None:
+    assert sjekk_collect._last_sync_epoch(tmp_path / "missing.json") is None
+    bad = tmp_path / "vigilo-state.json"
+    bad.write_text("not json")
+    assert sjekk_collect._last_sync_epoch(bad) is None
+    bad.write_text(json.dumps({"auth_required": False}))
+    assert sjekk_collect._last_sync_epoch(bad) is None
+
+
+def test_latest_notification_epoch_parses_summary(monkeypatch) -> None:
+    payload = json.dumps([{"thread": "t", "timestamp": 1791890119,
+                           "authors": "x", "subject": "y"}])
+    monkeypatch.setattr(
+        sjekk_collect, "_run_one",
+        lambda argv, timeout: TrackResult(filename="", output=payload))
+    assert sjekk_collect._latest_notification_epoch("subject:x") == 1791890119
+
+
+def test_latest_notification_epoch_no_hits_is_none(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sjekk_collect, "_run_one",
+        lambda argv, timeout: TrackResult(filename="", output="[]"))
+    assert sjekk_collect._latest_notification_epoch("subject:x") is None
+
+
+def test_latest_notification_epoch_failure_raises(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sjekk_collect, "_run_one",
+        lambda argv, timeout: TrackResult(filename="", output="boom",
+                                          exit_code=2))
+    with pytest.raises(RuntimeError):
+        sjekk_collect._latest_notification_epoch("subject:x")
+
+
+_NOW = dt.datetime(2026, 10, 13, 12, 0, 0, tzinfo=dt.UTC)
+
+
+def test_notification_pending_no_state_file_syncs(tmp_path) -> None:
+    assert sjekk_collect.notification_pending("vigilo", state_dir=tmp_path,
+                                              now=_NOW)
+
+
+def test_notification_pending_no_mail_skips(tmp_path, monkeypatch) -> None:
+    _write_state(tmp_path, "vigilo", "2026-10-13T11:00:00Z")
+    monkeypatch.setattr(sjekk_collect, "_latest_notification_epoch",
+                        lambda query: None)
+    assert not sjekk_collect.notification_pending("vigilo", state_dir=tmp_path,
+                                                  now=_NOW)
+
+
+def test_notification_pending_mail_newer_than_sync(tmp_path,
+                                                   monkeypatch) -> None:
+    _write_state(tmp_path, "vigilo", "2026-10-13T11:00:00Z")
+    newer = dt.datetime(2026, 10, 13, 11, 30, tzinfo=dt.UTC).timestamp()
+    monkeypatch.setattr(sjekk_collect, "_latest_notification_epoch",
+                        lambda query: newer)
+    assert sjekk_collect.notification_pending("vigilo", state_dir=tmp_path,
+                                              now=_NOW)
+
+
+def test_notification_pending_mail_older_than_sync_skips(tmp_path,
+                                                         monkeypatch) -> None:
+    _write_state(tmp_path, "skolemelding", "2026-10-13T11:00:00Z")
+    older = dt.datetime(2026, 10, 13, 10, 30, tzinfo=dt.UTC).timestamp()
+    monkeypatch.setattr(sjekk_collect, "_latest_notification_epoch",
+                        lambda query: older)
+    assert not sjekk_collect.notification_pending(
+        "skolemelding", state_dir=tmp_path, now=_NOW)
+
+
+def test_notification_pending_stale_sync_falls_back(tmp_path,
+                                                    monkeypatch) -> None:
+    # Last sync older than NOTIFY_FALLBACK_AGE → sync even with no mail, in
+    # case notifications silently stopped.
+    _write_state(tmp_path, "vigilo", "2026-10-01T11:00:00Z")
+    monkeypatch.setattr(sjekk_collect, "_latest_notification_epoch",
+                        lambda query: None)
+    assert sjekk_collect.notification_pending("vigilo", state_dir=tmp_path,
+                                              now=_NOW)
+
+
+def test_notification_pending_notmuch_error_syncs(tmp_path,
+                                                  monkeypatch) -> None:
+    _write_state(tmp_path, "vigilo", "2026-10-13T11:00:00Z")
+
+    def _boom(query):
+        raise RuntimeError("notmuch failed")
+
+    monkeypatch.setattr(sjekk_collect, "_latest_notification_epoch", _boom)
+    assert sjekk_collect.notification_pending("vigilo", state_dir=tmp_path,
+                                              now=_NOW)
+
+
+def test_notify_queries_are_service_subjects() -> None:
+    """Gating keys must match the track names used in phase_a."""
+    assert set(sjekk_collect.NOTIFY_QUERIES) == {"vigilo", "skolemelding"}

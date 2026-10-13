@@ -12,14 +12,22 @@ uv run sjekk-collect --no-sync       # skip the freshness phase
 uv run sjekk-collect --timeout 60    # per-command cap (default 120 s)
 ```
 
-**Phase A — freshness (parallel):** checks when `mail-sync.service` last
+**Phase A — freshness:** checks when `mail-sync.service` last
 ran (`systemctl --user show mail-sync.service -p ExecMainExitTimestamp
 --value`); if older than ~15 min (or `--force-sync`), the unit is started
 and awaited (300 s cap) before any mail is read. In parallel,
 `spond-sync --once` fetches new Spond activity (idempotent, auto-bumps its
-own cursor), and `vigilo-sync --once` / `skolemelding-sync --once` fetch
-new school messages (idempotent; triage cursor stays with the reader's
-`--bump`; auth loss exits 0 with `auth_required` set).
+own cursor). Then `vigilo-sync --once` / `skolemelding-sync --once` run —
+**gated on the notification mail**: both services always mail when there is
+new content, so the sync only runs when notmuch has a notification mail
+(`subject:"Ny melding i Vigilo"` / `subject:"Ny Skolemelding"`) newer than
+the sync's own `last_successful_run` in `memory/<track>-state.json`. A sync
+older than 7 days runs anyway (safety net if notifications stop), as does
+any lookup failure, and `--force-sync` overrides the gate. The syncs are
+idempotent; the triage cursor stays with the reader's `--bump`; auth loss
+exits 0 with `auth_required` set. Phase B still runs `vigiloshown` /
+`skolemeldingshow` every time — they read local state only, so a skipped
+sync still surfaces untriaged backlog.
 
 **Phase B — collect (parallel):** one output file per track, written to
 `memory/sjekk/<UTC-timestamp>/` with a `latest` symlink repointed at the

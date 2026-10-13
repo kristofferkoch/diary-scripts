@@ -9,11 +9,13 @@ sjekk SOP. It runs in two phases:
       --force-sync), start the unit and wait for it (blocking, 300 s cap)
       so the mail triage reads a fresh index.
     * `spond-sync --once` (idempotent; auto-bumps its own cursor).
-    * `vigilo-sync --once` (idempotent; the triage cursor stays with
-      vigiloshown --bump; auth loss exits 0 with `auth_required` set, so it
-      never breaks the collect).
-    * `skolemelding-sync --once` (same semantics as vigilo-sync: idempotent,
-      split triage cursor, auth loss exits 0).
+    * `vigilo-sync --once` / `skolemelding-sync --once` — **gated on the
+      notification mail**: both services always mail when there is new
+      content, so the sync runs only when notmuch has a notification mail
+      newer than the sync's own `last_successful_run` (a sync older than
+      NOTIFY_FALLBACK_AGE runs anyway, as a safety net). Idempotent; the
+      triage cursor stays with the reader's --bump; auth loss exits 0 with
+      `auth_required` set, so it never breaks the collect.
 
   Phase B — collect (parallel, one output file per track):
     mail.txt, spond.txt, spond-events.txt, signal.txt, vigilo.txt,
@@ -51,6 +53,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import datetime as dt
+import json
 import re
 import subprocess
 import sys
@@ -62,6 +65,18 @@ from mail_reader.config import workspace_root
 DEFAULT_TIMEOUT = 120
 SYNC_TIMEOUT = 300
 MAIL_SYNC_MAX_AGE = dt.timedelta(minutes=15)
+
+# Vigilo and Skolemelding always send a notification mail when there is new
+# content, so their Phase-A syncs are gated on such a mail being indexed in
+# notmuch newer than the sync's own `last_successful_run`. The queries are
+# the services' own notification subjects (no private data). A sync older
+# than NOTIFY_FALLBACK_AGE runs anyway — safety net if notifications ever
+# stop arriving.
+NOTIFY_QUERIES = {
+    "vigilo": 'subject:"Ny melding i Vigilo"',
+    "skolemelding": 'subject:"Ny Skolemelding"',
+}
+NOTIFY_FALLBACK_AGE = dt.timedelta(days=7)
 
 # The *show tools signal "nothing new" as exit 1 with only cursor /
 # "(no matching …)" lines on stderr — that's a quiet track, not a failure.
@@ -269,8 +284,75 @@ def mail_sync_stale(max_age: dt.timedelta = MAIL_SYNC_MAX_AGE) -> bool:
     return dt.datetime.now(dt.UTC) - last > max_age
 
 
+# --- Phase A gating: notification-mail check for vigilo / skolemelding -----
+
+
+def _last_sync_epoch(state_file: Path) -> int | None:
+    """Epoch of the sync's `last_successful_run`, or None when unknown."""
+    try:
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    raw = data.get("last_successful_run")
+    if not raw:
+        return None
+    try:
+        return int(dt.datetime.fromisoformat(
+            raw.replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return None
+
+
+def _latest_notification_epoch(query: str, timeout: int = 30) -> int | None:
+    """Epoch of the newest indexed mail matching *query*.
+
+    None = no matching mail indexed. Raises RuntimeError when the notmuch
+    query itself fails — the caller treats that as "sync anyway".
+    """
+    res = _run_one(["notmuch", "search", "--format=json", "--output=summary",
+                    "--limit=1", "--sort=newest-first", "--", query],
+                   timeout=timeout)
+    if res.failed:
+        raise RuntimeError(res.output.strip()[-200:] or "notmuch failed")
+    try:
+        hits = json.loads(res.output)
+        return int(hits[0]["timestamp"]) if hits else None
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError,
+            ValueError) as e:
+        raise RuntimeError(f"unparseable notmuch output: {e}") from e
+
+
+def notification_pending(track: str, *, state_dir: Path | None = None,
+                         now: dt.datetime | None = None) -> bool:
+    """True when the track's Phase-A sync should run.
+
+    Sync when a notification mail is indexed that is newer than the sync's
+    own `last_successful_run`, when the state is unknown, when the last sync
+    is older than NOTIFY_FALLBACK_AGE, or when the notmuch lookup fails —
+    every uncertainty resolves to *sync*.
+    """
+    now = now or dt.datetime.now(dt.UTC)
+    state_file = (state_dir or workspace_root() / "memory") \
+        / f"{track}-state.json"
+    last = _last_sync_epoch(state_file)
+    if last is None:
+        return True
+    if now.timestamp() - last > NOTIFY_FALLBACK_AGE.total_seconds():
+        return True
+    try:
+        newest = _latest_notification_epoch(NOTIFY_QUERIES[track])
+    except RuntimeError:
+        return True
+    return newest is not None and newest > last
+
+
 def phase_a(*, force_sync: bool, no_sync: bool) -> list[str]:
-    """Freshness passes, run in parallel. Returns human log lines."""
+    """Freshness passes. Returns human log lines.
+
+    mail-sync and spond-sync run first (in parallel); the vigilo /
+    skolemelding syncs run after, gated on their notification mail (which
+    needs the fresh mail index).
+    """
     if no_sync:
         return ["phase A skipped (--no-sync)"]
     log: list[str] = []
@@ -294,23 +376,22 @@ def phase_a(*, force_sync: bool, no_sync: bool) -> list[str]:
         log.append(f"!! spond-sync failed: {tail}" if res.failed
                    else f"spond-sync: {tail or 'ok'}")
 
-    def _vigilo() -> None:
-        res = _run_one(["vigilo-sync", "--once"], timeout=SYNC_TIMEOUT)
+    def _notified(track: str) -> None:
+        if not force_sync and not notification_pending(track):
+            log.append(f"{track}-sync: skipped — no notification mail "
+                       f"since last sync")
+            return
+        res = _run_one([f"{track}-sync", "--once"], timeout=SYNC_TIMEOUT)
         tail = res.output.strip().splitlines()[-1] if res.output.strip() else ""
-        log.append(f"!! vigilo-sync failed: {tail}" if res.failed
-                   else f"vigilo-sync: {tail or 'ok'}")
+        log.append(f"!! {track}-sync failed: {tail}" if res.failed
+                   else f"{track}-sync: {tail or 'ok'}")
 
-    def _skolemelding() -> None:
-        res = _run_one(["skolemelding-sync", "--once"], timeout=SYNC_TIMEOUT)
-        tail = res.output.strip().splitlines()[-1] if res.output.strip() else ""
-        log.append(f"!! skolemelding-sync failed: {tail}" if res.failed
-                   else f"skolemelding-sync: {tail or 'ok'}")
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         pool.submit(_mail)
         pool.submit(_spond)
-        pool.submit(_vigilo)
-        pool.submit(_skolemelding)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        pool.submit(_notified, "vigilo")
+        pool.submit(_notified, "skolemelding")
     return log
 
 
