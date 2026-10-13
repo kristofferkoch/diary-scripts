@@ -111,7 +111,7 @@ def _content_hash(text: str, attachments: list[AttachmentPayload]) -> str:
 def _payload(source: str, mid: str, *, date: str | None, from_addr: str,
              to_addrs: str, subject: str, tid: str | None, text: str,
              attachments: list[AttachmentPayload]) -> SourcePayload:
-    """Assemble the payload + hash shared by all three source builders."""
+    """Assemble the payload + hash shared by all four source builders."""
     return {
         "mid": mid,
         "hdr": {"date": date, "from": from_addr,

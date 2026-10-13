@@ -260,7 +260,9 @@ def iter_inbox(api: SkolemeldingApi, known_ids: set[str]) -> Iterator[dict[str, 
     ``TotalMatching`` is covered — always the case on the first run, which
     is what makes it a full backfill. Re-seeing known messages means an
     edit deep in the history still gets caught, unlike a "first unchanged
-    page" stop.
+    page" stop. An absent or unparseable ``TotalMatching`` is *unknown*,
+    not zero — paging then ends on an empty page / the known-ids condition
+    instead of truncating after page 1.
     """
     seen_ids: set[str] = set()
     remaining = set(known_ids)
@@ -269,9 +271,9 @@ def iter_inbox(api: SkolemeldingApi, known_ids: set[str]) -> Iterator[dict[str, 
         data = api.search_messages(page=page, page_size=PAGE_SIZE)
         rows = [m for m in (data.get("Result") or []) if isinstance(m, dict)]
         try:
-            total = int(data.get("TotalMatching") or 0)
+            total = int(data.get("TotalMatching") or 0) or None
         except (TypeError, ValueError):
-            total = 0
+            total = None
         for msg in rows:
             mid = msg.get("Id")
             if mid is None:
@@ -282,7 +284,7 @@ def iter_inbox(api: SkolemeldingApi, known_ids: set[str]) -> Iterator[dict[str, 
             seen_ids.add(key)
             remaining.discard(key)
             yield msg
-        if not rows or len(seen_ids) >= total:
+        if not rows or (total is not None and len(seen_ids) >= total):
             return
         if check_remaining and not remaining:
             return
@@ -322,6 +324,8 @@ def _download_attachments(
             continue
         try:
             data, mime = api.attachment(source)
+        except AuthExpiredError:
+            raise  # a dead login is main()'s job, not an attachment failure
         except Exception as e:  # noqa: BLE001 — one bad file must not kill the run
             print(f"!! skolemelding: attachment {name!r}: {e}", file=sys.stderr)
             failed.append(name)
@@ -462,7 +466,10 @@ def main(argv: list[str] | None = None) -> int:
         total, records, counts = run_once(state)
     except AuthExpiredError as e:
         # Normal end-of-life for a refresh token. Loud, but a success as far
-        # as the sjekk is concerned.
+        # as the sjekk is concerned. State is reloaded from disk first:
+        # fetch_messages mutates the in-memory copy mid-run, and persisting
+        # those seen-marks would skip records the aborted run never emitted.
+        state = load_state()
         state["auth_required"] = True
         save_state(state, bump=False)
         print("!! skolemelding auth expired — run skolemelding-login", file=sys.stderr)

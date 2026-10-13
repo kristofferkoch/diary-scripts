@@ -140,6 +140,38 @@ def test_first_run_backfills_all_pages_and_dedupes(serve, workspace):
     assert state["auth_required"] is False
 
 
+def test_missing_total_matching_does_not_truncate_the_backfill(serve, workspace):
+    """An absent TotalMatching is unknown, not zero — paging must fall back
+    to the empty-page stop, or a first-run backfill silently stops at page 1."""
+    pages_seen: list[int] = []
+
+    def _route(request: httpx.Request) -> httpx.Response:
+        page = json.loads(request.content)["Page"]
+        pages_seen.append(page)
+        rows = {1: [message(3)], 2: [message(2), message(1)]}.get(page, [])
+        return httpx.Response(200, json={"Result": rows})  # no TotalMatching
+
+    serve({"POST /api/messagesearchmobile/": _route})
+    assert ss.main(["--once"]) == 0
+    assert pages_seen == [1, 2, 3], "paging ends on the empty page"
+    assert [r["data"]["id"] for r in records(workspace["jsonl"])] == [3, 2, 1]
+
+
+def test_unparseable_total_matching_is_unknown_not_zero(serve, workspace):
+    pages_seen: list[int] = []
+
+    def _route(request: httpx.Request) -> httpx.Response:
+        page = json.loads(request.content)["Page"]
+        pages_seen.append(page)
+        rows = {1: [message(2)], 2: [message(1)]}.get(page, [])
+        return httpx.Response(200, json={"Result": rows, "TotalMatching": "junk"})
+
+    serve({"POST /api/messagesearchmobile/": _route})
+    assert ss.main(["--once"]) == 0
+    assert pages_seen == [1, 2, 3]
+    assert len(records(workspace["jsonl"])) == 2
+
+
 def test_second_run_without_changes_emits_nothing(serve, workspace):
     serve(gateway())
     assert ss.main(["--once"]) == 0
@@ -238,6 +270,28 @@ def test_a_failed_attachment_is_retried_and_not_marked_seen(serve, workspace,
     assert "attachment download failed" in rec["data"]["note"]
 
 
+def test_attachment_auth_expiry_aborts_into_auth_required(serve, workspace, monkeypatch):
+    """attachment() is Bearer-authed and raises AuthExpiredError on a dead
+    login (terminal 401, or an HTML login page instead of the file). That is
+    not an attachment failure: the run must take the auth-required path —
+    the message is NOT marked seen and nothing is recorded."""
+    from scripts.skolemelding_api import AuthExpiredError
+
+    serve(gateway(pages={1: [message(1, attachments=[ATT_PATH])]}))
+
+    def _dead(self: Any, path: str, **kw: Any) -> tuple[bytes, str]:
+        raise AuthExpiredError("401 even after refreshing the token")
+
+    monkeypatch.setattr(SkolemeldingApi, "attachment", _dead)
+    assert ss.main(["--once"]) == 0, "a dead login must not break a sjekk"
+    state = json.loads(workspace["state"].read_text())
+    assert state["auth_required"] is True
+    assert "1" not in state.get("messages", {}), "the aborted message stays unseen"
+    assert "1" not in state.get("attachment_retries", {}), \
+        "auth expiry is not a retry-budget attachment failure"
+    assert records(workspace["jsonl"]) == []
+
+
 def test_attachment_retries_are_bounded_then_given_up(serve, workspace, monkeypatch,
                                                       capsys):
     serve(gateway(pages={1: [message(1, attachments=[ATT_PATH])]}))
@@ -284,6 +338,42 @@ def test_expired_login_exits_zero_and_flags_the_state(serve, workspace, capsys):
     state = json.loads(workspace["state"].read_text())
     assert state["auth_required"] is True
     assert "last_successful_run" not in state, "a failed run must not move the cursor"
+    assert records(workspace["jsonl"]) == []
+
+
+def test_auth_expiry_mid_run_does_not_persist_partial_state(serve, workspace, capsys):
+    """AuthExpiredError on page 2: page 1 already marked a new message seen
+    in the in-memory state, but its record was never emitted — persisting
+    that mark would skip the message forever. The handler must reload state
+    from disk and only set auth_required."""
+    known = message(1)
+    old_run = "2026-10-01T06:00:00Z"
+    workspace["state"].write_text(json.dumps({
+        "messages": {"1": {"sig": ss.message_signature(known),
+                           "timestamp": known["Timestamp"]}},
+        "cursor": "2026-10-01T07:00:00Z",
+        "last_successful_run": old_run,
+        "auth_required": False,
+    }))
+
+    def _paged(request: httpx.Request) -> httpx.Response:
+        page = json.loads(request.content)["Page"]
+        if page == 1:
+            return httpx.Response(
+                200, json={"Result": [message(2)], "TotalMatching": 3})
+        return httpx.Response(401, json={"message": "expired"})
+
+    serve({"POST /api/messagesearchmobile/": _paged,
+           # The forced refresh after the 401 is refused → AuthExpiredError.
+           "POST /token": Resp(400, {"error": "invalid_grant"})})
+    assert ss.main(["--once"]) == 0
+    assert "auth expired" in capsys.readouterr().err
+    state = json.loads(workspace["state"].read_text())
+    assert state["auth_required"] is True
+    assert set(state["messages"]) == {"1"}, \
+        "page 1's in-memory seen-mark must not reach disk"
+    assert state["cursor"] == "2026-10-01T07:00:00Z", "triage cursor untouched"
+    assert state["last_successful_run"] == old_run, "an aborted run is not a success"
     assert records(workspace["jsonl"]) == []
 
 
@@ -334,7 +424,7 @@ def test_attachment_name_from_portal_path():
     assert ss.attachment_name("") == "attachment"
 
 
-def test_recently_ran_reads_the_cursor_leniently():
+def test_recently_ran_reads_last_successful_run_leniently():
     assert ss.recently_ran({}) is False
     assert ss.recently_ran({"last_successful_run": "not a date"}) is False
     fresh = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
