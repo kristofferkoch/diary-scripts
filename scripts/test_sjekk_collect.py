@@ -7,7 +7,11 @@ Run with `uv run pytest scripts/`.
 from __future__ import annotations
 
 import datetime as dt
+import json
 
+import pytest
+
+from scripts import sjekk_collect
 from scripts.sjekk_collect import (
     TRACKS,
     TrackResult,
@@ -132,14 +136,7 @@ def test_skolemelding_track_reads_the_triage_cursor() -> None:
     assert argv == ["skolemeldingshow", "--since-cursor", "--headers-only"]
 
 
-
 # --- Phase-A gating: vigilo / skolemelding sync only on notification mail --
-
-import json
-
-import pytest
-
-from scripts import sjekk_collect
 
 
 def _write_state(tmp_path, track: str, last_run: str) -> None:

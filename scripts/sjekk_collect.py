@@ -294,7 +294,7 @@ def _last_sync_epoch(state_file: Path) -> int | None:
     except (OSError, json.JSONDecodeError):
         return None
     raw = data.get("last_successful_run")
-    if not raw:
+    if not isinstance(raw, str) or not raw:
         return None
     try:
         return int(dt.datetime.fromisoformat(
@@ -399,7 +399,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="parallel collector for the sjekk (see module docstring)")
     parser.add_argument("--force-sync", action="store_true",
-                        help="restart mail-sync.service even if it looks fresh")
+                        help="restart mail-sync.service even if it looks "
+                             "fresh, and sync vigilo / skolemelding even "
+                             "without a notification mail")
     parser.add_argument("--no-sync", action="store_true",
                         help="skip Phase A (no mail-sync / spond-sync / "
                              "vigilo-sync / skolemelding-sync)")
