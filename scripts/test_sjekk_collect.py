@@ -125,3 +125,9 @@ def test_embed_health_track_is_per_source() -> None:
     [argv] = TRACKS["embed-health.txt"]
     assert "GROUP BY source" in argv[-1]
 
+
+def test_skolemelding_track_reads_the_triage_cursor() -> None:
+    """Like vigilo.txt: headers of records since the hand-advanced cursor."""
+    [argv] = TRACKS["skolemelding.txt"]
+    assert argv == ["skolemeldingshow", "--since-cursor", "--headers-only"]
+

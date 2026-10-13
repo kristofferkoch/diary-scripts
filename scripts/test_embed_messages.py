@@ -12,6 +12,7 @@ from scripts.embed_messages import (
     _content_hash,
     decide,
     signal_payload,
+    skolemelding_payload,
     spond_payload,
     vigilo_payload,
 )
@@ -301,6 +302,74 @@ class TestVigiloPayload:
         assert vigilo_payload({"kind": "message", "data": {}}) is None
         assert vigilo_payload({"kind": "news", "data": {}}) is None
         assert vigilo_payload({"kind": "consent", "data": {}}) is None
+
+
+# ---------- skolemelding ----------
+
+def _skolemelding_msg(**over):
+    data = {
+        "id": 12345678,
+        "header": "Ukeplan uke 42",
+        "sender": "Eksempel skole",
+        "timestamp": "2026-10-12T10:00:00+02:00",
+        "body": "Se vedlegg",
+        "threads": [],
+        "attachments": [],
+    }
+    data.update(over)
+    return {"kind": "message", "fetched_at": "2026-10-13T08:00:00Z",
+            "data": data}
+
+
+class TestSkolemeldingPayload:
+    def test_text_and_mapping(self):
+        p = _must(skolemelding_payload(_skolemelding_msg(
+            threads=[{"sender": "Forelder", "timestamp": "2026-10-13T07:00:00+02:00",
+                      "body": "Takk!", "attachments": []}])))
+        assert p["mid"] == "skolemelding:message:12345678"
+        assert p["source"] == "skolemelding"
+        assert p["hdr"]["subject"] == "Ukeplan uke 42"
+        assert p["hdr"]["from"] == "Eksempel skole"
+        assert p["hdr"]["date"] == "2026-10-12T10:00:00+02:00"
+        text = p["body_chunks"][0]
+        assert "Se vedlegg" in text
+        assert "--- Forelder (2026-10-13T07:00:00+02:00) ---" in text
+        assert "Takk!" in text
+
+    def test_message_update_collapses_to_same_row(self):
+        original = _must(skolemelding_payload(_skolemelding_msg()))
+        update_rec = _skolemelding_msg(body="Endret tekst")
+        update_rec["kind"] = "message_update"
+        updated = _must(skolemelding_payload(update_rec))
+        # An update re-emits the whole message: it upserts over the original
+        # row (same message_id) instead of duplicating it.
+        assert updated["mid"] == original["mid"]
+        assert updated["content_hash"] != original["content_hash"]
+
+    def test_attachment_extracted_from_recorded_path(self, tmp_path):
+        blob = tmp_path / "attachments" / "12345678" / "Uke_42.txt"
+        blob.parent.mkdir(parents=True)
+        blob.write_text("weekly plan for week 42")
+        rec = _skolemelding_msg(attachments=[
+            {"name": "Uke 42.txt", "mimeType": "text/plain",
+             "source": "/globalassets/attachments/x/Uke 42.txt",
+             "path": str(blob)}])
+        p = _must(skolemelding_payload(rec))
+        att = p["attachments"][0]
+        assert att["filename"] == "Uke 42.txt"
+        assert att["text_chars"] > 0
+        assert any("week 42" in c for c in att["chunks"])
+
+    def test_attachment_missing_file_is_metadata_only(self, tmp_path):
+        rec = _skolemelding_msg(attachments=[
+            {"name": "gone.txt", "mimeType": "text/plain",
+             "path": str(tmp_path / "gone.txt")}])
+        p = _must(skolemelding_payload(rec))
+        assert p["attachments"][0]["text_chars"] == 0
+
+    def test_missing_id_and_unknown_kind_skipped(self):
+        assert skolemelding_payload({"kind": "message", "data": {}}) is None
+        assert skolemelding_payload({"kind": "news", "data": {"id": 1}}) is None
 
 
 # ---------- content hash + upsert decision ----------

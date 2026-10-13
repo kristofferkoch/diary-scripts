@@ -5,24 +5,27 @@ Postgres + pgvector `mailvec` store alongside mail, reusing embed_mail's
 schema (migration 016), chunking, batching and insertion helpers.
 
 Sources (under `memory/` in the diary workspace):
-    signal/YYYY-MM-DD.jsonl   signal-capture records (immutable)
-    spond/YYYY-MM-DD.jsonl    spond-sync records (re-emitted on change)
-    vigilo/YYYY-MM-DD.jsonl   vigilo-sync records (re-emitted on change)
+    signal/YYYY-MM-DD.jsonl       signal-capture records (immutable)
+    spond/YYYY-MM-DD.jsonl        spond-sync records (re-emitted on change)
+    vigilo/YYYY-MM-DD.jsonl       vigilo-sync records (re-emitted on change)
+    skolemelding/YYYY-MM-DD.jsonl skolemelding-sync records (re-emitted on change)
 
 Each record becomes one `messages` row (tier 0, source tag, synthesized
 message_id: `signal:{ts}:{hash12}`, `spond:{kind}:{id}`,
-`vigilo:{kind}:{id}`) plus body chunks, exactly like embed_mail — so
-search-mail finds everything with one query.
+`vigilo:{kind}:{id}`, `skolemelding:message:{id}`) plus body chunks, exactly
+like embed_mail — so search-mail finds everything with one query.
 
 Idempotency / upsert, keyed on message_id + content_hash (sha1 of the
 assembled text + extracted attachment text):
     no row          → insert
     same hash       → skip (the common case on the 15-min full rescan)
     hash differs    → DELETE (cascades chunks/attachments) + re-insert —
-                      covers Spond RSVP/reschedule and Vigilo message_update
+                      covers Spond RSVP/reschedule and Vigilo/Skolemelding
+                      message_update
 
 Signal attachment blobs live under ~/.local/share/signal-cli/attachments/<id>;
-Vigilo files under memory/vigilo/attachments/ (path recorded by vigilo-sync).
+Vigilo files under memory/vigilo/attachments/, Skolemelding files under
+memory/skolemelding/attachments/ (paths recorded by the syncs).
 Extractable types (pdf/docx/odt/text) get their text chunked; images and
 missing blobs stay metadata-only rows (text_chars=0), same as mail.
 
@@ -72,7 +75,7 @@ SIGNAL_ATTACH_DIR = Path(os.environ.get(
     "SIGNAL_CLI_ATTACHMENTS",
     Path.home() / ".local" / "share" / "signal-cli" / "attachments"))
 
-SOURCES = ("signal", "spond", "vigilo")
+SOURCES = ("signal", "spond", "vigilo", "skolemelding")
 
 
 class SourcePayload(MessagePayload):
@@ -396,8 +399,76 @@ def vigilo_payload(rec: dict[str, Any]) -> SourcePayload | None:
                     tid=None, text=text, attachments=attachments)
 
 
+# ---------- skolemelding ----------
+
+def _skolemelding_attachment(att: dict[str, Any]) -> AttachmentPayload:
+    """The sync recorded the local file it landed in, so re-derive nothing —
+    resolve like skolemeldingshow does."""
+    from scripts.skolemeldingshow import local_attachment_path
+    return _attachment(str(att.get("name") or ""), str(att.get("mimeType") or ""),
+                       0, local_attachment_path(att))
+
+
+def skolemelding_payload(rec: dict[str, Any]) -> SourcePayload | None:
+    """One skolemelding-sync record (message | message_update) → payload.
+
+    message and message_update collapse to one row
+    (`skolemelding:message:<Id>`): an update re-emits the whole message, so
+    it upserts over the original instead of duplicating it.
+
+    >>> rec = {"kind": "message", "fetched_at": "2026-10-13T08:00:00Z",
+    ...        "data": {"id": 123, "header": "Ukeplan uke 42",
+    ...                 "sender": "Eksempel skole",
+    ...                 "timestamp": "2026-10-12T10:00:00+02:00",
+    ...                 "body": "Se vedlegg", "threads": [
+    ...                     {"sender": "Forelder", "timestamp": "2026-10-13T07:00:00+02:00",
+    ...                      "body": "Takk!", "attachments": []}],
+    ...                 "attachments": []}}
+    >>> p = skolemelding_payload(rec)
+    >>> p["mid"], p["hdr"]["from"], p["hdr"]["subject"]
+    ('skolemelding:message:123', 'Eksempel skole', 'Ukeplan uke 42')
+    >>> p["body_chunks"][0]
+    'Ukeplan uke 42\\nSe vedlegg\\n--- Forelder (2026-10-13T07:00:00+02:00) ---\\nTakk!'
+
+    >>> skolemelding_payload({"kind": "message_update", "fetched_at": rec["fetched_at"],
+    ...                       "data": rec["data"]})["mid"] == p["mid"]
+    True
+    >>> skolemelding_payload({"kind": "message", "data": {}}) is None
+    True
+    """
+    if rec.get("kind") not in ("message", "message_update"):
+        return None
+    data = rec.get("data") or {}
+    mid_raw = data.get("id")
+    if mid_raw is None:
+        return None
+    fetched = rec.get("fetched_at") or ""
+    parts = [str(data.get("header") or "")]
+    if data.get("body"):
+        parts.append(str(data["body"]))
+    for thread in data.get("threads") or []:
+        if not isinstance(thread, dict):
+            continue
+        parts.append(f"--- {thread.get('sender') or '?'} "
+                     f"({thread.get('timestamp') or ''}) ---")
+        if thread.get("body"):
+            parts.append(str(thread["body"]))
+    attachments = [
+        _skolemelding_attachment(a) for a in (data.get("attachments") or [])
+        if isinstance(a, dict)
+    ]
+    text = "\n".join(p for p in parts if p)
+    if not text and not attachments:
+        return None
+    return _payload("skolemelding", f"skolemelding:message:{mid_raw}",
+                    date=str(data.get("timestamp") or fetched) or None,
+                    from_addr=str(data.get("sender") or ""), to_addrs="",
+                    subject=str(data.get("header") or ""), tid=None,
+                    text=text, attachments=attachments)
+
+
 BUILDERS = {"signal": signal_payload, "spond": spond_payload,
-            "vigilo": vigilo_payload}
+            "vigilo": vigilo_payload, "skolemelding": skolemelding_payload}
 
 
 # ---------- upsert + batch flush ----------

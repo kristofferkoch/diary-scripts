@@ -9,12 +9,16 @@ sjekk SOP. It runs in two phases:
       --force-sync), start the unit and wait for it (blocking, 300 s cap)
       so the mail triage reads a fresh index.
     * `spond-sync --once` (idempotent; auto-bumps its own cursor).
-    * `vigilo-sync --once` (idempotent; auto-bumps its own cursor; auth loss
-      exits 0 with `auth_required` set, so it never breaks the collect).
+    * `vigilo-sync --once` (idempotent; the triage cursor stays with
+      vigiloshown --bump; auth loss exits 0 with `auth_required` set, so it
+      never breaks the collect).
+    * `skolemelding-sync --once` (same semantics as vigilo-sync: idempotent,
+      split triage cursor, auth loss exits 0).
 
   Phase B — collect (parallel, one output file per track):
     mail.txt, spond.txt, spond-events.txt, signal.txt, vigilo.txt,
-    calendar-retire.txt, backup-health.txt, embed-health.txt, services.txt
+    skolemelding.txt, calendar-retire.txt, backup-health.txt,
+    embed-health.txt, services.txt
 
 Sibling tools are invoked by name (`mailshow`, `spondshow`, …) — they are on
 PATH when this runs under `uv run --project diary-scripts`.
@@ -77,6 +81,7 @@ TRACKS: dict[str, list[list[str]]] = {
                           "--headers-only"]],
     "signal.txt": [["signalshow", "--since-cursor", "--headers-only"]],
     "vigilo.txt": [["vigiloshown", "--since-cursor", "--headers-only"]],
+    "skolemelding.txt": [["skolemeldingshow", "--since-cursor", "--headers-only"]],
     "calendar-retire.txt": [["retire-calendar"]],
     "backup-health.txt": [["systemctl", "show", "restic-backup.service",
                            "-p", "Result", "-p", "ExecMainExitTimestamp",
@@ -295,10 +300,17 @@ def phase_a(*, force_sync: bool, no_sync: bool) -> list[str]:
         log.append(f"!! vigilo-sync failed: {tail}" if res.failed
                    else f"vigilo-sync: {tail or 'ok'}")
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+    def _skolemelding() -> None:
+        res = _run_one(["skolemelding-sync", "--once"], timeout=SYNC_TIMEOUT)
+        tail = res.output.strip().splitlines()[-1] if res.output.strip() else ""
+        log.append(f"!! skolemelding-sync failed: {tail}" if res.failed
+                   else f"skolemelding-sync: {tail or 'ok'}")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         pool.submit(_mail)
         pool.submit(_spond)
         pool.submit(_vigilo)
+        pool.submit(_skolemelding)
     return log
 
 
@@ -308,7 +320,8 @@ def main() -> None:
     parser.add_argument("--force-sync", action="store_true",
                         help="restart mail-sync.service even if it looks fresh")
     parser.add_argument("--no-sync", action="store_true",
-                        help="skip Phase A (no mail-sync / spond-sync / vigilo-sync)")
+                        help="skip Phase A (no mail-sync / spond-sync / "
+                             "vigilo-sync / skolemelding-sync)")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT,
                         help=f"per-command timeout in Phase B "
                              f"(default {DEFAULT_TIMEOUT} s)")
