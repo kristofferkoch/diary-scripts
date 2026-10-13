@@ -17,7 +17,9 @@ ran (`systemctl --user show mail-sync.service -p ExecMainExitTimestamp
 --value`); if older than ~15 min (or `--force-sync`), the unit is started
 and awaited (300 s cap) before any mail is read. In parallel,
 `spond-sync --once` fetches new Spond activity (idempotent, auto-bumps its
-own cursor).
+own cursor), and `vigilo-sync --once` / `skolemelding-sync --once` fetch
+new school messages (idempotent; triage cursor stays with the reader's
+`--bump`; auth loss exits 0 with `auth_required` set).
 
 **Phase B — collect (parallel):** one output file per track, written to
 `memory/sjekk/<UTC-timestamp>/` with a `latest` symlink repointed at the
@@ -29,6 +31,8 @@ new run:
 | `spond.txt` | `spondshow --since-cursor --headers-only` |
 | `spond-events.txt` | `spondshow --kind event --future --headers-only` |
 | `signal.txt` | `signalshow --since-cursor --headers-only` (cursor bump stays agent-side) |
+| `vigilo.txt` | `vigiloshown --since-cursor --headers-only` |
+| `skolemelding.txt` | `skolemeldingshow --since-cursor --headers-only` |
 | `calendar-retire.txt` | `retire-calendar` (real run — idempotent; moved lines captured for enrichment) |
 | `backup-health.txt` | `systemctl show restic-backup.service -p Result -p ExecMainExitTimestamp --value` |
 | `embed-health.txt` | `psql -d mailvec -t -c "SELECT source, now() - max(embedded_at) FROM messages GROUP BY source ORDER BY source;"` (per-source, so one stale source can't hide behind the others) |

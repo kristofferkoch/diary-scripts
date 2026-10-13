@@ -16,7 +16,8 @@ Entry-point names: `mailshow`, `search-mail`, `embed-mail`, `embed-messages`,
 `archive-inbox`, `notmuch-sync-tags`, `spond-sync`, `spondshow`, `finance-ingest`,
 `retire-calendar`, `sjekk-collect`, `kindle-dashboard`, `immich-recent`,
 `dsh-web-notify`, `vigilo-api`, `vigilo-login`, `vigilo-sync`, `vigiloshown`,
-`skolemelding-api`, `skolemelding-login`. Server modules are
+`skolemelding-api`, `skolemelding-login`, `skolemelding-sync`,
+`skolemeldingshow`. Server modules are
 invoked as `uv run python -m mail_reader.server` and
 `uv run python -m scripts.kindle_dashboard.serve`.
 
@@ -42,7 +43,7 @@ Per-tool detail and the triage SOPs live in `docs/`. This file is the index.
 | [`docs/mail.md`](docs/mail.md) | notmuch/Proton sync, `mailshow`, the **mail triage SOP**, sent-mail caveat, semantic search, `embed-mail`, image descriptions, `archive-inbox`, maildir gotchas, attachments |
 | [`docs/spond.md`](docs/spond.md) | `spond-sync` / `spondshow`, the **Spond triage SOP**, auth |
 | [`docs/vigilo.md`](docs/vigilo.md) | `vigilo-sync` / `vigiloshown`, the **Vigilo triage SOP** (AKS/school), auth |
-| [`docs/skolemelding.md`](docs/skolemelding.md) | `skolemelding-login` / `skolemelding-api` — Skoleplattform Oslo auth + read-only probe (sync/show not built yet) |
+| [`docs/skolemelding.md`](docs/skolemelding.md) | `skolemelding-sync` / `skolemeldingshow`, the **Skolemelding triage SOP** (Skoleplattform Oslo), auth, `skolemelding-api` probe |
 | [`docs/signal.md`](docs/signal.md) | `signal-capture` + `signalshow`, the **Signal triage SOP**, receipt photos in Note-to-Self |
 | [`docs/finance.md`](docs/finance.md) | `finance-ingest`, receipt routes (Signal vs mail), unidentified-transaction checks |
 | [`docs/calendar.md`](docs/calendar.md) | `retire-calendar` mechanical step + manual enrichment, and the Kindle-refresh rule |
