@@ -53,9 +53,11 @@ kind exists purely because nothing else surfaces it.
   `status` that says *pending*; a hentemelding carries nothing that says *needs
   doing*, so this sync is the only reminder there is. That is why a note inside
   `CHECKOUT_EXPIRY_WARN_DAYS` (21) is **re-emitted on a weekly drumbeat**,
-  `utløper om N dager`, rather than mentioned once and scrolled away — and why
-  a note already past its date says `utløpt for N dager siden`, never a
-  negative countdown (AKS keeps returning the note after it expires).
+  `utløper om N dager`, rather than mentioned once and scrolled away. A note
+  already past its date never counts backwards: the record reads
+  `utløpt — returneres fortsatt av AKS` (AKS does keep returning an expired
+  note), and `vigiloshown` renders the span as `utløpt for N dager siden`, not
+  `-N dager igjen`.
 - A note that stops coming back (expired, deleted, switched off) gets one
   record, `returneres ikke lenger (utløpt eller slettet)` — the permission is
   gone, which is what the whole pickup plan rests on. Only a *successful*

@@ -171,6 +171,7 @@ def test_a_note_past_its_date_says_so_instead_of_counting_backwards():
                                    with_attachments=False, api=None))
     assert "utløpt for 3 dager siden" in out
     assert "-3 dager igjen" not in out
+    assert "recurrence=weekly" in out, "the expired record still has a pickup rule"
 
 
 def test_a_vanished_note_still_renders():

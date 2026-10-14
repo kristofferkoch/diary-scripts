@@ -634,8 +634,9 @@ def test_an_expired_note_still_returned_is_not_said_to_expire_in_minus_three_day
     serve(routes)
     vs.main(["--once"])
     changes = [r["data"]["change"] for r in _notes(workspace)]
-    assert changes[-1].startswith("utløpt"), changes
-    assert "-" not in changes[-1], changes
+    # Exact, not startswith: the doc names this sentence, and "utløpt…" plus
+    # "no minus sign" was satisfiable by wording the doc does not describe.
+    assert changes[-1] == "utløpt — returneres fortsatt av AKS", changes
     assert _notes(workspace)[-1]["data"]["daysLeft"] == -3
 
 
