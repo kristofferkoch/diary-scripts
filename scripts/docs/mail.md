@@ -284,7 +284,9 @@ conversations too. Sources under `memory/`:
   not duplicate it). Thread kinds embed title + per-message
   sender/time/body; news/consent embed title + body. Message attachments
   resolve via the local path vigilo-sync recorded; news attachments are
-  metadata-only (they download over the API at show time).
+  metadata-only (they download over the API at show time). `check_out_note`
+  is not embedded at all: a standing hentemelding is a fact about a date
+  rather than a message, and `vigiloshown` is its reader.
 
 All rows get `tier = 0` and a `content_hash` (sha1 of assembled text +
 attachment texts). Upsert per record: no row → insert; same hash → skip

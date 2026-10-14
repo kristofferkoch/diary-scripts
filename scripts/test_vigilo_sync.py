@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -352,6 +352,8 @@ def test_web_kinds_are_recorded_when_the_token_works_there(serve, workspace):
                                     "status": "pending", "deadline": "2026-10-20"}],
         "GET /api/consent-forms/counts": {"totalConsentFormsCount": 1,
                                           "unreadConsentFormsCount": 1},
+        "GET /api/check-in-notes": [{"id": "n-1", "noteText": "Hentes av bestemor",
+                                     "toDate": "2026-12-24T00:00:00"}],
     }
     serve({**gateway(), **routes})
     assert vs.main(["--once"]) == 0
@@ -397,6 +399,7 @@ def test_news_that_already_rolled_over_is_not_repeated(serve, workspace):
         "GET /api/news-feed": [{"id": "post-1", "title": "Ukeplan", "created": "2026-10-10"}],
         "GET /api/consent-forms": [],
         "GET /api/consent-forms/counts": {"totalConsentFormsCount": 0},
+        "GET /api/check-in-notes": [],
     }
     serve({**gateway(), **routes})
     vs.main(["--once"])
@@ -416,6 +419,7 @@ def web_routes(**overrides: Any) -> dict[str, Any]:
         "GET /api/news-feed": [],
         "GET /api/consent-forms": [],
         "GET /api/consent-forms/counts": {"totalConsentFormsCount": 0},
+        "GET /api/check-in-notes": [],
     }
     routes.update(overrides)
     return routes
@@ -470,6 +474,158 @@ def test_dry_run_touches_nothing(serve, workspace):
     assert vs.main(["--once", "--dry-run"]) == 0
     assert records(workspace["jsonl"]) == []
     assert not workspace["state"].exists()
+
+
+# --- Hentemeldinger (check_out_note) ----------------------------------------
+
+NOTE_ID = "44444444-5555-6666-7777-888888888888"
+WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday"]
+
+
+def note_item(**over: Any) -> dict[str, Any]:
+    """One hentemelding in the shape the endpoint answers (live, 2026-10-14)."""
+    item: dict[str, Any] = {
+        "id": NOTE_ID,
+        "category": "afterSchoolCheckOut",
+        "type": {"id": "t-1", "name": "Hentes av:"},
+        "childPersonId": CHILD_ID,
+        "fromDate": "2026-08-17T00:00:00",
+        "toDate": "2026-12-24T00:00:00",
+        "recurrencePattern": {"recurrenceType": "weekly", "interval": 1,
+                              "daysOfWeek": list(WEEKDAYS)},
+        "isRecurring": True,
+        "isEnabled": True,
+        "timeOfDay": "15:00:00",
+        "noteText": "Går hjem selv etter kl. 14.",
+        "registeredTime": "2026-08-17T07:07:38Z",
+        "lastUpdatedTime": "2026-08-17T07:07:38Z",
+        "organizationalUnitId": UNIT_ID,
+        # The rule expanded to one entry per day — 93 of them for a school
+        # term. Nothing here may reach the JSONL.
+        "dateOccurrences": [{"time": f"2026-10-{d:02d}T15:00:00"} for d in range(1, 29)],
+    }
+    item.update(over)
+    return item
+
+
+def _ran_cleanly(workspace: dict[str, Path]) -> None:
+    """Leave state as a finished run would, so the next --once passes the floor."""
+    state = json.loads(workspace["state"].read_text())
+    state["last_successful_run"] = (
+        datetime.now(timezone.utc) - timedelta(hours=1)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    workspace["state"].write_text(json.dumps(state))
+
+
+def _notes(workspace: dict[str, Path]) -> list[dict[str, Any]]:
+    return [r for r in records(workspace["jsonl"]) if r["kind"] == "check_out_note"]
+
+
+def test_a_standing_hentemelding_is_recorded_without_the_occurrence_blob(serve, workspace):
+    serve({**gateway(), **web_routes(**{"GET /api/check-in-notes": [note_item()]})})
+    assert vs.main(["--once"]) == 0
+    recs = _notes(workspace)
+    assert len(recs) == 1
+    data = recs[0]["data"]
+    assert data["noteId"] == NOTE_ID
+    assert data["unit"] == "AKS", "the unit label comes from /api/children/my"
+    assert data["days"] == "man,tir,ons,tor,fre"
+    assert data["timeOfDay"] == "15:00:00"
+    assert data["fromDate"] == "2026-08-17"
+    assert data["toDate"] == "2026-12-24"
+    assert data["change"] == "ny"
+    assert "dateOccurrences" not in data
+
+
+def test_an_unchanged_hentemelding_is_not_repeated(serve, workspace):
+    serve({**gateway(), **web_routes(**{"GET /api/check-in-notes": [note_item()]})})
+    vs.main(["--once"])
+    _ran_cleanly(workspace)
+    vs.main(["--once"])
+    assert len(_notes(workspace)) == 1
+
+
+def test_an_edited_hentemelding_comes_back(serve, workspace):
+    """A new hentetid is a changed pickup plan — the whole reason for the kind."""
+    serve({**gateway(), **web_routes(**{"GET /api/check-in-notes": [note_item()]})})
+    vs.main(["--once"])
+    _ran_cleanly(workspace)
+    later = note_item(noteText="Går hjem selv etter kl. 16.",
+                      lastUpdatedTime="2026-10-14T09:12:00Z")
+    serve({**gateway(), **web_routes(**{"GET /api/check-in-notes": [later]})})
+    vs.main(["--once"])
+    recs = _notes(workspace)
+    assert [r["data"]["change"] for r in recs] == ["ny", "endret"]
+    assert recs[1]["data"]["title"] == "Går hjem selv etter kl. 16."
+
+
+def test_a_hentemelding_near_expiry_is_resent_on_a_drumbeat(serve, workspace):
+    """toDate is a hard stop; one warning at the start of the horizon would
+    have scrolled out of the sjekk long before the date did."""
+    soon = (date.today() + timedelta(days=5)).isoformat()
+    routes = {**gateway(), **web_routes(**{"GET /api/check-in-notes": [note_item(toDate=soon)]})}
+    serve(routes)
+    vs.main(["--once"])
+    state = json.loads(workspace["state"].read_text())
+    assert state["check_out_notes"][NOTE_ID]["sig"]
+    # A week of sjekker later: same note, same signature — but now close to
+    # expiring, so it has to come back around.
+    state["check_out_notes"][NOTE_ID]["emitted"] = (
+        datetime.now(timezone.utc) - timedelta(days=7)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    workspace["state"].write_text(json.dumps(state))
+    _ran_cleanly(workspace)
+    serve(routes)
+    vs.main(["--once"])
+    changes = [r["data"]["change"] for r in _notes(workspace)]
+    assert changes[0] == "ny"
+    assert "utløper om 5 dager" in changes[-1], changes
+    _ran_cleanly(workspace)
+    vs.main(["--once"])
+    assert len(_notes(workspace)) == len(changes), "no double reminder inside the gap"
+
+
+def test_a_hentemelding_that_stops_coming_back_is_reported_once(serve, workspace):
+    """Expired or deleted, the permission is gone — say it, then stop."""
+    serve({**gateway(), **web_routes(**{"GET /api/check-in-notes": [note_item()]})})
+    vs.main(["--once"])
+    _ran_cleanly(workspace)
+    serve({**gateway(), **web_routes(**{"GET /api/check-in-notes": []})})
+    vs.main(["--once"])
+    _ran_cleanly(workspace)
+    vs.main(["--once"])
+    recs = _notes(workspace)
+    assert len(recs) == 2, recs
+    gone = recs[1]["data"]
+    assert gone["change"].startswith("returneres ikke lenger")
+    assert gone["unit"] == "AKS", "the memo in state exists to name what vanished"
+    assert gone["title"] == "Går hjem selv etter kl. 14."
+    assert not json.loads(workspace["state"].read_text())["check_out_notes"]
+
+
+def test_a_dying_check_in_notes_endpoint_does_not_lose_the_run(serve, workspace, capsys):
+    serve({**gateway(), **web_routes(
+        **{"GET /api/check-in-notes": Resp(400, {"error": "bogus"}),
+           "GET /api/news-feed": [{"id": "post-1", "title": "Ukeplan",
+                                   "created": "2026-10-10"}]})})
+    assert vs.main(["--once"]) == 0
+    assert "check-out note fetch failed" in capsys.readouterr().err
+    kinds = {r["kind"] for r in records(workspace["jsonl"])}
+    assert kinds == {"message", "news"}, kinds
+    assert json.loads(workspace["state"].read_text())["last_successful_run"]
+
+
+def test_a_failed_check_in_notes_fetch_does_not_bury_a_known_note(serve, workspace):
+    """A 4xx must not read as "the note is gone" — that line means the pickup
+    plan fell over, and it is only allowed after a fetch that worked."""
+    routes = {**gateway(), **web_routes(**{"GET /api/check-in-notes": [note_item()]})}
+    serve(routes)
+    vs.main(["--once"])
+    _ran_cleanly(workspace)
+    serve({**gateway(), **web_routes(**{"GET /api/check-in-notes": Resp(400, {"error": "x"})})})
+    vs.main(["--once"])
+    assert len(_notes(workspace)) == 1
+    assert NOTE_ID in json.loads(workspace["state"].read_text())["check_out_notes"]
 
 
 # --- Small helpers ----------------------------------------------------------

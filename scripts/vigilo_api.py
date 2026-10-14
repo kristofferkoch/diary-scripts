@@ -850,6 +850,35 @@ class VigiloApi:
             "items",
         )
 
+    def check_in_notes(
+        self, child_id: str, *, from_date: str, to_date: str
+    ) -> list[dict[str, Any]]:
+        """Hentemeldinger — Vigilo calls them *check-in notes*, the app calls
+        the page «Hentemeldinger». Verified live 2026-10-14.
+
+        A record is a **recurrence rule with a validity span**, not a daily
+        message: ``recurrencePattern.daysOfWeek`` + ``timeOfDay`` +
+        ``fromDate``/``toDate``, with ``noteText`` as the free text (a standing
+        «går hjem selv» permission), ``isEnabled`` as the on/off switch and
+        ``type.name`` as the label. ``dateOccurrences`` is that same rule
+        expanded to one timestamp per day — 93 entries for a school term — so
+        a caller who wants the rule (``vigilo_sync``) drops the expansion.
+
+        Two quirks worth knowing before the first 404 hunt: the param is
+        ``childPersonId`` (a third spelling beside ``childIds`` and
+        ``childId``), and the date window is an **overlap** test — a rule that
+        starts in August is returned for a window beginning in November, while
+        a rule whose ``toDate`` has passed is not returned at all. An unknown
+        child answers 200 with an empty list, not 404.
+        """
+        return as_items(
+            self.web_json(
+                "/api/check-in-notes",
+                {"childPersonId": child_id, "fromDate": from_date, "toDate": to_date},
+            ),
+            "items",
+        )
+
     def lessons(
         self, child_id: str, organizational_unit_id: str, week: str | None = None
     ) -> list[dict[str, Any]]:

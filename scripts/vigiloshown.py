@@ -22,6 +22,7 @@ Examples::
     uv run vigiloshown --since-cursor                  # bodies + attachment paths
     uv run vigiloshown --since-cursor --full           # + extracted attachment text
     uv run vigiloshown --kind consent --since 2026-10-01
+    uv run vigiloshown --kind check_out_note --all    # hentemeldinger: window + expiry
     uv run vigiloshown --all --kind news               # weekly sweep, no cursor
     uv run vigiloshown --child aks --full
     uv run vigiloshown --since-cursor --bump           # triaged, advance cursor
@@ -39,6 +40,7 @@ from typing import Any, Iterator
 from mail_reader.config import workspace_root
 
 from scripts.vigilo_api import VigiloApi, VigiloError
+from scripts.vigilo_sync import CHECKOUT_EXPIRY_WARN_DAYS
 
 PROJECT_ROOT = workspace_root()
 STATE_PATH = PROJECT_ROOT / "memory" / "vigilo-state.json"
@@ -47,7 +49,7 @@ ATTACH_DIR = JSONL_DIR / "attachments"
 
 BODY_CHARS = 600
 ATTACH_CHARS = 40000
-KINDS = ("message", "message_update", "news", "consent")
+KINDS = ("message", "message_update", "news", "consent", "check_out_note")
 
 
 def parse_iso(s: str) -> datetime:
@@ -239,6 +241,25 @@ def render_header(rec: dict[str, Any]) -> str:
             f"{when} [! consent       ] {unit:<18} "
             f"{_trim(str(data.get('title') or ''), 46)!r} status={status} deadline={deadline}"
         )
+    if kind == "check_out_note":
+        # The header has to answer the two questions a hentemelding raises:
+        # what is the window, and how much of it is left.
+        bits: list[str] = []
+        if data.get("timeOfDay"):
+            bits.append(str(data["timeOfDay"])[:5])
+        if data.get("days"):
+            bits.append(str(data["days"]))
+        if data.get("toDate"):
+            bits.append(f"til {data['toDate']}")
+        left = data.get("daysLeft")
+        if isinstance(left, int) and not isinstance(left, bool) \
+                and left <= CHECKOUT_EXPIRY_WARN_DAYS:
+            bits.insert(0, "⚠")
+        tail = " ".join(filter(None, [" ".join(bits), str(data.get("change") or "")]))
+        return (
+            f"{when} [! {kind:<14}] {unit:<18} "
+            f"{_trim(str(data.get('title') or ''), 44)!r} {tail}".rstrip()
+        )
     return f"{when} [{kind}] {_trim(json.dumps(data, ensure_ascii=False), 120)}"
 
 
@@ -303,6 +324,21 @@ def render_full(rec: dict[str, Any], *, with_attachments: bool,
         if data.get("body"):
             out.extend(f"  {line}" for line in str(data["body"]).splitlines())
         out.append(f"  childId={data.get('childId')} consentId={data.get('consentId')}")
+    elif kind == "check_out_note":
+        title = str(data.get("title") or "")
+        if title:
+            out.extend(f"  {line}" for line in title.splitlines())
+        out.append(
+            f"  {data.get('timeOfDay') or '?'} [{data.get('days') or '-'}]  "
+            f"{data.get('fromDate') or '?'} → {data.get('toDate') or '?'}"
+        )
+        left = data.get("daysLeft")
+        if isinstance(left, int) and not isinstance(left, bool):
+            out.append(f"  {left} dager igjen av gyldigheten" if left >= 0
+                       else f"  utløpt for {-left} dager siden")
+        out.append(f"  type={data.get('typeName')} category={data.get('category')} "
+                   f"enabled={data.get('enabled')} recurring={data.get('recurring')}")
+        out.append(f"  childId={data.get('childId')} noteId={data.get('noteId')}")
     return out
 
 

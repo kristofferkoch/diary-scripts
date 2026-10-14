@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""vigilo-sync — pull Vigilo messages / oppslag / samtykker into JSONL.
+"""vigilo-sync — pull Vigilo messages / oppslag / samtykker / hentemeldinger into JSONL.
 
 Sink of the Vigilo pipeline; the reader is ``vigiloshown``. Skeleton follows
 ``spond_sync``: ``--once``, one stderr line, state bumped only on a clean run.
@@ -14,7 +14,8 @@ every answer an AKS teacher gives.
 
 Output: ``memory/vigilo/YYYY-MM-DD.jsonl``, one record per line::
 
-    {"kind": "message"|"message_update"|"news"|"consent", "fetched_at": "…Z", "data": {…}}
+    {"kind": "message"|"message_update"|"news"|"consent"|"check_out_note",
+     "fetched_at": "…Z", "data": {…}}
 
 ``data`` is deliberately *distilled* (threadUid, unit, title, per-message
 sender/time/body, attachment refs) rather than raw: the raw thread carries
@@ -30,6 +31,9 @@ State: ``memory/vigilo-state.json``::
       "threads":   { "<threadUid>": {"sig": "…", "time_created": "…", "message_count": 2} },
       "news":      { "<postId>": "<signature>" },
       "consents":  { "<id>": "<signature>" },
+      "check_out_notes": { "<noteId>": {"sig": "…", "emitted": "…Z",
+                                        "childId": "…", "title": "…",
+                                        "unit": "…"} },
       "attachment_retries": { "<threadUid>": 1 },
       "web_available": true,          # Phase B2 verdict, learned at runtime
       "auth_required": false,
@@ -79,10 +83,20 @@ STATE_PATH = PROJECT_ROOT / "memory" / "vigilo-state.json"
 OUT_DIR = PROJECT_ROOT / "memory" / "vigilo"
 ATTACH_DIR = OUT_DIR / "attachments"
 
-VALID_KINDS = {"message", "message_update", "news", "consent"}
+VALID_KINDS = {"message", "message_update", "news", "consent", "check_out_note"}
 PAGE_SIZE = 100
 ATTACH_RETRY_BUDGET = 3
 NEWS_WINDOW_DAYS = 30
+# A hentemelding is a rule with a validity span, so the window only has to
+# *overlap* it: today → today + lookahead catches the standing note today and
+# a note written for next term before the term starts.
+CHECKOUT_LOOKAHEAD_DAYS = 120
+# `toDate` is a hard stop — the day after it AKS has no written permission at
+# all and only lets the child out to an adult. So an expiring note is re-shot
+# on a drumbeat inside the horizon instead of once, or the warning scrolls out
+# of the sjekk before anyone acts on it.
+CHECKOUT_EXPIRY_WARN_DAYS = 21
+CHECKOUT_REMINDER_GAP_DAYS = 6
 # Cap on per-post detail fetches when the feed doesn't inline attachments:
 # without it, the first sync after a long silence fires one extra request
 # per post in the window. Beyond the cap the ids/names stay empty and the
@@ -439,6 +453,200 @@ def fetch_consents(api: VigiloApi, state: dict[str, Any], out: list[dict[str, An
     return {"consent": new}
 
 
+_DAY_ORDER = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+_DAY_SHORT = {
+    "monday": "man", "tuesday": "tir", "wednesday": "ons", "thursday": "tor",
+    "friday": "fre", "saturday": "lør", "sunday": "søn",
+}
+
+
+def weekday_list(days: Any) -> str:
+    """Vigilo's English weekday names as a compact Nordic list, in calendar order.
+
+    >>> weekday_list(["wednesday", "monday"])
+    'man,ons'
+    >>> weekday_list(["monday", "tuesday", "wednesday", "thursday", "friday"])
+    'man,tir,ons,tor,fre'
+    >>> weekday_list(None)
+    ''
+    >>> weekday_list(["Secondness"])
+    'Secondness'
+    """
+    names = [str(d) for d in (days or [])]
+    lower = [n.lower() for n in names]
+    ordered = [_DAY_SHORT[d] for d in _DAY_ORDER if d in lower]
+    return ",".join(ordered + [n for n, low in zip(names, lower) if low not in _DAY_ORDER])
+
+
+def _date_only(value: Any) -> str | None:
+    """``"2026-12-24T00:00:00"`` → ``"2026-12-24"``; these dates arrive as datetimes.
+
+    >>> _date_only("2026-12-24T00:00:00")
+    '2026-12-24'
+    >>> _date_only(None) is None
+    True
+    """
+    return str(value)[:10] if value else None
+
+
+def _days_until(value: Any, today: date) -> int | None:
+    """Days from ``today`` to ``value`` (negative once past), None when unreadable.
+
+    >>> from datetime import date as _d
+    >>> _days_until("2026-12-24T00:00:00", _d(2026, 12, 20))
+    4
+    >>> _days_until("2026-10-01", _d(2026, 12, 20))
+    -80
+    >>> _days_until(None, _d(2026, 12, 20)) is None
+    True
+    """
+    if not value:
+        return None
+    try:
+        return (date.fromisoformat(str(value)[:10]) - today).days
+    except ValueError:
+        return None
+
+
+def _reminder_due(emitted: Any, today: date, *, gap: int = CHECKOUT_REMINDER_GAP_DAYS) -> bool:
+    """True when a note reminder is overdue — never sent, or older than ``gap``.
+
+    >>> from datetime import date as _d
+    >>> _reminder_due(None, _d(2026, 12, 20))
+    True
+    >>> _reminder_due("2026-12-19T09:00:00Z", _d(2026, 12, 20))
+    False
+    >>> _reminder_due("2026-12-13T09:00:00Z", _d(2026, 12, 20))
+    True
+    """
+    if not emitted:
+        return True
+    try:
+        then = datetime.strptime(str(emitted), "%Y-%m-%dT%H:%M:%SZ").date()
+    except ValueError:
+        return True
+    return (today - then).days >= gap
+
+
+def _check_out_note_data(note: dict[str, Any], *, child_id: str, unit_names: dict[str, str],
+                         change: str, days_left: int | None) -> dict[str, Any]:
+    """Distil one check-in note into the record payload (no ``dateOccurrences``).
+
+    The expansion is the one field never to persist: 93 ISO timestamps per
+    note per term, all derivable from ``recurrencePattern`` + ``fromDate``,
+    and it would swamp a git-tracked JSONL.
+    """
+    pattern = note.get("recurrencePattern") or {}
+    unit_id = str(note.get("organizationalUnitId") or "")
+    return {
+        "noteId": note.get("id"),
+        "childId": child_id,
+        "unit": unit_label(unit_id, unit_names.get(unit_id, "?")),
+        "title": note.get("noteText") or "",
+        "timeOfDay": note.get("timeOfDay"),
+        "days": weekday_list(pattern.get("daysOfWeek")),
+        "recurring": note.get("isRecurring"),
+        "enabled": note.get("isEnabled"),
+        "typeName": (note.get("type") or {}).get("name") if isinstance(
+            note.get("type"), dict) else note.get("type"),
+        "category": note.get("category"),
+        "fromDate": _date_only(note.get("fromDate")),
+        "toDate": _date_only(note.get("toDate")),
+        "daysLeft": days_left,
+        "created": note.get("lastUpdatedTime") or note.get("registeredTime"),
+        "change": change,
+    }
+
+
+def fetch_check_out_notes(api: VigiloApi, state: dict[str, Any],
+                          out: list[dict[str, Any]], child_ids: list[str],
+                          unit_names: dict[str, str]) -> dict[str, int]:
+    """Hentemeldinger — the standing «går hjem selv» permission, and its expiry.
+
+    A third feed, invisible in both the message threads and the news feed, so
+    this kind exists purely because the note lives on its own endpoint. Two
+    things the sjekk must not miss:
+
+    * the note was **written or edited** — a hentetid *is* a pickup plan, and
+      a parent changing it mid-term is exactly the kind of thing a week of
+      silence hides;
+    * the note is **about to expire**. ``toDate`` is a hard stop: from the day
+      after it AKS lets the child out only to an adult in person, and nothing
+      in the app warns you beforehand. So a note inside the warning horizon is
+      re-emitted on a weekly drumbeat, not once.
+
+    A note that stops coming back (expired, deleted, or switched off out of
+    the window) gets one record saying so — the permission is gone, which is
+    the fact the whole pickup plan rests on. The text and unit are memoed in
+    state for exactly that sentence.
+    """
+    seen: dict[str, Any] = state.setdefault("check_out_notes", {})
+    fetched_at = utcnow_iso()
+    today = date.today()
+    frm = today.isoformat()
+    to = (today + timedelta(days=CHECKOUT_LOOKAHEAD_DAYS)).isoformat()
+    new = 0
+
+    for child_id in child_ids:
+        notes = api.check_in_notes(child_id, from_date=frm, to_date=to)
+        live: set[str] = set()
+        for note in notes:
+            if not isinstance(note, dict) or not note.get("id"):
+                continue
+            nid = str(note["id"])
+            live.add(nid)
+            pattern = note.get("recurrencePattern") or {}
+            sig = _signature(
+                note.get("noteText"), note.get("timeOfDay"),
+                weekday_list(pattern.get("daysOfWeek")), note.get("fromDate"),
+                note.get("toDate"), note.get("isEnabled"),
+                (note.get("type") or {}).get("name") if isinstance(note.get("type"), dict)
+                else note.get("type"),
+                note.get("lastUpdatedTime"),
+            )
+            entry = seen.get(nid) if isinstance(seen.get(nid), dict) else None
+            days_left = _days_until(note.get("toDate"), today)
+            change: str | None = None
+            if entry is None or entry.get("sig") != sig:
+                change = "endret" if entry else "ny"
+            elif days_left is not None and days_left <= CHECKOUT_EXPIRY_WARN_DAYS:
+                if _reminder_due(entry.get("emitted"), today):
+                    change = f"utløper om {days_left} dager"
+            if change is None:
+                continue
+            data = _check_out_note_data(note, child_id=child_id, unit_names=unit_names,
+                                        change=change, days_left=days_left)
+            seen[nid] = {
+                "sig": sig,
+                "emitted": fetched_at,
+                "childId": child_id,
+                "title": data["title"],
+                "unit": data["unit"],
+            }
+            out.append({"kind": "check_out_note", "fetched_at": fetched_at, "data": data})
+            new += 1
+
+        for nid, entry in list(seen.items()):
+            if not isinstance(entry, dict) or entry.get("childId") != child_id:
+                continue
+            if nid in live:
+                continue
+            seen.pop(nid)
+            out.append({
+                "kind": "check_out_note",
+                "fetched_at": fetched_at,
+                "data": {
+                    "noteId": nid,
+                    "childId": child_id,
+                    "unit": entry.get("unit"),
+                    "title": entry.get("title") or "",
+                    "change": "returneres ikke lenger (utløpt eller slettet)",
+                },
+            })
+            new += 1
+    return {"check_out_note": new}
+
+
 # --- Run --------------------------------------------------------------------
 
 
@@ -476,12 +684,12 @@ def run_once(
         if kinds & {"message", "message_update"}:
             counts.update(fetch_threads(api, state, records, child_ids))
 
-        web_kinds = kinds & {"news", "consent"}
+        web_kinds = kinds & {"news", "consent", "check_out_note"}
         if web_kinds:
             if state.get("web_available") is False:
                 print(
-                    "vigilo: skipping web-gateway kinds (news/consent) — the app "
-                    "token was refused there. Re-run vigilo-login, or remove "
+                    "vigilo: skipping web-gateway kinds (news/consent/check_out_note) — "
+                    "the app token was refused there. Re-run vigilo-login, or remove "
                     "web_available from memory/vigilo-state.json to probe again.",
                     file=sys.stderr,
                 )
@@ -506,8 +714,8 @@ def run_once(
                     state["web_available"] = False
                     print(
                         "!! vigilo: the web gateway refused the app token — "
-                        "news/consent are out of reach (PLAN-VIGILO.md Phase B2 "
-                        "fallback). Messages still work.",
+                        "news/consent/check_out_note are out of reach (PLAN-VIGILO.md "
+                        "Phase B2 fallback). Messages still work.",
                         file=sys.stderr,
                     )
                 except (ApiError, VigiloError) as e:
@@ -534,6 +742,17 @@ def run_once(
                             raise
                         except (ApiError, VigiloError) as e:
                             print(f"!! vigilo: consent fetch failed: {e}", file=sys.stderr)
+                    if "check_out_note" in kinds:
+                        try:
+                            counts.update(fetch_check_out_notes(
+                                api, state, records, child_ids,
+                                {unit_id: name for _, unit_id, name in units},
+                            ))
+                        except AuthExpiredError:
+                            raise
+                        except (ApiError, VigiloError) as e:
+                            print(f"!! vigilo: check-out note fetch failed: {e}",
+                                  file=sys.stderr)
     finally:
         api.close()
     return sum(counts.values()), records, counts
@@ -579,7 +798,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--once", action="store_true",
                     help="One-shot fetch (only mode; polling is systemd's job).")
-    ap.add_argument("--kinds", default="message,message_update,news,consent",
+    ap.add_argument("--kinds",
+                    default="message,message_update,news,consent,check_out_note",
                     help=f"Comma-separated subset of {sorted(VALID_KINDS)}.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Print records to stdout; write no JSONL, touch no state.")

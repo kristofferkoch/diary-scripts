@@ -455,6 +455,30 @@ def test_consent_forms_404_means_no_forms(api_factory):
     assert api.consent_forms(CHILD_ID, "unit-1") == []
 
 
+def test_check_in_notes_sends_child_person_id_and_the_window(api_factory):
+    # Verified live 2026-10-14: /api/check-in-notes wants childPersonId — a
+    # third spelling beside childIds (news-feed) and childId (consent-forms).
+    seen: list[httpx.Request] = []
+
+    def _ok(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"items": [{"id": "n-1", "noteText": "Hentes av bestemor"}]})
+
+    api = api_factory({"GET /api/check-in-notes": _ok})
+    items = api.check_in_notes(CHILD_ID, from_date="2026-10-14", to_date="2027-02-11")
+    assert [i["id"] for i in items] == ["n-1"]
+    assert seen[0].url.params["childPersonId"] == CHILD_ID
+    assert seen[0].url.params["fromDate"] == "2026-10-14"
+    assert seen[0].url.params["toDate"] == "2027-02-11"
+    assert "childIds" not in seen[0].url.params
+
+
+def test_check_in_notes_unknown_child_is_empty_not_404(api_factory):
+    # Live 2026-10-14: an unknown childPersonId answers 200 with {"items": []}.
+    api = api_factory({"GET /api/check-in-notes": {"items": []}})
+    assert api.check_in_notes(CHILD_ID, from_date="2026-10-14", to_date="2026-12-31") == []
+
+
 def test_consent_form_counts_reads_the_app_gateway(api_factory):
     seen: list[httpx.Request] = []
 

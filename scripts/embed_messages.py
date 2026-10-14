@@ -317,6 +317,10 @@ def vigilo_payload(rec: dict[str, Any]) -> SourcePayload | None:
     an update re-emits the whole thread, so it upserts over the original
     instead of duplicating it.
 
+    ``check_out_note`` is deliberately **not** embedded: a standing hentemelding
+    is not a message with a sender, it is a fact about a date, and the sjekk
+    reads it from ``vigiloshown`` — so it falls through to ``None`` below.
+
     >>> rec = {"kind": "message", "fetched_at": "2026-10-01T08:00:00Z",
     ...        "data": {"threadUid": "t1", "unit": "Example AKS",
     ...                 "title": "Pickup times",

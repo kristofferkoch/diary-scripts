@@ -59,6 +59,19 @@ def consent_record(**over: Any) -> dict[str, Any]:
     return {"kind": "consent", "fetched_at": "2026-10-11T06:00:00Z", "data": data}
 
 
+def check_out_note_record(**over: Any) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "noteId": "n-1", "childId": CHILD, "unit": "AKS Eksempelby",
+        "title": "Går hjem selv etter kl. 14.", "timeOfDay": "15:00:00",
+        "days": "man,tir,ons,tor,fre", "recurring": True, "enabled": True,
+        "typeName": "Hentes av:", "category": "afterSchoolCheckOut",
+        "fromDate": "2026-08-17", "toDate": "2026-12-24", "daysLeft": 71,
+        "created": "2026-08-17T07:07:38Z", "change": "ny",
+    }
+    data.update(over)
+    return {"kind": "check_out_note", "fetched_at": "2026-10-11T06:00:00Z", "data": data}
+
+
 @pytest.fixture
 def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     jsonl = tmp_path / "vigilo"
@@ -111,6 +124,43 @@ def test_consent_header_surfaces_status_and_deadline():
     assert "status=pending" in line
     assert "deadline=2026-10-20" in line
     assert "consent" in line
+
+
+def test_check_out_note_header_carries_window_and_validity():
+    line = vw.render_header(check_out_note_record())
+    assert "Går hjem selv" in line
+    assert "15:00" in line, "the time is the pickup plan"
+    assert "man,tir,ons,tor,fre" in line
+    assert "til 2026-12-24" in line
+    assert "[! check_out_note]" in line
+    assert "⚠" not in line, "71 days out is nothing to warn about"
+
+
+def test_a_note_near_expiry_is_flagged_in_the_header():
+    line = vw.render_header(check_out_note_record(daysLeft=10,
+                                                  change="utløper om 10 dager"))
+    assert "⚠" in line
+    assert "utløper om 10 dager" in line
+
+
+def test_check_out_note_full_shows_the_rule_and_the_ids():
+    out = "\n".join(vw.render_full(check_out_note_record(), with_attachments=False,
+                                   api=None))
+    assert "2026-08-17 → 2026-12-24" in out
+    assert "71 dager igjen av gyldigheten" in out
+    assert "childId=" in out and "noteId=n-1" in out
+
+
+def test_a_vanished_note_still_renders():
+    """The gone-record carries only id, title, unit — it must not crash on the
+    fields it no longer has, because that line is the important one."""
+    data = {"noteId": "n-1", "childId": CHILD, "unit": "AKS Eksempelby",
+            "title": "Går hjem selv etter kl. 14.",
+            "change": "returneres ikke lenger (utløpt eller slettet)"}
+    rec = {"kind": "check_out_note", "fetched_at": "2026-10-11T06:00:00Z", "data": data}
+    line = vw.render_header(rec)
+    assert "returneres ikke lenger" in line and "⚠" not in line
+    assert len(vw.render_full(rec, with_attachments=False, api=None)) > 1
 
 
 def test_unknown_kind_does_not_crash():
@@ -240,6 +290,23 @@ def test_kind_and_child_filters(workspace: dict[str, Path]):
     assert [r["kind"] for r in only_consent] == ["consent"]
     assert list(vw.iter_records(None, None, None, "ikke-noen")) == []
     assert len(list(vw.iter_records(None, None, None, "AKS"))) == 3
+
+
+def test_a_check_out_note_passes_both_filters(workspace: dict[str, Path]):
+    write_records(workspace, message_record(), check_out_note_record())
+    only = list(vw.iter_records(None, None, {"check_out_note"}, None))
+    assert [r["kind"] for r in only] == ["check_out_note"]
+    assert len(list(vw.iter_records(None, None, None, "aks"))) == 2, \
+        "the unit filter must see the note too"
+
+
+def test_the_cli_takes_the_new_kind(workspace: dict[str, Path], capsys):
+    """``--kind`` choices come from KINDS; a missing entry exits 2, not silently."""
+    write_records(workspace, message_record(), check_out_note_record())
+    assert vw.main(["--kind", "check_out_note", "--headers-only"]) == 0
+    out = capsys.readouterr().out
+    assert "Går hjem selv" in out
+    assert "Sjakkurs" not in out
 
 
 def test_broken_lines_are_skipped(workspace: dict[str, Path]):
