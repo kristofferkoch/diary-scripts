@@ -16,7 +16,7 @@ import pytest
 import httpx
 
 from scripts import vigilo_sync as vs
-from scripts.vigilo_api import TokenStore, VigiloApi
+from scripts.vigilo_api import ConfigError, TokenStore, VigiloApi
 
 from .test_vigilo_api import (
     CHILD_ID,
@@ -480,6 +480,19 @@ def test_dry_run_touches_nothing(serve, workspace):
 
 NOTE_ID = "44444444-5555-6666-7777-888888888888"
 WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday"]
+# The day the endpoint was probed live. Every hentemelding below is dated
+# against *this* day and the clock is pinned to it, so "2026-12-24" stays
+# exactly 71 days away whether pytest runs in October or next July — the
+# expiry arithmetic is what is under test, not the calendar of the machine
+# running it. (Only the new kind reads `today()`; messages and news keep the
+# real clock, they only ever compare timestamps they were handed.)
+TODAY = date(2026, 10, 14)
+
+
+@pytest.fixture(autouse=True)
+def pinned_clock(monkeypatch: pytest.MonkeyPatch) -> date:
+    monkeypatch.setattr(vs, "today", lambda: TODAY)
+    return TODAY
 
 
 def note_item(**over: Any) -> dict[str, Any]:
@@ -534,7 +547,29 @@ def test_a_standing_hentemelding_is_recorded_without_the_occurrence_blob(serve, 
     assert data["fromDate"] == "2026-08-17"
     assert data["toDate"] == "2026-12-24"
     assert data["change"] == "ny"
+    assert data["recurrenceType"] == "weekly"
+    # 14.10.2026 → 24.12.2026. Pinned clock, so this stays true in July.
+    assert data["daysLeft"] == (date(2026, 12, 24) - TODAY).days
     assert "dateOccurrences" not in data
+
+
+def test_a_broken_unit_labels_config_is_loud_and_writes_nothing(serve, workspace, capsys,
+                                                                monkeypatch):
+    """`unit_labels` feeds every kind's payload, so a broken one is a *config*
+    failure, not a kind failure: exit 2, nothing half-written, no cursor moved.
+    Loud is the point — silently falling back to raw AKS names would be the
+    quieter bug. Shared by all kinds since before check_out_note existed (a
+    review disputed this, so it is pinned here rather than argued)."""
+    def boom(*args: Any, **kwargs: Any) -> str:
+        raise ConfigError("vigilo.unit_labels is not a mapping")
+
+    monkeypatch.setattr(vs, "unit_label", boom)
+    serve({**gateway(), **web_routes(**{"GET /api/check-in-notes": [note_item()]})})
+    assert vs.main(["--once"]) == 2
+    assert "config error" in capsys.readouterr().err
+    assert not records(workspace["jsonl"])
+    state = json.loads(workspace["state"].read_text()) if workspace["state"].exists() else {}
+    assert not state.get("last_successful_run")
 
 
 def test_an_unchanged_hentemelding_is_not_repeated(serve, workspace):
@@ -562,7 +597,7 @@ def test_an_edited_hentemelding_comes_back(serve, workspace):
 def test_a_hentemelding_near_expiry_is_resent_on_a_drumbeat(serve, workspace):
     """toDate is a hard stop; one warning at the start of the horizon would
     have scrolled out of the sjekk long before the date did."""
-    soon = (date.today() + timedelta(days=5)).isoformat()
+    soon = (TODAY + timedelta(days=5)).isoformat()
     routes = {**gateway(), **web_routes(**{"GET /api/check-in-notes": [note_item(toDate=soon)]})}
     serve(routes)
     vs.main(["--once"])
@@ -570,9 +605,7 @@ def test_a_hentemelding_near_expiry_is_resent_on_a_drumbeat(serve, workspace):
     assert state["check_out_notes"][NOTE_ID]["sig"]
     # A week of sjekker later: same note, same signature — but now close to
     # expiring, so it has to come back around.
-    state["check_out_notes"][NOTE_ID]["emitted"] = (
-        datetime.now(timezone.utc) - timedelta(days=7)
-    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    state["check_out_notes"][NOTE_ID]["emitted"] = "2026-10-07T09:00:00Z"
     workspace["state"].write_text(json.dumps(state))
     _ran_cleanly(workspace)
     serve(routes)
@@ -583,6 +616,184 @@ def test_a_hentemelding_near_expiry_is_resent_on_a_drumbeat(serve, workspace):
     _ran_cleanly(workspace)
     vs.main(["--once"])
     assert len(_notes(workspace)) == len(changes), "no double reminder inside the gap"
+
+
+def test_an_expired_note_still_returned_is_not_said_to_expire_in_minus_three_days(
+    serve, workspace,
+):
+    """The endpoint should stop returning it; if it doesn't, the sentence must
+    still be true. (The vanish test uses this same shape, from the other end.)"""
+    past = (TODAY - timedelta(days=3)).isoformat()
+    routes = {**gateway(), **web_routes(**{"GET /api/check-in-notes": [note_item(toDate=past)]})}
+    serve(routes)
+    vs.main(["--once"])
+    state = json.loads(workspace["state"].read_text())
+    state["check_out_notes"][NOTE_ID]["emitted"] = "2026-10-01T09:00:00Z"
+    workspace["state"].write_text(json.dumps(state))
+    _ran_cleanly(workspace)
+    serve(routes)
+    vs.main(["--once"])
+    changes = [r["data"]["change"] for r in _notes(workspace)]
+    assert changes[-1].startswith("utløpt"), changes
+    assert "-" not in changes[-1], changes
+    assert _notes(workspace)[-1]["data"]["daysLeft"] == -3
+
+
+def test_an_open_ended_hentemelding_never_warns(serve, workspace):
+    """toDate missing = no expiry at all: quiet forever, not a warning with a
+    None in it."""
+    routes = {**gateway(), **web_routes(**{
+        "GET /api/check-in-notes": [note_item(toDate=None)]})}
+    serve(routes)
+    vs.main(["--once"])
+    state = json.loads(workspace["state"].read_text())
+    state["check_out_notes"][NOTE_ID]["emitted"] = "2020-01-01T09:00:00Z"
+    workspace["state"].write_text(json.dumps(state))
+    _ran_cleanly(workspace)
+    serve(routes)
+    vs.main(["--once"])
+    recs = _notes(workspace)
+    assert [r["data"]["change"] for r in recs] == ["ny"], recs
+    assert recs[0]["data"]["daysLeft"] is None
+    assert recs[0]["data"]["toDate"] is None
+
+
+def test_an_unreadable_expiry_is_said_out_loud(serve, workspace, capsys):
+    """A date we cannot parse used to mean "no expiry warning, ever, quietly" —
+    the one failure mode this kind exists to prevent."""
+    routes = {**gateway(), **web_routes(**{
+        "GET /api/check-in-notes": [note_item(toDate="24.12.2026")],
+        "GET /api/news-feed": [{"id": "post-1", "title": "Ukeplan",
+                                "created": "2026-10-10"}]})}
+    serve(routes)
+    assert vs.main(["--once"]) == 0
+    assert "unreadable toDate" in capsys.readouterr().err
+    assert len(_notes(workspace)) == 1  # the note itself is still recorded
+
+
+def test_a_note_switched_off_is_still_a_change_worth_reporting(serve, workspace):
+    """isEnabled is part of the signature: a disabled hentemelding means the
+    child is *not* walking home, whatever the text still says."""
+    serve({**gateway(), **web_routes(**{"GET /api/check-in-notes": [note_item()]})})
+    vs.main(["--once"])
+    _ran_cleanly(workspace)
+    serve({**gateway(), **web_routes(**{"GET /api/check-in-notes":
+                                        [note_item(isEnabled=False)]})})
+    vs.main(["--once"])
+    recs = _notes(workspace)
+    assert [r["data"]["change"] for r in recs] == ["ny", "endret"]
+    assert recs[1]["data"]["enabled"] is False
+
+
+def test_a_different_recurrence_is_a_new_pickup_plan(serve, workspace):
+    """mon–fre → every day is a different permission; the text never changes."""
+    serve({**gateway(), **web_routes(**{"GET /api/check-in-notes": [note_item()]})})
+    vs.main(["--once"])
+    _ran_cleanly(workspace)
+    daily = note_item(recurrencePattern={"recurrenceType": "daily", "interval": 1,
+                                         "daysOfWeek": None})
+    serve({**gateway(), **web_routes(**{"GET /api/check-in-notes": [daily]})})
+    vs.main(["--once"])
+    recs = _notes(workspace)
+    assert [r["data"]["change"] for r in recs] == ["ny", "endret"]
+    assert recs[1]["data"]["recurrenceType"] == "daily"
+    assert recs[1]["data"]["recurrenceInterval"] == 1, "in the record, not just the signature"
+    assert recs[1]["data"]["days"] == ""
+
+
+def test_a_note_that_only_changed_its_interval_is_still_a_changed_plan(serve, workspace):
+    """Everything in the signature has to be a field the reader can read, or an
+    announced change points at nothing. Annenhver uke is a real thing."""
+    serve({**gateway(), **web_routes(**{"GET /api/check-in-notes": [note_item()]})})
+    vs.main(["--once"])
+    _ran_cleanly(workspace)
+    every_other_week = note_item(
+        recurrencePattern={"recurrenceType": "weekly", "interval": 2,
+                           "daysOfWeek": ["wednesday"]})
+    serve({**gateway(), **web_routes(**{"GET /api/check-in-notes": [every_other_week]})})
+    vs.main(["--once"])
+    recs = _notes(workspace)
+    assert [r["data"]["change"] for r in recs] == ["ny", "endret"]
+    assert recs[1]["data"]["recurrenceInterval"] == 2
+    assert recs[1]["data"]["days"] == "ons"
+
+
+def test_a_note_with_no_recurrence_pattern_needs_no_days(serve, workspace):
+    """A one-off note (isRecurring false, no pattern) is still a hentemelding."""
+    serve({**gateway(), **web_routes(**{
+        "GET /api/check-in-notes": [note_item(isRecurring=False, recurrencePattern={})]})})
+    assert vs.main(["--once"]) == 0
+    data = _notes(workspace)[0]["data"]
+    assert data["days"] == "" and data["recurring"] is False
+
+
+def test_junk_items_in_the_answer_are_skipped(serve, workspace):
+    """One malformed entry must not cost the whole child's notes."""
+    serve({**gateway(), **web_routes(**{
+        "GET /api/check-in-notes": ["not-a-dict", None, {"noteText": "uten id"},
+                                    note_item()]})})
+    assert vs.main(["--once"]) == 0
+    assert len(_notes(workspace)) == 1
+
+
+def test_one_child_failing_does_not_cost_the_other_childs_notes(serve, workspace, capsys):
+    """Two children, one bad answer: what was fetched is still written."""
+    other = "aaaa1111-2222-3333-4444-555555555555"
+
+    def notes_by_child(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("childPersonId") == other:
+            return httpx.Response(400, json={"error": "bogus"})
+        return httpx.Response(200, json=[note_item()])
+
+    serve({
+        "GET /api/children": CHILDREN + [{"childId": other, "firstName": "Gutt",
+                                          "lastName": "Prøve"}],
+        "GET /api/message-threads": {"messageThreads": []},
+        "GET /api/children/my": [
+            {"id": CHILD_ID, "organizationalUnits": [{"id": UNIT_ID, "name": "AKS"}]},
+            {"id": other, "organizationalUnits": [{"id": UNIT_ID, "name": "AKS"}]},
+        ],
+        "GET /api/news-feed": [],
+        "GET /api/consent-forms": [],
+        "GET /api/consent-forms/counts": {"totalConsentFormsCount": 0},
+        "GET /api/check-in-notes": notes_by_child,
+    })
+    assert vs.main(["--once"]) == 0
+    assert "hentemelding fetch failed" in capsys.readouterr().err
+    recs = _notes(workspace)
+    assert [r["data"]["childId"] for r in recs] == [CHILD_ID], recs
+    state = json.loads(workspace["state"].read_text())
+    assert NOTE_ID in state["check_out_notes"]
+    assert state["last_successful_run"], "a partial fetch is still a finished run"
+
+
+def test_a_note_is_not_declared_gone_for_a_child_the_web_gateway_never_named(
+    serve, workspace, capsys,
+):
+    """/api/check-in-notes answers an unknown child with 200 and an empty list,
+    so an empty answer alone must never produce the "permission is gone"
+    record — that sentence is only allowed for a child the web gateway has
+    named as one of ours. The two gateways hand out child ids from different
+    places, and this sync has no proof they are the same string except that
+    they have been so far."""
+    stranger = "bbbb1111-2222-3333-4444-555555555555"
+    # The web gateway lists a child id that is *not* the one the notes were
+    # fetched for: run 1 records the note (fetching notes needs no such match),
+    # run 2 answers empty — and that is allowed to mean nothing at all.
+    web_only = [{"id": stranger, "organizationalUnits": [{"id": UNIT_ID, "name": "AKS"}]}]
+    serve({**gateway(), **web_routes(
+        **{"GET /api/children/my": web_only,
+           "GET /api/check-in-notes": [note_item()]})})
+    vs.main(["--once"])
+    assert [r["data"]["change"] for r in _notes(workspace)] == ["ny"]
+    _ran_cleanly(workspace)
+    serve({**gateway(), **web_routes(
+        **{"GET /api/children/my": web_only, "GET /api/check-in-notes": []})})
+    vs.main(["--once"])
+    recs = _notes(workspace)
+    assert [r["data"]["change"] for r in recs] == ["ny"], recs
+    assert NOTE_ID in json.loads(workspace["state"].read_text())["check_out_notes"]
+    assert "did not name this child" in capsys.readouterr().err
 
 
 def test_a_hentemelding_that_stops_coming_back_is_reported_once(serve, workspace):
@@ -603,13 +814,28 @@ def test_a_hentemelding_that_stops_coming_back_is_reported_once(serve, workspace
     assert not json.loads(workspace["state"].read_text())["check_out_notes"]
 
 
+def test_a_child_with_nothing_memoed_is_not_brought_up_in_the_warning(serve, workspace,
+                                                                      capsys):
+    """The warning is about a note we might be losing. A child the web gateway
+    does not name and never had a note here has nothing to lose, and must not
+    put a line on every run."""
+    stranger = "bbbb1111-2222-3333-4444-555555555555"
+    serve({**gateway(), **web_routes(**{
+        "GET /api/children/my": [
+            {"id": stranger, "organizationalUnits": [{"id": UNIT_ID, "name": "AKS"}]}],
+        "GET /api/check-in-notes": [],
+    })})
+    assert vs.main(["--once"]) == 0
+    assert "did not name this child" not in capsys.readouterr().err
+
+
 def test_a_dying_check_in_notes_endpoint_does_not_lose_the_run(serve, workspace, capsys):
     serve({**gateway(), **web_routes(
         **{"GET /api/check-in-notes": Resp(400, {"error": "bogus"}),
            "GET /api/news-feed": [{"id": "post-1", "title": "Ukeplan",
                                    "created": "2026-10-10"}]})})
     assert vs.main(["--once"]) == 0
-    assert "check-out note fetch failed" in capsys.readouterr().err
+    assert "hentemelding fetch failed" in capsys.readouterr().err
     kinds = {r["kind"] for r in records(workspace["jsonl"])}
     assert kinds == {"message", "news"}, kinds
     assert json.loads(workspace["state"].read_text())["last_successful_run"]

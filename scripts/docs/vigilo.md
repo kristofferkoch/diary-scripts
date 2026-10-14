@@ -29,8 +29,10 @@ Endpoint quirks learned live (2026-10-11, checked again 2026-10-14):
   can't masquerade as "no forms".
 - A failing web-kind endpoint (news/consent/check_out_note) no longer aborts
   the run: an API error there is logged and the records/state the other kinds
-  produced still land. Auth expiry still propagates to the `auth_required`
-  path; transport-level outages (DNS/TCP/timeouts) remain fatal to the run.
+  produced still land. Inside the hentemelding kind the same isolation runs
+  per **child** — one child's bad answer does not cost the other's notes. Auth
+  expiry still propagates to the `auth_required` path; transport-level outages
+  (DNS/TCP/timeouts) remain fatal to the run.
 
 ### Hentemeldinger — the `check_out_note` kind
 
@@ -47,13 +49,25 @@ kind exists purely because nothing else surfaces it.
   registered in August comes back for a window starting in November. The sync
   asks for today → +120 days.
 - `toDate` is a **hard stop** — from the day after it, AKS releases the child
-  only to an adult in person, and the app warns nobody. So a note inside
+  only to an adult in person, and the app warns nobody. A consent carries a
+  `status` that says *pending*; a hentemelding carries nothing that says *needs
+  doing*, so this sync is the only reminder there is. That is why a note inside
   `CHECKOUT_EXPIRY_WARN_DAYS` (21) is **re-emitted on a weekly drumbeat**,
-  `utløper om N dager`, rather than mentioned once and scrolled away.
+  `utløper om N dager`, rather than mentioned once and scrolled away — and why
+  a note already past its date says `utløpt for N dager siden`, never a
+  negative countdown (AKS keeps returning the note after it expires).
 - A note that stops coming back (expired, deleted, switched off) gets one
   record, `returneres ikke lenger (utløpt eller slettet)` — the permission is
   gone, which is what the whole pickup plan rests on. Only a *successful*
-  fetch may say that; an endpoint error must never read as "gone".
+  fetch may say that; an endpoint error must never read as "gone". And only for
+  a child the web gateway actually named: since an unknown id answers 200 with
+  an empty list, an empty answer from a child `/api/children/my` never listed
+  proves nothing, so that announcement is gated on it (with a line to stderr).
+- While `web_available: false` sits in `memory/vigilo-state.json`, this kind is
+  skipped along with news and consent and the drumbeat goes silent — nothing
+  announces the expiry, and nothing announces the expiry date passing. The skip
+  line on stderr names the kinds, so a sjekk with no hentemelding track at all
+  *is* the warning.
 - `dateOccurrences` is the recurrence rule expanded to one entry **per day**
   (93 for a school term) and is dropped before writing: everything in it is
   derivable from `recurrencePattern` + `fromDate`, and the JSONL is

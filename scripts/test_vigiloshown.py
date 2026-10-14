@@ -64,6 +64,7 @@ def check_out_note_record(**over: Any) -> dict[str, Any]:
         "noteId": "n-1", "childId": CHILD, "unit": "AKS Eksempelby",
         "title": "Går hjem selv etter kl. 14.", "timeOfDay": "15:00:00",
         "days": "man,tir,ons,tor,fre", "recurring": True, "enabled": True,
+        "recurrenceType": "weekly", "recurrenceInterval": 1,
         "typeName": "Hentes av:", "category": "afterSchoolCheckOut",
         "fromDate": "2026-08-17", "toDate": "2026-12-24", "daysLeft": 71,
         "created": "2026-08-17T07:07:38Z", "change": "ny",
@@ -146,9 +147,30 @@ def test_a_note_near_expiry_is_flagged_in_the_header():
 def test_check_out_note_full_shows_the_rule_and_the_ids():
     out = "\n".join(vw.render_full(check_out_note_record(), with_attachments=False,
                                    api=None))
+    lines = [line.strip() for line in out.splitlines()]
     assert "2026-08-17 → 2026-12-24" in out
     assert "71 dager igjen av gyldigheten" in out
+    assert "recurrence=weekly" in out
+    assert "×1" not in out, "weekly ×1 reads like it means something beside weekly"
+    assert "ny" in lines, "the header's verdict must survive into --full, as its own line"
     assert "childId=" in out and "noteId=n-1" in out
+
+
+def test_only_a_multiple_recurrence_is_printed_as_a_multiple():
+    """Fortnightly is the one case the × buys, and it has to be visible."""
+    weekly = "\n".join(vw.render_full(check_out_note_record(recurrenceType="daily"),
+                                      with_attachments=False, api=None))
+    assert "recurrence=daily" in weekly and "×" not in weekly
+    fortnight = "\n".join(vw.render_full(
+        check_out_note_record(recurrenceInterval=2), with_attachments=False, api=None))
+    assert "recurrence=weekly ×2" in fortnight
+
+
+def test_a_note_past_its_date_says_so_instead_of_counting_backwards():
+    out = "\n".join(vw.render_full(check_out_note_record(daysLeft=-3, change="utløpt"),
+                                   with_attachments=False, api=None))
+    assert "utløpt for 3 dager siden" in out
+    assert "-3 dager igjen" not in out
 
 
 def test_a_vanished_note_still_renders():

@@ -110,6 +110,17 @@ def utcnow_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def today() -> date:
+    """Local today, through one seam.
+
+    The expiry maths is all ``today``-relative, and a fixture that hardcodes
+    ``toDate: "2026-12-24"`` starts failing on its own terms once the calendar
+    walks past that date — so the tests pin this instead of the data. One
+    function, one place, no CLI surface pretending it can move the clock.
+    """
+    return date.today()
+
+
 def safe_filename(name: str, index: int) -> str:
     """A filesystem-safe attachment name — server-supplied, so assume nothing.
 
@@ -347,9 +358,9 @@ def fetch_news(api: VigiloApi, state: dict[str, Any], out: list[dict[str, Any]],
     """Oppslag / «Siste nytt» — where the ukeplan PDFs actually live."""
     seen: dict[str, Any] = state.setdefault("news", {})
     fetched_at = utcnow_iso()
-    today = date.today()
-    frm = (today - timedelta(days=NEWS_WINDOW_DAYS)).isoformat()
-    to = (today + timedelta(days=1)).isoformat()
+    day = today()
+    frm = (day - timedelta(days=NEWS_WINDOW_DAYS)).isoformat()
+    to = (day + timedelta(days=1)).isoformat()
     new = 0
     for child_id in child_ids:
         for post in api.news_feed(child_id, from_date=frm, to_date=to):
@@ -469,10 +480,16 @@ def weekday_list(days: Any) -> str:
     'man,tir,ons,tor,fre'
     >>> weekday_list(None)
     ''
+    >>> weekday_list("monday,friday")
+    'man,fre'
     >>> weekday_list(["Secondness"])
     'Secondness'
     """
-    names = [str(d) for d in (days or [])]
+    if isinstance(days, str):
+        # A CSV string instead of a list: iterating it would hand back letters
+        # and produce "m,o,n,d,a,y" in every header, forever, silently.
+        days = [part for part in days.split(",") if part.strip()]
+    names = [str(d).strip() for d in (days or [])]
     lower = [n.lower() for n in names]
     ordered = [_DAY_SHORT[d] for d in _DAY_ORDER if d in lower]
     return ",".join(ordered + [n for n, low in zip(names, lower) if low not in _DAY_ORDER])
@@ -545,6 +562,8 @@ def _check_out_note_data(note: dict[str, Any], *, child_id: str, unit_names: dic
         "title": note.get("noteText") or "",
         "timeOfDay": note.get("timeOfDay"),
         "days": weekday_list(pattern.get("daysOfWeek")),
+        "recurrenceType": pattern.get("recurrenceType"),
+        "recurrenceInterval": pattern.get("interval"),
         "recurring": note.get("isRecurring"),
         "enabled": note.get("isEnabled"),
         "typeName": (note.get("type") or {}).get("name") if isinstance(
@@ -560,7 +579,7 @@ def _check_out_note_data(note: dict[str, Any], *, child_id: str, unit_names: dic
 
 def fetch_check_out_notes(api: VigiloApi, state: dict[str, Any],
                           out: list[dict[str, Any]], child_ids: list[str],
-                          unit_names: dict[str, str]) -> dict[str, int]:
+                          units: list[tuple[str, str, str]]) -> dict[str, int]:
     """Hentemeldinger — the standing «går hjem selv» permission, and its expiry.
 
     A third feed, invisible in both the message threads and the news feed, so
@@ -579,16 +598,36 @@ def fetch_check_out_notes(api: VigiloApi, state: dict[str, Any],
     the window) gets one record saying so — the permission is gone, which is
     the fact the whole pickup plan rests on. The text and unit are memoed in
     state for exactly that sentence.
+
+    ``units`` is the web gateway's own ``(childId, unitId, name)`` list, which
+    does double duty: the labels, and the *only* authority for announcing a
+    vanishing. ``/api/check-in-notes`` answers an unknown child with 200 and an
+    empty list, never a 404 — so an empty answer proves nothing on its own, and
+    a child the web gateway has never named must not have its notes declared
+    gone. Fetching with a bad id would otherwise announce "you lost the
+    permission" on the very first run, forever.
     """
     seen: dict[str, Any] = state.setdefault("check_out_notes", {})
     fetched_at = utcnow_iso()
-    today = date.today()
-    frm = today.isoformat()
-    to = (today + timedelta(days=CHECKOUT_LOOKAHEAD_DAYS)).isoformat()
+    day = today()
+    unit_names = {unit_id: name for _, unit_id, name in units}
+    confirmed = {child for child, _, _ in units if child}
+    frm = day.isoformat()
+    to = (day + timedelta(days=CHECKOUT_LOOKAHEAD_DAYS)).isoformat()
     new = 0
 
     for child_id in child_ids:
-        notes = api.check_in_notes(child_id, from_date=frm, to_date=to)
+        try:
+            notes = api.check_in_notes(child_id, from_date=frm, to_date=to)
+        except AuthExpiredError:
+            raise
+        except (ApiError, VigiloError) as e:
+            # Two children, one bad answer: what came back for the other one is
+            # still worth a record. And this child's memoed notes must be left
+            # alone — a failure is not an empty list.
+            print(f"!! vigilo: hentemelding fetch failed for {child_id}: {e}",
+                  file=sys.stderr)
+            continue
         live: set[str] = set()
         for note in notes:
             if not isinstance(note, dict) or not note.get("id"):
@@ -598,20 +637,32 @@ def fetch_check_out_notes(api: VigiloApi, state: dict[str, Any],
             pattern = note.get("recurrencePattern") or {}
             sig = _signature(
                 note.get("noteText"), note.get("timeOfDay"),
-                weekday_list(pattern.get("daysOfWeek")), note.get("fromDate"),
+                weekday_list(pattern.get("daysOfWeek")),
+                pattern.get("recurrenceType"), pattern.get("interval"),
+                note.get("isRecurring"), note.get("fromDate"),
                 note.get("toDate"), note.get("isEnabled"),
                 (note.get("type") or {}).get("name") if isinstance(note.get("type"), dict)
                 else note.get("type"),
                 note.get("lastUpdatedTime"),
             )
             entry = seen.get(nid) if isinstance(seen.get(nid), dict) else None
-            days_left = _days_until(note.get("toDate"), today)
+            days_left = _days_until(note.get("toDate"), day)
+            if days_left is None and note.get("toDate"):
+                # An unreadable expiry used to mean "never warn again", which
+                # is the one failure this kind must not have: the date is the
+                # whole reason it exists.
+                print(f"!! vigilo: hentemelding {nid} has an unreadable toDate "
+                      f"{note.get('toDate')!r} — no expiry warning for it",
+                      file=sys.stderr)
             change: str | None = None
             if entry is None or entry.get("sig") != sig:
                 change = "endret" if entry else "ny"
             elif days_left is not None and days_left <= CHECKOUT_EXPIRY_WARN_DAYS:
-                if _reminder_due(entry.get("emitted"), today):
-                    change = f"utløper om {days_left} dager"
+                if _reminder_due(entry.get("emitted"), day):
+                    # A note past its toDate should not be coming back at all;
+                    # if it does, "utløper om -3 dager" is not a sentence.
+                    change = (f"utløper om {days_left} dager" if days_left >= 0
+                              else "utløpt — returneres fortsatt av AKS")
             if change is None:
                 continue
             data = _check_out_note_data(note, child_id=child_id, unit_names=unit_names,
@@ -626,6 +677,16 @@ def fetch_check_out_notes(api: VigiloApi, state: dict[str, Any],
             out.append({"kind": "check_out_note", "fetched_at": fetched_at, "data": data})
             new += 1
 
+        if child_id not in confirmed:
+            # Empty or not, this child was never named by the web gateway — and
+            # an unknown id answers 200 with an empty list, so nothing here may
+            # be read as "the permission is gone".
+            if any(isinstance(e, dict) and e.get("childId") == child_id
+                   for e in seen.values()):
+                print("!! vigilo: the web gateway did not name this child, so its "
+                      "hentemeldinger are not checked for expiry or deletion",
+                      file=sys.stderr)
+            continue
         for nid, entry in list(seen.items()):
             if not isinstance(entry, dict) or entry.get("childId") != child_id:
                 continue
@@ -743,10 +804,12 @@ def run_once(
                         except (ApiError, VigiloError) as e:
                             print(f"!! vigilo: consent fetch failed: {e}", file=sys.stderr)
                     if "check_out_note" in kinds:
+                        # ConfigError is a VigiloError, so a config hiccup in
+                        # unit_label degrades this kind like any other failure
+                        # rather than killing a run that is here for the mail.
                         try:
                             counts.update(fetch_check_out_notes(
-                                api, state, records, child_ids,
-                                {unit_id: name for _, unit_id, name in units},
+                                api, state, records, child_ids, units,
                             ))
                         except AuthExpiredError:
                             raise
@@ -800,7 +863,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="One-shot fetch (only mode; polling is systemd's job).")
     ap.add_argument("--kinds",
                     default="message,message_update,news,consent,check_out_note",
-                    help=f"Comma-separated subset of {sorted(VALID_KINDS)}.")
+                    help=f"Comma-separated subset of {sorted(VALID_KINDS)}. "
+                         f"check_out_note looks {CHECKOUT_LOOKAHEAD_DAYS} days ahead "
+                         f"and re-announces a note inside "
+                         f"{CHECKOUT_EXPIRY_WARN_DAYS} days of expiring — the two "
+                         "web calls are why the default run takes longer.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Print records to stdout; write no JSONL, touch no state.")
     ap.add_argument("--force", action="store_true",

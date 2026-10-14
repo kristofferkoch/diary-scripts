@@ -328,16 +328,31 @@ def render_full(rec: dict[str, Any], *, with_attachments: bool,
         title = str(data.get("title") or "")
         if title:
             out.extend(f"  {line}" for line in title.splitlines())
-        out.append(
-            f"  {data.get('timeOfDay') or '?'} [{data.get('days') or '-'}]  "
-            f"{data.get('fromDate') or '?'} → {data.get('toDate') or '?'}"
-        )
-        left = data.get("daysLeft")
-        if isinstance(left, int) and not isinstance(left, bool):
-            out.append(f"  {left} dager igjen av gyldigheten" if left >= 0
-                       else f"  utløpt for {-left} dager siden")
-        out.append(f"  type={data.get('typeName')} category={data.get('category')} "
-                   f"enabled={data.get('enabled')} recurring={data.get('recurring')}")
+        # The verdict is the point of the record ("ny", "endret", "utløper om
+        # 12 dager") — the header shows it, so --full must not drop it.
+        change = str(data.get("change") or "")
+        if change:
+            out.append(f"  {change}")
+        if data.get("toDate") or data.get("timeOfDay"):
+            out.append(
+                f"  {data.get('timeOfDay') or '?'} [{data.get('days') or '-'}]  "
+                f"{data.get('fromDate') or '?'} → {data.get('toDate') or '?'}"
+            )
+            left = data.get("daysLeft")
+            if isinstance(left, int) and not isinstance(left, bool):
+                out.append(f"  {left} dager igjen av gyldigheten" if left >= 0
+                           else f"  utløpt for {-left} dager siden")
+        if any(data.get(k) is not None
+               for k in ("typeName", "category", "enabled", "recurrenceType")):
+            recurrence = str(data.get("recurrenceType") or "?")
+            interval = data.get("recurrenceInterval")
+            if isinstance(interval, int) and interval > 1:
+                # Only a multiple is worth printing: "weekly ×1" reads like it
+                # means something beside "weekly".
+                recurrence += f" ×{interval}"
+            out.append(f"  type={data.get('typeName')} category={data.get('category')} "
+                       f"enabled={data.get('enabled')} "
+                       f"recurrence={recurrence} recurring={data.get('recurring')}")
         out.append(f"  childId={data.get('childId')} noteId={data.get('noteId')}")
     return out
 
@@ -352,7 +367,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--until", default=None,
                     help="ISO date/datetime (at or before) — pair with --since for a window.")
     ap.add_argument("--kind", action="append", choices=list(KINDS), default=None,
-                    help="Restrict to a kind (repeatable).")
+                    help=f"Restrict to a kind (repeatable). check_out_note is the "
+                         f"hentemelding with its validity end date; ⚠ marks one "
+                         f"inside {CHECKOUT_EXPIRY_WARN_DAYS} days of it.")
     ap.add_argument("--child", default=None, metavar="NEEDLE",
                     help="Only records whose childId / unit contains this (case-insensitive).")
     ap.add_argument("--all", action="store_true",
