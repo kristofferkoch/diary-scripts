@@ -88,21 +88,15 @@ def test_host_urls_come_from_config(with_config, monkeypatch: pytest.MonkeyPatch
     """Regression for 2026-06-02: the host must be read from `hosts.*`, not a
     hardcoded `gpu-host` default that silently leaked when $EMBED_URL was unset."""
     monkeypatch.delenv("EMBED_URL", raising=False)
-    monkeypatch.delenv("MLX_BASE", raising=False)
-    monkeypatch.delenv("NUEXTRACT_BASE", raising=False)
     monkeypatch.delenv("VLM_URL", raising=False)
     with_config(
         """
         [hosts]
         embed = "studio.example:8081"
-        mlx = "studio.example:8080"
-        nuextract = "studio.example:8082"
         vlm = "studio.example:8083"
         """
     )
     assert config.embed_url() == "http://studio.example:8081"
-    assert config.mlx_url() == "http://studio.example:8080"
-    assert config.nuextract_url() == "http://studio.example:8082"
     assert config.vlm_url() == "http://studio.example:8083"
 
 

@@ -144,16 +144,6 @@ def embed_url() -> str:
     return _host_url("EMBED_URL", "hosts.embed", "gpu-host:8081")
 
 
-def mlx_url() -> str:
-    """pr_compose MLX server (classifier/writer), e.g. ``http://gpu-host:8080``."""
-    return _host_url("MLX_BASE", "hosts.mlx", "gpu-host:8080")
-
-
-def nuextract_url() -> str:
-    """pr_compose NuExtract extractor server, e.g. ``http://gpu-host:8081``."""
-    return _host_url("NUEXTRACT_BASE", "hosts.nuextract", "gpu-host:8081")
-
-
 def vlm_url() -> str:
     """Vision-language model server (OpenAI-compatible
     ``/v1/chat/completions`` with image input), e.g. ``http://gpu-host:8080``."""

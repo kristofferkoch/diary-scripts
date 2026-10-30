@@ -21,7 +21,7 @@ Postgres + [pgvector](https://github.com/pgvector/pgvector), and a local LLM.
 |------|------------|
 | `scripts/` | CLI helpers and console entry points: mail viewers & embedding pipeline, notmuch tag sync, inbox auto-archive, Spond / Vigilo / Signal / Skoleplattform Oslo sync & viewers, calendar retirement, the sjekk collector, finance ingestion, Immich recent-photo reader, Kindle wall-dashboard generator, and dsh web login notifier. Start at [`scripts/README.md`](scripts/README.md). |
 | `mail_reader/` | A FastAPI web app: inbox summaries, structured extraction, agenda/calendar views, priority scoring, and thread analysis. See [`mail_reader/DESIGN.md`](mail_reader/DESIGN.md) and [`mail_reader/IDEAS.md`](mail_reader/IDEAS.md). |
-| `migrations/` | Postgres schema evolution — 17 migration files covering pgvector, attachments, summaries, queues, notes, shopping, VLM, sources, and more. |
+| `migrations/` | Postgres schema evolution — 16 migration files covering pgvector, attachments, summaries, queues, notes, shopping, VLM, sources, and more. |
 | `qcow-builder/` | Docker-based QCOW2 image builder: turns a restic whole-`/` snapshot into a bootable VM image with original UUIDs, GPT layout, and SELinux labels intact. |
 | `pyproject.toml` / `uv.lock` | The [uv](https://docs.astral.sh/uv/) project (Python ≥3.14). Includes `[build-system]` (hatchling) and `[project.scripts]` console entry points. |
 

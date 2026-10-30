@@ -53,7 +53,6 @@ Per-tool detail and the triage SOPs live in `docs/`. This file is the index.
 | [`docs/signal.md`](docs/signal.md) | `signal-capture` + `signalshow`, the **Signal triage SOP**, receipt photos in Note-to-Self |
 | [`docs/finance.md`](docs/finance.md) | `finance-ingest`, receipt routes (Signal vs mail), unidentified-transaction checks |
 | [`docs/calendar.md`](docs/calendar.md) | `retire-calendar` mechanical step + manual enrichment, and the Kindle-refresh rule |
-| [`docs/pr-composer.md`](docs/pr-composer.md) | per-mail GitHub PR pipeline: model server, writer tier, GitHub bot, postgres role, loop-break filter |
 | [`docs/webapp.md`](docs/webapp.md) | the `mail_reader` webapp |
 | [`docs/kindle-dashboard.md`](docs/kindle-dashboard.md) | the Kindle wall-display PNG generator |
 | [`docs/immich.md`](docs/immich.md) | `immich-recent` (Immich API reader) |
