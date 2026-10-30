@@ -58,7 +58,18 @@ def main(argv: list[str]) -> int:
     if not stat.S_ISSOCK(st.st_mode):
         die(f"{SOCK_PATH} exists but is not a socket — refusing to connect")
     if st.st_uid != 0:
-        die(f"{SOCK_PATH} is not owned by root — refusing to connect")
+        # Inside a user namespace (dsh sandboxes the shell in one that maps
+        # only the agent's uid/gid) root is unmapped and reads back as 65534,
+        # so the ownership check is meaningless there. Fall back to the
+        # property that matters: only root can create an entry in a directory
+        # that is not group- or world-writable.
+        parent = os.path.dirname(SOCK_PATH) or "."
+        try:
+            pst = os.stat(parent)
+        except OSError as exc:
+            die(f"cannot stat {parent} ({exc})")
+        if pst.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            die(f"{parent} is writable by group/other — refusing to trust {SOCK_PATH}")
 
     try:
         conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
