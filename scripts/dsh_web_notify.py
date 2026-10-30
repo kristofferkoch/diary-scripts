@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
-"""Send the dsh web login URL (with its per-boot token) to Signal note-to-self.
+"""Send a web UI's login URL (with its token) to Signal note-to-self.
 
-The dsh web UI has mandatory token auth: a random token per process start
-(can't be disabled or pinned), printed to the journal as a login URL with
-``?token=``. Phone bookmarks therefore die on every restart. This tool polls
-the service's journal for the URL printed by the current boot, rewrites the
-loopback authority to the public Caddy/tailnet base (``hosts.dsh_web`` in
-config, env override ``DSH_WEB_URL``), and sends it to the user's own
+Works for both web UIs behind Caddy:
+
+* ``dsh-web`` — random token per process start (can't be disabled or pinned),
+  printed as a login URL with ``?token=``. Phone bookmarks die on every
+  restart, which is why this exists at all.
+* ``kimi-web`` — persistent bearer token, printed as ``#token=`` (a URL
+  *fragment*, which the browser never sends to the server). The link is
+  stable, but sending it on restart is still the quickest way to confirm the
+  service came back.
+
+The tool polls the unit's journal for the URL printed by the current boot,
+rewrites the loopback authority to the public Caddy/tailnet base
+(``hosts.dsh_web`` / ``hosts.kimi_web`` in config, env overrides
+``DSH_WEB_URL`` / ``KIMI_WEB_URL``), and sends it to the user's own
 note-to-self chat via the signal-cli daemon's JSON-RPC socket.
 
 The socket call is a plain JSON-RPC *client* request — it runs no receive
@@ -31,10 +39,16 @@ import sys
 import time
 from urllib.parse import urlsplit, urlunsplit
 
-from mail_reader.config import dsh_web_url
+from mail_reader.config import dsh_web_url, kimi_web_url
 
-UNIT = "dsh-web"
+DEFAULT_UNIT = "dsh-web"
 TOKEN_RE = re.compile(r"https?://\S*?token=\S+")
+
+# Per-unit defaults: public base + human label for the Signal message.
+UNIT_DEFAULTS = {
+    "dsh-web": {"base": dsh_web_url, "label": "dsh web"},
+    "kimi-web": {"base": kimi_web_url, "label": "kimi web"},
+}
 
 DEFAULT_SOCKET_ENV = "SIGNAL_CLI_SOCKET"
 
@@ -45,37 +59,44 @@ def default_socket() -> str:
     return os.environ.get(DEFAULT_SOCKET_ENV, f"{runtime}/signal-cli/socket")
 
 
-def _invocation_id() -> str:
+def _scope(args: list[str], scope: str) -> list[str]:
+    """Insert --user for user-scope units (system units take no flag)."""
+    return args[:1] + (["--user"] if scope == "user" else []) + args[1:]
+
+
+def _invocation_id(unit: str, scope: str) -> str:
     """Current InvocationID of the running service — scopes the journal
     query to exactly this boot, so a token printed before this script got
     scheduled is still found (and stale tokens from older boots never are)."""
     out = subprocess.run(
-        ["systemctl", "--user", "show", UNIT,
-         "--property=InvocationID", "--value"],
+        _scope(["systemctl", "show", unit,
+                "--property=InvocationID", "--value"], scope),
         capture_output=True, text=True, check=True,
     )
     return out.stdout.strip()
 
 
-def _journal_invocation(invocation_id: str) -> str:
+def _journal_invocation(invocation_id: str, unit: str, scope: str) -> str:
     out = subprocess.run(
-        ["journalctl", "--user", "-u", UNIT,
-         f"_SYSTEMD_INVOCATION_ID={invocation_id}", "-o", "cat", "--no-pager"],
+        _scope(["journalctl", "-u", unit,
+                f"_SYSTEMD_INVOCATION_ID={invocation_id}",
+                "-o", "cat", "--no-pager"], scope),
         capture_output=True, text=True, check=True,
     )
     return out.stdout
 
 
-def find_token_url(timeout: float = 60.0, poll: float = 1.0) -> str | None:
+def find_token_url(unit: str = DEFAULT_UNIT, scope: str = "user",
+                   timeout: float = 60.0, poll: float = 1.0) -> str | None:
     """Latest token login URL printed by the *current* dsh-web boot, polling
     up to `timeout` seconds (the URL lands a moment after the service forks).
     Returns None when the service isn't running or no URL shows up in time."""
-    invocation_id = _invocation_id()
+    invocation_id = _invocation_id(unit, scope)
     if not invocation_id:
         return None
     deadline = time.monotonic() + timeout
     while True:
-        matches = TOKEN_RE.findall(_journal_invocation(invocation_id))
+        matches = TOKEN_RE.findall(_journal_invocation(invocation_id, unit, scope))
         if matches:
             return matches[-1]
         if time.monotonic() >= deadline:
@@ -88,7 +109,7 @@ def public_url(login_url: str, base: str) -> str:
     base, keeping path and query (the token) intact."""
     b = urlsplit(base)
     p = urlsplit(login_url)
-    return urlunsplit((b.scheme, b.netloc, p.path or "/", p.query, ""))
+    return urlunsplit((b.scheme, b.netloc, p.path or "/", p.query, p.fragment))
 
 
 def signal_note(message: str, socket_path: str | None = None,
@@ -128,6 +149,17 @@ def signal_note(message: str, socket_path: str | None = None,
 
 def main() -> None:
     p = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
+    p.add_argument("--unit", default=DEFAULT_UNIT,
+                   help="systemd unit whose journal carries the URL "
+                        "(dsh-web, kimi-web)")
+    p.add_argument("--scope", choices=("user", "system"), default="user",
+                   help="user units run as kek today; system units after the "
+                        "agent-uid split")
+    p.add_argument("--base-url", default=None,
+                   help="public base URL (default: hosts.dsh_web / "
+                        "hosts.kimi_web for the chosen unit)")
+    p.add_argument("--label", default=None,
+                   help="name used in the Signal message")
     p.add_argument("--timeout", type=float, default=60.0,
                    help="seconds to wait for the token URL in the journal")
     p.add_argument("--socket", default=None,
@@ -137,14 +169,18 @@ def main() -> None:
                    help="print the message instead of sending it")
     args = p.parse_args()
 
-    url = find_token_url(timeout=args.timeout)
+    defaults = UNIT_DEFAULTS.get(args.unit, {"base": dsh_web_url, "label": args.unit})
+    base = args.base_url or defaults["base"]()
+    label = args.label or defaults["label"]
+
+    url = find_token_url(unit=args.unit, scope=args.scope, timeout=args.timeout)
     if url is None:
-        print(f"!! no token URL from a running '{UNIT}' within {args.timeout:.0f}s",
-              file=sys.stderr)
+        print(f"!! no token URL from a running '{args.unit}' within "
+              f"{args.timeout:.0f}s", file=sys.stderr)
         sys.exit(1)
 
-    link = public_url(url, dsh_web_url())
-    message = f"dsh web (re)started — login from phone:\n{link}"
+    link = public_url(url, base)
+    message = f"{label} (re)started — login from phone:\n{link}"
     if args.dry_run:
         print(message)
         return
