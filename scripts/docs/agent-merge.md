@@ -7,7 +7,7 @@ The private diary keeps its unattended memory/sjekk merge flow. The public
 executed by privileged sync services.
 
 ```
-agent branch ──fetch──▶ isolated queue/automatic ──reviewed OID + Signal token──▶ approved master ──▶ GitHub
+agent branch ──fetch──▶ isolated queue/automatic ──reviewed OID + owner UID──▶ approved master ──▶ GitHub
 ```
 
 The integration, queue, and approved checkouts are separate repositories with
@@ -43,35 +43,15 @@ agent-merge-approve <full-OID-from-rev-parse>
 
 The human supplies the reviewed OID explicitly; the client never substitutes a
 newer queue HEAD. `agent-merge-approve` sends that OID with the request, so a
-branch queued after review cannot slip into approval. It prompts for the
-persistent token without putting the token in process arguments. The service
-serializes queue/approval operations and compares the token in constant time
-with `/var/lib/agent-merge/token`, a `0600` file owned by the account owner. The
-agent cannot read that file or incoming Signal messages.
+branch queued after review cannot slip into approval. The socket service uses
+`SO_PEERCRED` to require a caller with the account owner's UID; there is no token
+or Signal prompt. Queue and approval operations are serialized with an exclusive
+lock.
 
 An empty queue is a no-op. A changed queue OID, dirty approved/integration
-checkout, dirty queue, unexpected queue HEAD, or merge conflict fails closed.
-Approval uses a normal non-forced `git push origin master`; a failed push can be
-retried with the same reviewed OID.
-
-## Token delivery
-
-`agent-merge-token-notify.service` starts with `agent-merge.socket` and sends the
-token to Signal note-to-self through the write-only `signal-notify` proxy. The
-token is persistent across restarts. To resend it:
-
-```bash
-systemctl start agent-merge-token-notify.service
-```
-
-To rotate and deliver a replacement as the account owner:
-
-```bash
-agent-merge-token-notify --rotate
-```
-
-Rotation invalidates the old token immediately. Do not send the token through
-the agent, include it in a branch, or put it on a command line.
+checkout, dirty queue, unexpected queue HEAD, wrong caller UID, or merge conflict
+fails closed. Approval uses a normal non-forced `git push origin master`; a failed
+push can be retried with the same reviewed OID.
 
 ## Execution boundary
 

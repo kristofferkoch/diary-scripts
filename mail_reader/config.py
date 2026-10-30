@@ -168,3 +168,9 @@ def dsh_web_url() -> str:
     ``host:port`` keys above."""
     return (os.environ.get("DSH_WEB_URL")
             or cfg("hosts.dsh_web", "https://server:8444")).rstrip("/")
+
+
+def mail_web_url() -> str:
+    """Public base URL of the authenticated mail UI, without a trailing slash."""
+    return (os.environ.get("MAIL_WEB_URL")
+            or cfg("hosts.tailnet_base", "https://server") + "/mail").rstrip("/")

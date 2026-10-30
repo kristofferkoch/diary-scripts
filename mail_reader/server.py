@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from . import agenda as agenda_mod
+from .auth import MailAuthMiddleware
 from . import calendar_md as calendar_mod
 from . import db, inbox as inbox_mod, message as message_mod, related as related_mod
 from . import entities as entities_mod
@@ -48,6 +49,7 @@ TEMPLATES.env.filters["relative_day"] = relative_day
 
 
 app = FastAPI()
+app.add_middleware(MailAuthMiddleware)
 
 app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
 

@@ -2,9 +2,9 @@
 """Human-approved publication queue for the public helper-code repository.
 
 Unattended requests fetch agent branches into an isolated ``queue/automatic``
-repository. Only ``agent-merge-approve``, authenticated with the exact reviewed
-commit OID and the token delivered to the account owner's Signal note-to-self,
-may merge that commit into the approved repository and push ``master``.
+repository. Only ``agent-merge-approve`` from the account owner's UID, naming
+the exact reviewed commit OID, may merge that commit into the approved
+repository and push ``master``.
 
 The module is intentionally stdlib-only apart from the workspace config
 lookup. The service runs a root-owned copy installed from the approved tree.
@@ -14,18 +14,13 @@ from __future__ import annotations
 
 import argparse
 import fcntl
-import getpass
-import hmac
-import json
 import os
 import re
-import secrets
 import shlex
 import socket
-import stat
+import struct
 import subprocess
 import sys
-import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,10 +30,8 @@ QUEUE_BRANCH = "queue/automatic"
 QUEUE_REF = f"refs/heads/{QUEUE_BRANCH}"
 BRANCH_RE = re.compile(r"^(dev|mem)/[a-z0-9][a-z0-9-]*$")
 OID_RE = re.compile(r"^[0-9a-f]{40}$")
-TOKEN_PATH = Path("/var/lib/agent-merge/token")
 LOCK_PATH = Path("/var/lib/agent-merge/queue.lock")
 SOCKET_PATH = Path("/run/agent-merge/socket")
-SIGNAL_SOCKET = Path("/run/signal-notify/socket")
 
 
 class QueueError(RuntimeError):
@@ -51,7 +44,6 @@ class QueuePaths:
     approved: Path
     queue: Path
     worktrees: Path
-    token: Path = TOKEN_PATH
     lock: Path = LOCK_PATH
 
 
@@ -185,17 +177,6 @@ def queue_change(branch: str, paths: QueuePaths) -> bool:
         return True
 
 
-def authenticate(candidate: str, token_path: Path) -> bool:
-    try:
-        st = token_path.lstat()
-        if not stat.S_ISREG(st.st_mode) or st.st_mode & 0o077 or st.st_uid != os.geteuid():
-            return False
-        expected = token_path.read_text().strip()
-    except OSError:
-        return False
-    return len(expected) >= 32 and hmac.compare_digest(candidate, expected)
-
-
 def sync_integration(paths: QueuePaths) -> None:
     git(paths.integration, "fetch", "--no-tags", str(paths.approved), "master")
     git(paths.integration, "merge", "--ff-only", "FETCH_HEAD")
@@ -215,12 +196,10 @@ def sync_venv(paths: QueuePaths) -> None:
         raise QueueError(f"approved virtualenv sync failed: {(proc.stderr or proc.stdout).strip()}")
 
 
-def approve_queue(token: str, reviewed: str, paths: QueuePaths, *, push: bool = True) -> bool:
-    """Publish exactly the reviewed queue commit. The token is never in argv."""
+def approve_queue(reviewed: str, paths: QueuePaths, *, push: bool = True) -> bool:
+    """Publish exactly the reviewed queue commit; caller UID is checked by the CLI."""
     if not OID_RE.fullmatch(reviewed):
         raise QueueError("approval requires the full reviewed queue commit OID")
-    if not authenticate(token, paths.token):
-        raise QueueError("approval token is missing or incorrect")
     with queue_lock(paths):
         ensure_queue(paths)
         actual = git(paths.queue, "rev-parse", "HEAD").stdout.strip()
@@ -292,12 +271,8 @@ def approve_main(argv: list[str] | None = None) -> int:
     reviewed = args.reviewed
     print(f"Review first: git -C {shlex.quote(str(paths.queue))} diff master...{reviewed}")
     print(f"Approving only queue commit: {reviewed}")
-    token = getpass.getpass("Approval token from Signal: ")
-    if not token:
-        print("agent-merge-approve: empty token", file=sys.stderr)
-        return 1
     try:
-        output = request(f"approve scripts {reviewed} {token}")
+        output = request(f"approve scripts {reviewed}")
     except OSError as exc:
         print(f"agent-merge-approve: cannot reach merge socket: {exc}", file=sys.stderr)
         return 2
@@ -306,79 +281,15 @@ def approve_main(argv: list[str] | None = None) -> int:
     return 0 if results and results[-1].startswith("RESULT ok") else 1
 
 
-def write_token(path: Path) -> str:
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    token = secrets.token_urlsafe(32)
-    fd, temporary = tempfile.mkstemp(prefix=".token-", dir=path.parent)
+def peer_uid(fd: int) -> int:
+    """Return the Unix socket caller's kernel-verified UID."""
+    sock = socket.fromfd(fd, socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w") as handle:
-            handle.write(token + "\n")
-        os.replace(temporary, path)
-    except BaseException:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
-        raise
-    return token
-
-
-def token_for_notification(path: Path, *, rotate: bool = False) -> str:
-    if rotate or not path.exists():
-        return write_token(path)
-    st = path.lstat()
-    if not stat.S_ISREG(st.st_mode) or st.st_mode & 0o077 or st.st_uid != os.geteuid():
-        raise QueueError(f"token file must be a regular 0600 file owned by the caller: {path}")
-    token = path.read_text().strip()
-    if len(token) < 32:
-        raise QueueError("token file is invalid; rotate the token")
-    return token
-
-
-def signal_note(message: str, socket_path: Path = SIGNAL_SOCKET, timeout: float = 15.0) -> None:
-    request_obj = {
-        "jsonrpc": "2.0", "id": 1, "method": "send",
-        "params": {"noteToSelf": True, "message": message},
-    }
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        sock.settimeout(timeout)
-        sock.connect(str(socket_path))
-        sock.sendall(json.dumps(request_obj).encode() + b"\n")
-        buf = b""
-        while b"\n" not in buf:
-            chunk = sock.recv(65536)
-            if not chunk:
-                raise QueueError("Signal proxy closed without a reply")
-            buf += chunk
-        reply = json.loads(buf.split(b"\n", 1)[0])
-        if "error" in reply:
-            raise QueueError(f"Signal proxy error: {reply['error']}")
+        raw = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+        pid, uid, gid = struct.unpack("3i", raw)
+        return uid
     finally:
         sock.close()
-
-
-def notify_main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Deliver the merge-approval token to Signal note-to-self.")
-    parser.add_argument("--rotate", action="store_true", help="replace the persistent token before sending")
-    args = parser.parse_args(argv)
-    try:
-        token = token_for_notification(TOKEN_PATH, rotate=args.rotate)
-        signal_note(
-            "agent-merge approval token\n\n"
-            "Review the queued diff in your terminal before using this token with "
-            f"agent-merge-approve.\n\n{token}"
-        )
-    except (OSError, QueueError, json.JSONDecodeError) as exc:
-        print(f"agent-merge-token-notify: {exc}", file=sys.stderr)
-        return 1
-    print("agent-merge-token-notify: sent approval token to Signal note-to-self")
-    return 0
 
 
 def queue_main(argv: list[str] | None = None) -> int:
@@ -386,23 +297,21 @@ def queue_main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     queued = sub.add_parser("queue", help="merge an agent branch without publishing")
     queued.add_argument("branch")
-    approved = sub.add_parser("approve", help="publish one reviewed queue OID; token comes from stdin")
+    approved = sub.add_parser("approve", help="publish one reviewed queue OID for the service UID only")
     approved.add_argument("reviewed")
-    approved.add_argument("--token-stdin", action="store_true", required=True)
-    notify = sub.add_parser("notify", help="deliver the approval token to Signal")
-    notify.add_argument("--rotate", action="store_true")
-    client = sub.add_parser("client", help="prompt for a token and request approval")
+    approved.add_argument("--peer-fd", type=int, required=True)
+    client = sub.add_parser("client", help="request approval as the account owner")
     client.add_argument("reviewed")
     args = parser.parse_args(argv)
-    if args.command == "notify":
-        return notify_main(["--rotate"] if args.rotate else [])
     if args.command == "client":
         return approve_main([args.reviewed])
     try:
         if args.command == "queue":
             queue_change(args.branch, default_paths())
         else:
-            approve_queue(sys.stdin.readline().strip(), args.reviewed, default_paths())
+            if peer_uid(args.peer_fd) != os.geteuid():
+                raise QueueError("approval requires the account owner's UID")
+            approve_queue(args.reviewed, default_paths())
     except QueueError as exc:
         print(f"agent-merge: {exc}", file=sys.stderr)
         return 1
@@ -410,9 +319,6 @@ def queue_main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    invoked_as = Path(sys.argv[0]).name
-    if invoked_as == "agent-merge-approve":
+    if Path(sys.argv[0]).name == "agent-merge-approve":
         sys.exit(approve_main())
-    if invoked_as == "agent-merge-token-notify":
-        sys.exit(notify_main())
     sys.exit(queue_main())

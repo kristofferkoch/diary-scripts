@@ -41,15 +41,11 @@ def paths(tmp_path: Path) -> amq.QueuePaths:
     run("git", "remote", "set-url", "origin", str(remote), cwd=approved)
     run("git", "push", "-u", "origin", "master", cwd=approved)
 
-    token = tmp_path / "token"
-    token.write_text("x" * 43 + "\n")
-    token.chmod(0o600)
     return amq.QueuePaths(
         integration=integration,
         approved=approved,
         queue=tmp_path / "diary-scripts-automatic",
         worktrees=tmp_path / "diary-worktrees",
-        token=token,
         lock=tmp_path / "queue.lock",
     )
 
@@ -80,16 +76,16 @@ def test_queue_does_not_touch_approved_tree_or_github(paths: amq.QueuePaths):
     assert run("git", "--git-dir", remote, "rev-parse", "master") == approved_head
 
 
-def test_only_correct_token_can_approve_exact_reviewed_oid(paths: amq.QueuePaths):
+def test_owner_can_approve_exact_reviewed_oid(paths: amq.QueuePaths):
     source_branch(paths)
     amq.queue_change("dev/change", paths)
     oid = reviewed(paths)
 
-    with pytest.raises(amq.QueueError, match="token"):
-        amq.approve_queue("wrong", oid, paths)
+    with pytest.raises(amq.QueueError, match="OID"):
+        amq.approve_queue("wrong", paths)
     assert not (paths.approved / "queued.txt").exists()
 
-    assert amq.approve_queue("x" * 43, oid, paths) is True
+    assert amq.approve_queue(oid, paths) is True
     for repo in (paths.approved, paths.integration, paths.queue):
         assert (repo / "queued.txt").read_text() == "not yet approved\n"
     approved_head = run("git", "rev-parse", "master", cwd=paths.approved)
@@ -108,7 +104,7 @@ def test_new_queue_commit_after_review_is_rejected(paths: amq.QueuePaths):
     assert reviewed(paths) != oid
 
     with pytest.raises(amq.QueueError, match="changed after review"):
-        amq.approve_queue("x" * 43, oid, paths)
+        amq.approve_queue(oid, paths)
     assert not (paths.approved / "queued.txt").exists()
 
 
@@ -116,11 +112,10 @@ def test_client_uses_only_the_explicit_reviewed_oid(paths: amq.QueuePaths, monke
     oid = "a" * 40
     seen: list[str] = []
     monkeypatch.setattr(amq, "default_paths", lambda: paths)
-    monkeypatch.setattr(amq.getpass, "getpass", lambda prompt: "token")
     monkeypatch.setattr(amq, "request", lambda payload: seen.append(payload) or "RESULT ok 0\n")
 
     assert amq.approve_main([oid]) == 0
-    assert seen == [f"approve scripts {oid} token"]
+    assert seen == [f"approve scripts {oid}"]
 
 
 def test_failed_push_can_be_retried_and_synchronizes_queue(paths: amq.QueuePaths):
@@ -131,11 +126,11 @@ def test_failed_push_can_be_retried_and_synchronizes_queue(paths: amq.QueuePaths
     run("git", "remote", "set-url", "origin", str(remote) + ".missing", cwd=paths.approved)
 
     with pytest.raises(amq.QueueError, match="push"):
-        amq.approve_queue("x" * 43, oid, paths)
+        amq.approve_queue(oid, paths)
     assert (paths.approved / "queued.txt").exists(), "the approved local merge already happened"
 
     run("git", "remote", "set-url", "origin", remote, cwd=paths.approved)
-    assert amq.approve_queue("x" * 43, oid, paths) is False
+    assert amq.approve_queue(oid, paths) is False
     approved_head = run("git", "rev-parse", "master", cwd=paths.approved)
     assert run("git", "--git-dir", remote, "rev-parse", "master") == approved_head
     assert run("git", "rev-parse", "HEAD", cwd=paths.queue) == approved_head
@@ -147,7 +142,7 @@ def test_dirty_approved_tree_cannot_be_published_over(paths: amq.QueuePaths):
     (paths.approved / "README.md").write_text("local work\n")
 
     with pytest.raises(amq.QueueError, match="uncommitted"):
-        amq.approve_queue("x" * 43, reviewed(paths), paths)
+        amq.approve_queue(reviewed(paths), paths)
     assert (paths.approved / "README.md").read_text() == "local work\n"
 
 
@@ -178,19 +173,10 @@ def test_already_queued_retries_source_cleanup(paths: amq.QueuePaths, monkeypatc
     assert not source.exists()
 
 
-def test_token_files_are_private_and_rotation_replaces_the_secret(tmp_path: Path):
-    token_path = tmp_path / "state" / "token"
-    first = amq.token_for_notification(token_path)
-    second = amq.token_for_notification(token_path)
-    rotated = amq.token_for_notification(token_path, rotate=True)
-
-    assert first == second
-    assert rotated != first
-    assert token_path.stat().st_mode & 0o777 == 0o600
-    assert amq.authenticate(rotated, token_path)
-    assert not amq.authenticate(first, token_path)
-
-
-def test_group_or_world_readable_token_is_rejected(paths: amq.QueuePaths):
-    paths.token.chmod(0o640)
-    assert not amq.authenticate("x" * 43, paths.token)
+def test_peer_uid_comes_from_the_kernel_socket_credentials():
+    left, right = amq.socket.socketpair()
+    try:
+        assert amq.peer_uid(left.fileno()) == amq.os.geteuid()
+    finally:
+        left.close()
+        right.close()
