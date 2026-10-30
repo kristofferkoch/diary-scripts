@@ -139,11 +139,13 @@ class MailAuthMiddleware:
             await self.app(scope, receive, send)
             return
         path = scope.get("path", "")
+        root_path = scope.get("root_path", "").rstrip("/")
+        if root_path and path.startswith(root_path + "/"):
+            path = path[len(root_path):]
         if path == "/healthz" or path.startswith("/static/"):
             await self.app(scope, receive, send)
             return
         request = Request(scope, receive)
-        root_path = scope.get("root_path", "").rstrip("/")
         try:
             expected = read_token(self.path)
         except (AuthError, OSError):

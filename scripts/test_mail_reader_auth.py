@@ -20,7 +20,7 @@ def token_file(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def client(token_file: Path) -> TestClient:
-    app = FastAPI()
+    app = FastAPI(root_path="/mail")
     app.add_middleware(auth.MailAuthMiddleware, path=token_file)
 
     @app.get("/")
@@ -51,8 +51,10 @@ def test_login_exchanges_fragment_token_for_secure_cookie(client: TestClient):
     assert "Secure" in cookie
     assert "HttpOnly" in cookie
     assert "SameSite=strict" in cookie
+    assert "Path=/mail" in cookie
     assert response.headers["cache-control"] == "no-store"
     assert response.headers["referrer-policy"] == "no-referrer"
+    client.cookies.set(auth.COOKIE_NAME, "x" * 43)
     assert client.get("/").json() == {"private": True}
 
 
@@ -64,6 +66,7 @@ def test_bearer_token_is_accepted_for_api_clients(client: TestClient):
 def test_form_login_is_supported_without_json(client: TestClient):
     response = client.post("/login", data={"token": "x" * 43})
     assert response.status_code == 204
+    client.cookies.set(auth.COOKIE_NAME, "x" * 43)
     assert client.get("/").status_code == 200
 
 
