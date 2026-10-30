@@ -27,8 +27,8 @@ Security boundary
 -----------------
 * Only the verbs above exist; the request never supplies an argv. Targets and
   units are looked up in fixed tables, so a caller cannot run arbitrary code.
-* ``sync`` is rate-limited (6/hour, burst 6) and serialised: a second request
-  while one runs gets ``busy`` instead of queueing.
+* ``sync`` is rate-limited (6/hour, burst 6) and serialised: a second
+  request waits up to 240 s for the slot, then gets ``busy``.
 * Requests are capped at 64 KiB, replies at 4000 chars of output tail.
 * Rejections are logged to the journal with the caller's uid.
 * The socket is ``0770`` in a ``0750`` runtime dir owned by ``kek:diary`` — the
@@ -196,8 +196,26 @@ def _start_unit(unit: str, *, runner=run_command) -> dict:
     return result
 
 
+BUSY_WAIT = 240.0
+
+
+def _acquire(busy: threading.Lock, timeout: float) -> bool:
+    """Wait up to `timeout` for the single-sync slot.
+
+    Failing instantly on contention is wrong for the collector: it starts the
+    mail sync and the spond sync in parallel on purpose, and both go through
+    this broker. Waiting turns that into a short queue; the rate limit still
+    caps how much a caller can pile up. `timeout=0` restores the old
+    fail-fast behaviour (tests use it).
+    """
+    if timeout <= 0:
+        return busy.acquire(blocking=False)
+    return busy.acquire(timeout=timeout)
+
+
 def handle(request, *, sync_limiter: Limiter, status_limiter: Limiter,
-           busy: threading.Lock, runner=run_command) -> dict:
+           busy: threading.Lock, runner=run_command,
+           busy_wait: float = BUSY_WAIT) -> dict:
     """Validate one request and run it. Pure enough to unit-test: every effect
     goes through `runner`, and the limiters/lock are injected."""
     if not isinstance(request, dict):
@@ -217,7 +235,7 @@ def handle(request, *, sync_limiter: Limiter, status_limiter: Limiter,
             return {"ok": False, "error": f"unit {unit!r} is not startable through this broker"}
         if not sync_limiter.allow():
             return {"ok": False, "error": "rate limit exceeded, try again later"}
-        if not busy.acquire(blocking=False):
+        if not _acquire(busy, busy_wait):
             return {"ok": False, "error": "busy: another request is running"}
         try:
             return _start_unit(unit, runner=runner)
@@ -234,7 +252,7 @@ def handle(request, *, sync_limiter: Limiter, status_limiter: Limiter,
             return {"ok": False, "error": f"unknown sync target {target!r}"}
         if not sync_limiter.allow():
             return {"ok": False, "error": "rate limit exceeded, try again later"}
-        if not busy.acquire(blocking=False):
+        if not _acquire(busy, busy_wait):
             return {"ok": False, "error": "busy: another request is running"}
         try:
             results = [run_sync(t, runner=runner) for t in targets]

@@ -96,9 +96,26 @@ def test_busy_when_another_sync_runs():
     lock.acquire()  # simulate a running sync
     reply = broker.handle({"cmd": "sync", "target": "spond"},
                           sync_limiter=sync_limiter, status_limiter=status_limiter,
-                          busy=lock,
+                          busy=lock, busy_wait=0,
                           runner=lambda argv, timeout: {"ok": True, "output": ""})
     assert reply["ok"] is False and "busy" in reply["error"]
+
+
+def test_a_second_request_waits_for_the_slot_instead_of_failing():
+    sync_limiter, status_limiter = _limiters()
+    lock = threading.Lock()
+    lock.acquire()
+
+    def release_soon():
+        threading.Event().wait(0.2)
+        lock.release()
+
+    threading.Thread(target=release_soon, daemon=True).start()
+    reply = broker.handle({"cmd": "sync", "target": "spond"},
+                          sync_limiter=sync_limiter, status_limiter=status_limiter,
+                          busy=lock, busy_wait=5.0,
+                          runner=lambda argv, timeout: {"ok": True, "output": ""})
+    assert reply["ok"] is True
 
 
 def test_status_reports_every_unit():
