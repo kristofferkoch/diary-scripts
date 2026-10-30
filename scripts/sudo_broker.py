@@ -15,6 +15,12 @@ turn it into a native one, a click focuses the window) and rings the terminal
 bell, which then repeats every 30 s while the prompt is unanswered. There is
 deliberately **no answer timeout**: a request waits as long as the human needs,
 because being hurried is how a wrong command gets approved.
+Each request names the identity it needs (`as`, default `root`): the daemon
+drops to that uid/gid for the command, with its own HOME and user-session
+environment, and the prompt shows it. Only the identities in ALLOWED_USERS are
+accepted — normally root and kek — so anything that only writes kek's files or
+reaches kek's user session never has to run as root, and root stays visible as
+the exception it is.
 Approvals are single-use, the executed command gets no access to the
 terminal (stdin is /dev/null), and the whole capability disappears when the
 daemon exits (Ctrl-C, terminal closed, or idle timeout). There is deliberately
@@ -47,12 +53,13 @@ BELL_INTERVAL = 30.0  # re-ring the terminal bell while a prompt is unanswered
 EXEC_TIMEOUT = 600.0  # seconds before an approved command is killed
 IDLE_EXIT = 1800.0  # exit when nothing has connected for this long
 
-CHILD_ENV = {
-    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-    "HOME": "/root",
-    "LANG": "C.UTF-8",
-    "TERM": "dumb",
-}
+# Identities a request may ask for. Root stays in because `sudo-ask` may be the
+# only way to install a package or touch /etc; kek is here so a command that
+# only needs to write kek's files or reach kek's user session never has to run
+# as root. Widen this list deliberately, never from an environment variable.
+ALLOWED_USERS = ("root", "kek")
+
+CHILD_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 _send_lock = threading.Lock()
 _prompt_lock = threading.Lock()
@@ -60,6 +67,43 @@ _prompt_lock = threading.Lock()
 
 def log(msg: str) -> None:
     print(f"[sudo-broker] {msg}", file=sys.stderr, flush=True)
+
+
+def resolve_target(name: str) -> tuple[pwd.struct_passwd | None, str]:
+    """Check a requested identity against the allowlist and the passwd database."""
+    if name not in ALLOWED_USERS:
+        allowed = ", ".join(ALLOWED_USERS)
+        return None, f"user {name!r} may not be used (allowed: {allowed})"
+    try:
+        return pwd.getpwnam(name), ""
+    except KeyError:
+        return None, f"no such user on this host: {name!r}"
+
+
+def child_env(name: str, home: str, uid: int, shell: str) -> dict[str, str]:
+    """Environment for a command that runs as `name`.
+
+    Same deliberate minimalism as before (`TERM=dumb`, fixed PATH), plus the
+    per-user parts that fail silently when missing: without XDG_RUNTIME_DIR
+    `systemctl --user` cannot find the user manager, and without the session
+    bus address every desktop tool fails in a way that looks like a code bug.
+    """
+    env = {
+        "PATH": CHILD_PATH,
+        "LANG": "C.UTF-8",
+        "TERM": "dumb",
+        "HOME": home or "/",
+        "USER": name,
+        "LOGNAME": name,
+        "SHELL": shell or "/bin/sh",
+    }
+    runtime = f"/run/user/{uid}"
+    if os.path.isdir(runtime):
+        env["XDG_RUNTIME_DIR"] = runtime
+        bus = os.path.join(runtime, "bus")
+        if os.path.exists(bus):
+            env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus}"
+    return env
 
 
 def terminal():
@@ -173,7 +217,9 @@ def read_request(conn: socket.socket) -> dict | None:
     return req
 
 
-def approve(info: tuple[int, int, int, str], cmd: str, cwd: str) -> tuple[bool, str]:
+def approve(
+    info: tuple[int, int, int, str], cmd: str, cwd: str, as_user: str = "root"
+) -> tuple[bool, str]:
     """Show the request on the terminal and wait for an explicit y.
 
     Deliberately no answer timeout: being hurried is how a human approves
@@ -188,10 +234,14 @@ def approve(info: tuple[int, int, int, str], cmd: str, cwd: str) -> tuple[bool, 
         print("┌─ sudo-broker " + "─" * 58, flush=True)
         print(f"│ from : {name} (uid {uid}, pid {pid})", flush=True)
         print(f"│ cwd  : {sanitize(cwd, 512)}", flush=True)
+        print(f"│ as   : {as_user}", flush=True)
         print(f"│ run  : {sanitize(cmd)}", flush=True)
         print("│ no timeout — answer when you have read it", flush=True)
         print("└─ approve? [y/N] ", end="", flush=True)
-        notify("sudo-broker: approval requested", f"{name} (uid {uid}) wants to run: {cmd}")
+        notify(
+            f"sudo-broker: approval requested (as {as_user})",
+            f"{name} (uid {uid}) wants to run: {cmd}",
+        )
         bell()
         answer = None
         while answer is None:
@@ -205,13 +255,13 @@ def approve(info: tuple[int, int, int, str], cmd: str, cwd: str) -> tuple[bool, 
             log(f"DENIED (operator said no): {cmd!r} from uid {uid}")
             return False, "denied by operator"
         print("(sudo-broker: approved — running)", flush=True)
-        log(f"APPROVED: {cmd!r} from uid {uid} (cwd {cwd})")
+        log(f"APPROVED (as {as_user}): {cmd!r} from uid {uid} (cwd {cwd})")
         return True, ""
     finally:
         _prompt_lock.release()
 
 
-def execute(conn: socket.socket, cmd: str, cwd: str) -> None:
+def execute(conn: socket.socket, cmd: str, cwd: str, target: pwd.struct_passwd) -> None:
     workdir = cwd if cwd and os.path.isdir(cwd) else "/"
     try:
         proc = subprocess.Popen(  # noqa: S603 - the human approved this exact string
@@ -220,7 +270,10 @@ def execute(conn: socket.socket, cmd: str, cwd: str) -> None:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=CHILD_ENV,
+            env=child_env(target.pw_name, target.pw_dir, target.pw_uid, target.pw_shell),
+            user=target.pw_uid,
+            group=target.pw_gid,
+            extra_groups=os.getgrouplist(target.pw_name, target.pw_gid),
             start_new_session=True,
         )
     except OSError as exc:
@@ -277,18 +330,27 @@ def handle(conn: socket.socket) -> None:
             return
         cmd = req["cmd"]
         cwd = req.get("cwd") if isinstance(req.get("cwd"), str) else "/"
+        as_user = req.get("as", "root")
         if not cmd.strip():
             send(conn, {"t": "state", "s": "error", "msg": "empty command"})
             return
         if len(cmd) > MAX_CMD_CHARS:
             send(conn, {"t": "state", "s": "error", "msg": "command too long"})
             return
-        ok, why = approve(info, cmd, cwd)
+        if not isinstance(as_user, str):
+            send(conn, {"t": "state", "s": "error", "msg": "malformed request"})
+            return
+        target, problem = resolve_target(as_user)
+        if target is None:
+            send(conn, {"t": "state", "s": "denied", "msg": problem})
+            log(f"DENIED (identity): {as_user!r} requested for {cmd!r}")
+            return
+        ok, why = approve(info, cmd, cwd, as_user=target.pw_name)
         if not ok:
             send(conn, {"t": "state", "s": "denied", "msg": why})
             return
-        send(conn, {"t": "state", "s": "approved"})
-        execute(conn, cmd, cwd)
+        send(conn, {"t": "state", "s": "approved", "as": target.pw_name})
+        execute(conn, cmd, cwd, target)
     except (OSError, ValueError) as exc:
         try:
             send(conn, {"t": "state", "s": "error", "msg": str(exc)})

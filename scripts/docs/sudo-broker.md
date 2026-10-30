@@ -1,4 +1,4 @@
-# sudo-broker — per-command root approval from a terminal
+# sudo-broker — per-command approval from a terminal, as a named user
 
 An agent that can reach private data *and* the internet should not hold
 standing root. The broker replaces `NOPASSWD:ALL` with a request the human
@@ -13,12 +13,46 @@ sudo /usr/local/sbin/sudo-broker
 
 # 3. the agent asks; the prompt appears in your terminal
 sudo-ask systemctl restart caddy
+sudo-ask --as kek 'systemctl --user restart mail-sync'
 ```
 
 Nothing runs until you type `y`. **There is no answer timeout** — a request
 waits until you have read it and decided, because being hurried is how a wrong
 command gets approved. Closing the terminal (or Ctrl-C, or 30 minutes with
 nothing connected) removes the capability entirely.
+
+## Running as another user
+
+A request names the identity it needs, and the daemon drops to that uid/gid
+for that one command:
+
+```bash
+sudo-ask systemctl restart caddy            # root, by default
+sudo-ask --as kek git -C ~kek/diary status  # only kek's files: no root needed
+```
+
+`ALLOWED_USERS` in `sudo_broker.py` is a short hard-coded list — `root` and
+`kek` as installed here — and nothing else resolves; a request for any other
+name is refused before the human is asked, and the refusal is logged. It is a
+constant rather than an environment knob on purpose: widening the set should
+be a deliberate edit to a root-owned file, not something a caller can arrange.
+
+The prompt and the notification show the identity (`│ as   : kek`), and the
+audit line records it (`APPROVED (as kek)`), so "what did I actually approve?"
+is answered by the terminal, not by memory. The point is that a careless `y`
+should not buy more than the task needed: most requests only touch kek's
+files or kek's user session, and those no longer run as root. Root stays in the
+list because package installs, `/etc` and system units genuinely need it.
+
+The child gets a small environment built for that user: `HOME`, `USER`,
+`LOGNAME`, `SHELL`, a fixed `PATH`, `TERM=dumb`, and — when it exists —
+`XDG_RUNTIME_DIR` plus `DBUS_SESSION_BUS_ADDRESS`, which is what
+`systemctl --user` and every desktop tool need. Supplementary groups are the
+user's own, so group-owned files stay writable.
+
+What this does **not** buy: the daemon itself is still root, so a compromised
+broker is still root, and the human is still the control. It only shrinks what
+one approval hands over.
 
 ## Getting your attention
 
@@ -92,7 +126,8 @@ change the socket mode and the peer check in `sudo_broker.py`.
 | 124 | approved, but killed after `EXEC_TIMEOUT` (600 s) |
 
 `sudo-ask 'cmd with | pipes && logic'` takes the whole string as one argument;
-argv is joined with spaces otherwise, so shell syntax needs quoting.
+argv is joined with spaces otherwise, so shell syntax needs quoting. `--as
+USER` (or `--as=USER`) may lead, before the command.
 
 ## Tests
 
@@ -115,9 +150,12 @@ Covers: approval runs and streams the command's exit code, denial runs
 nothing, an empty answer is a denial, the prompt rings the bell and keeps
 ringing while unanswered (and stops once answered), there is no answer
 timeout, a second request while one is pending is refused, the notification
-escape carries the focus action and the command, and bell/notification follow
+escape carries the focus action and the command, bell/notification follow
 whichever of stdout/stderr is the terminal without ever landing in a redirected
-log. A missing broker fails closed.
+log, the requested identity is shown in the prompt and actually used, an
+unlisted identity is refused before the human is asked, and the per-user
+environment carries `HOME`/`USER`/`XDG_RUNTIME_DIR`. A missing broker fails
+closed.
 
 ## Removing a standing NOPASSWD rule
 

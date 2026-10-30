@@ -77,22 +77,34 @@ class Broker:
             self.stop()
             raise RuntimeError("daemon did not create its socket")
 
-    def ask(self, command: str, answer: bytes) -> subprocess.CompletedProcess:
-        """Run the client, answer the prompt with `answer`, return the client result."""
+    def ask(
+        self, command: str, answer: bytes, *, as_user: str | None = None
+    ) -> subprocess.CompletedProcess:
+        """Run the client, answer the prompt with `answer`, return the client result.
+
+        `answer=None` means "expect no prompt" (the request is refused before
+        the human is asked). `as_user` is passed through as `--as`.
+        """
+        argv = [sys.executable, str(CLIENT)]
+        if as_user:
+            argv += ["--as", as_user]
+        argv.append(command)
         client = subprocess.Popen(
-            [sys.executable, str(CLIENT), command],
+            argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=self.env,
         )
-        prompt = _read_until(self.master, b"[y/N]")
-        assert b"[y/N]" in prompt, f"no prompt appeared; daemon said: {prompt!r}"
-        # The bell follows the prompt immediately; keep it for the bell test.
-        # Usually it already arrived with the prompt, so only read on if it did
-        # not — otherwise every ask() would sit out the full timeout.
-        rest = b"" if b"\a" in prompt else _read_until(self.master, b"\a", timeout=1.0)
-        self.last_tty = prompt + rest
-        os.write(self.master, answer)
+        self.last_tty = b""
+        if answer:
+            prompt = _read_until(self.master, b"[y/N]")
+            assert b"[y/N]" in prompt, f"no prompt appeared; daemon said: {prompt!r}"
+            # The bell follows the prompt immediately; keep it for the bell test.
+            # Usually it already arrived with the prompt, so only read on if it
+            # did not — otherwise every ask() would sit out the full timeout.
+            rest = b"" if b"\a" in prompt else _read_until(self.master, b"\a", timeout=1.0)
+            self.last_tty = prompt + rest
+            os.write(self.master, answer)
         out, err = client.communicate(timeout=20)
         return subprocess.CompletedProcess(client.args, client.returncode, out, err)
 
@@ -197,12 +209,12 @@ class PromptProbe:
         """Write into the prompt as if the human typed it."""
         os.write(self._stdin, answer)
 
-    def run(self, *, bell_interval: float = 0.1) -> tuple[bool, str]:
+    def run(self, *, bell_interval: float = 0.1, as_user: str = "root") -> tuple[bool, str]:
         self._patched.setattr(sudo_broker, "BELL_INTERVAL", bell_interval)
         self._patched.setattr(sys, "stdin", self.stdin)
         self._patched.setattr(sys, "stdout", self.stdout)
         self._patched.setattr(sys, "stderr", self.stderr)
-        return sudo_broker.approve((1234, 0, 0, "tester"), "true", "/")
+        return sudo_broker.approve((1234, 0, 0, "tester"), "true", "/", as_user=as_user)
 
     def close(self) -> None:
         self._patched.restore()  # put sys.* and the timers back first
@@ -280,6 +292,39 @@ def test_request_raises_a_desktop_notification_at_focus() -> None:
     assert b"a=focus" in out, "clicking the notification should focus the window"
     assert b"o=unfocused" in out, "no popup while the terminal already has focus"
     assert b"p=body;" in out, "the command belongs in the notification body"
+
+
+def test_prompt_names_the_identity_it_will_run_as() -> None:
+    prompt = PromptProbe()
+    try:
+        prompt.type(b"y\n")
+        ok, _why = prompt.run(bell_interval=0.5, as_user="kek")
+        out = _written(prompt.stdout)
+    finally:
+        prompt.close()
+    assert ok
+    assert b"as   : kek" in out, f"the prompt must show the target identity: {out!r}"
+
+
+def test_only_allowlisted_identities_resolve() -> None:
+    root, problem = sudo_broker.resolve_target("root")
+    assert problem == "" and root is not None and root.pw_uid == 0
+    # An identity outside the allowlist is refused before the human is asked.
+    target, problem = sudo_broker.resolve_target("postgres")
+    assert target is None and "may not be used" in problem
+    assert "root" in problem and "kek" in problem, "the refusal names what is allowed"
+
+
+def test_child_env_carries_the_user_session() -> None:
+    env = sudo_broker.child_env("kek", "/home/kek", 1000, "/bin/bash")
+    assert env["HOME"] == "/home/kek"
+    assert env["USER"] == env["LOGNAME"] == "kek"
+    assert env["SHELL"] == "/bin/bash"
+    assert env["TERM"] == "dumb"
+    if os.path.isdir("/run/user/1000"):
+        assert env["XDG_RUNTIME_DIR"] == "/run/user/1000"
+    else:
+        assert "XDG_RUNTIME_DIR" not in env
 
 
 def test_bell_follows_stdout_when_stderr_is_redirected() -> None:
@@ -390,6 +435,33 @@ def test_client_without_broker_fails_closed() -> None:
     )
     assert res.returncode == 2
     assert b"no broker running" in res.stderr
+
+
+@requires_root
+def test_runs_as_the_requested_identity() -> None:
+    broker = Broker()
+    try:
+        res = broker.ask("id -un", b"y\n", as_user="kek")
+        if res.returncode == 0:
+            assert res.stdout.strip() == b"kek", res.stdout
+            assert b"approved as kek" in res.stderr
+        else:
+            # A host without a `kek` user must refuse cleanly, not silently run.
+            assert b"no such user" in res.stderr or b"may not be used" in res.stderr
+    finally:
+        broker.stop()
+
+
+@requires_root
+def test_unlisted_identity_is_refused_without_a_prompt() -> None:
+    broker = Broker()
+    try:
+        res = broker.ask("id -un", b"", as_user="postgres")
+        assert res.returncode == 1, res.stderr.decode()
+        assert b"may not be used" in res.stderr
+        assert b"approved" not in res.stderr
+    finally:
+        broker.stop()
 
 
 def main() -> int:
