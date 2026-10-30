@@ -24,6 +24,12 @@ invoked as `uv run python -m mail_reader.server` and
 `uv run` creates/syncs `.venv/` on demand; you never need to activate
 anything. Tests: `uv run pytest scripts/` (doctests + `test_embed_mail.py`).
 
+Two exceptions to the entry-point rule: **`sudo-ask`** and **`sudo-broker`** are
+installed by `scripts/install_sudo_broker` to `/usr/local/bin` and
+`/usr/local/sbin` as root-owned stdlib-only files, and are **not** console
+entry points. Root must never execute code out of the agent-writable venv, so
+the daemon is run from the installed copy, never via `uv run`.
+
 **Config split.** Real infra/PII values (hostnames, paths, home coordinates,
 family names, Spond IDs, the important-senders list) live in a private
 `config/local.toml` + `config/important_senders.txt` in the diary repo, read
@@ -52,6 +58,7 @@ Per-tool detail and the triage SOPs live in `docs/`. This file is the index.
 | [`docs/kindle-dashboard.md`](docs/kindle-dashboard.md) | the Kindle wall-display PNG generator |
 | [`docs/immich.md`](docs/immich.md) | `immich-recent` (Immich API reader) |
 | [`docs/dsh-web-notify.md`](docs/dsh-web-notify.md) | dsh web login URL → Signal notifier |
+| [`docs/sudo-broker.md`](docs/sudo-broker.md) | `sudo-broker` / `sudo-ask`: per-command root approval from an open terminal, replacing standing `NOPASSWD` |
 | [`docs/retired-notes-shopping.md`](docs/retired-notes-shopping.md) | removed 2026-10: the `/notes/` and `/shopping/` pages |
 
 > **`scripts/` is a stopgap name.** Once we add scripts that aren't

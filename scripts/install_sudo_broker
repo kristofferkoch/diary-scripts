@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Install the sudo-broker: daemon to /usr/local/sbin, client to /usr/local/bin.
+#
+#     sudo diary/diary-scripts/scripts/install_sudo_broker
+#
+# Both are stdlib-only Python, so nothing from the uv venv is involved: the
+# installed copies are root-owned and self-contained. Never run the daemon
+# through `uv run` — that would execute code from a tree an agent can write.
+#
+# After installing, start it in a terminal you keep open:
+#
+#     sudo /usr/local/sbin/sudo-broker
+set -euo pipefail
+
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+[[ -x /usr/bin/python3 ]] || { echo "ERROR: /usr/bin/python3 missing" >&2; exit 1; }
+
+install -o root -g root -m 0755 "$here/sudo_broker.py" /usr/local/sbin/sudo-broker
+install -o root -g root -m 0755 "$here/sudo_ask.py"    /usr/local/bin/sudo-ask
+
+echo "installed:"
+echo "  /usr/local/sbin/sudo-broker   start with sudo, in a terminal you keep open"
+echo "  /usr/local/bin/sudo-ask       what agents call"
