@@ -23,6 +23,7 @@ import select
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -196,10 +197,7 @@ class PromptProbe:
         """Write into the prompt as if the human typed it."""
         os.write(self._stdin, answer)
 
-    def run(
-        self, *, prompt_timeout: float = 0.5, bell_interval: float = 0.1
-    ) -> tuple[bool, str]:
-        self._patched.setattr(sudo_broker, "PROMPT_TIMEOUT", prompt_timeout)
+    def run(self, *, bell_interval: float = 0.1) -> tuple[bool, str]:
         self._patched.setattr(sudo_broker, "BELL_INTERVAL", bell_interval)
         self._patched.setattr(sys, "stdin", self.stdin)
         self._patched.setattr(sys, "stdout", self.stdout)
@@ -217,25 +215,41 @@ class PromptProbe:
             pass
 
 
-def test_prompt_rings_the_bell_and_keeps_ringing_until_answered() -> None:
-    prompt = PromptProbe()
+def test_prompt_rings_until_answered_then_approves() -> None:
+    prompt = PromptProbe(stdout_tty=True, stderr_tty=True)
+    result: list[tuple[bool, str]] = []
+    worker = threading.Thread(target=lambda: result.append(prompt.run(bell_interval=0.05)))
+    worker.daemon = True
     try:
-        started = time.monotonic()
-        ok, why = prompt.run(prompt_timeout=0.5, bell_interval=0.1)
-        elapsed = time.monotonic() - started
-        written = _written(prompt.stdout) + _written(prompt.stderr)
+        worker.start()
+        time.sleep(0.35)  # several bell intervals, still no answer
+        assert worker.is_alive(), "the prompt returned before it was answered"
+        waiting = _written(prompt.stdout) + _written(prompt.stderr)
+        assert waiting.count(b"\a") >= 3, f"the bell should repeat: {waiting!r}"
+        prompt.type(b"y\n")
+        worker.join(timeout=5.0)
+        assert not worker.is_alive(), "the prompt did not return after an answer"
+        after_answer = _written(prompt.stdout) + _written(prompt.stderr)
     finally:
+        if worker.is_alive():  # never leak the prompt lock into later tests
+            prompt.type(b"n\n")
+            worker.join(timeout=5.0)
         prompt.close()
-    assert (ok, why) == (False, "timed out waiting for approval")
-    assert 0.3 <= elapsed < 2.0, f"the prompt did not respect PROMPT_TIMEOUT: {elapsed:.2f}s"
-    assert written.count(b"\a") >= 3, f"the bell should repeat while unanswered: {written!r}"
+    assert result == [(True, "")], result
+    assert after_answer.count(b"\a") == 0, f"no extra bell after an answer: {after_answer!r}"
+
+
+def test_there_is_no_prompt_timeout() -> None:
+    # A deadline here would push the human to approve unread. It is a feature
+    # that a request waits, so guard it: no such constant may come back.
+    assert not hasattr(sudo_broker, "PROMPT_TIMEOUT")
 
 
 def test_answered_prompt_rings_once_and_approves() -> None:
     prompt = PromptProbe()
     try:
         prompt.type(b"y\n")
-        ok, why = prompt.run(prompt_timeout=5.0, bell_interval=0.5)
+        ok, why = prompt.run(bell_interval=0.5)
         written = _written(prompt.stdout) + _written(prompt.stderr)
     finally:
         prompt.close()
@@ -243,12 +257,37 @@ def test_answered_prompt_rings_once_and_approves() -> None:
     assert written.count(b"\a") == 1, f"an answered prompt should ring once: {written!r}"
 
 
+def test_second_request_is_refused_while_one_is_pending() -> None:
+    sudo_broker._prompt_lock.acquire()
+    try:
+        ok, why = sudo_broker.approve((1234, 0, 0, "tester"), "true", "/")
+    finally:
+        sudo_broker._prompt_lock.release()
+    assert (ok, why) == (False, "another request is already pending")
+
+
+def test_request_raises_a_desktop_notification_at_focus() -> None:
+    prompt = PromptProbe(stdout_tty=True, stderr_tty=False)
+    try:
+        prompt.type(b"y\n")
+        ok, _why = prompt.run(bell_interval=0.5)
+        out = _written(prompt.stdout)
+    finally:
+        prompt.close()
+    assert ok
+    assert b"\x1b]99;" in out, f"kitty needs OSC 99 to show a notification: {out!r}"
+    assert b"i=sudo-broker-" in out, "the id is per daemon, so updates replace it"
+    assert b"a=focus" in out, "clicking the notification should focus the window"
+    assert b"o=unfocused" in out, "no popup while the terminal already has focus"
+    assert b"p=body;" in out, "the command belongs in the notification body"
+
+
 def test_bell_follows_stdout_when_stderr_is_redirected() -> None:
     # The audit setup: stderr -> file, so the terminal is stdout.
     prompt = PromptProbe(stdout_tty=True, stderr_tty=False)
     try:
         prompt.type(b"y\n")
-        ok, _why = prompt.run(prompt_timeout=5.0, bell_interval=0.5)
+        ok, _why = prompt.run(bell_interval=0.5)
         stdout_bytes = _written(prompt.stdout)
         stderr_bytes = _written(prompt.stderr)
     finally:
@@ -256,13 +295,14 @@ def test_bell_follows_stdout_when_stderr_is_redirected() -> None:
     assert ok
     assert b"\a" in stdout_bytes, "the bell must follow stdout when stderr is redirected"
     assert b"\a" not in stderr_bytes, "a redirected stderr must stay free of control bytes"
+    assert b"\x1b]99;" not in stderr_bytes, "no escape sequences in the audit log either"
 
 
 def test_bell_falls_back_to_stderr_when_stdout_is_redirected() -> None:
     prompt = PromptProbe(stdout_tty=False, stderr_tty=True)
     try:
         prompt.type(b"y\n")
-        ok, _why = prompt.run(prompt_timeout=5.0, bell_interval=0.5)
+        ok, _why = prompt.run(bell_interval=0.5)
         stdout_bytes = _written(prompt.stdout)
         stderr_bytes = _written(prompt.stderr)
     finally:
@@ -272,19 +312,19 @@ def test_bell_falls_back_to_stderr_when_stdout_is_redirected() -> None:
     assert b"\a" not in stdout_bytes
 
 
-def test_no_bell_when_neither_stream_is_a_tty() -> None:
+def test_nothing_is_emitted_when_neither_stream_is_a_tty() -> None:
     prompt = PromptProbe(stdout_tty=False, stderr_tty=False)
     try:
         prompt.type(b"y\n")
-        ok, _why = prompt.run(prompt_timeout=5.0, bell_interval=0.5)
+        ok, _why = prompt.run(bell_interval=0.5)
         stdout_bytes = _written(prompt.stdout)
         stderr_bytes = _written(prompt.stderr)
     finally:
         prompt.close()
     assert ok
-    assert b"\a" not in stdout_bytes and b"\a" not in stderr_bytes, (
-        "no bell may be emitted into a log"
-    )
+    for blob in (stdout_bytes, stderr_bytes):
+        assert b"\a" not in blob, "no bell may be emitted into a log"
+        assert b"\x1b]99;" not in blob, "no notification escape into a log"
 
 
 @requires_root

@@ -11,7 +11,7 @@ command, its cwd and the requesting uid, and types y or n. Output is streamed
 back; the exit status is the command's own, or:
 
     2  no broker running / bad socket
-    1  denied, timed out, or malformed request
+    1  denied or malformed request (a request nobody answers just waits)
     124 the broker killed an approved command that ran too long
 
 Nothing here can escalate on its own: the socket only exists while a root

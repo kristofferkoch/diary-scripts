@@ -10,8 +10,11 @@ Agents ask through it instead of holding standing sudo rights:
     sudo-ask systemctl restart caddy
 
 The daemon prints the exact command with the requesting uid/pid/cwd and waits
-for `y`. Each request rings the terminal bell (and rings again every 30 s while
-it is unanswered), so the window you started the broker in asks for focus.
+for `y`. A request also raises a desktop notification (OSC 99 — kitty and foot
+turn it into a native one, a click focuses the window) and rings the terminal
+bell, which then repeats every 30 s while the prompt is unanswered. There is
+deliberately **no answer timeout**: a request waits as long as the human needs,
+because being hurried is how a wrong command gets approved.
 Approvals are single-use, the executed command gets no access to the
 terminal (stdin is /dev/null), and the whole capability disappears when the
 daemon exits (Ctrl-C, terminal closed, or idle timeout). There is deliberately
@@ -40,7 +43,6 @@ SOCK_DIR = os.path.dirname(SOCK_PATH)
 
 MAX_REQUEST_BYTES = 65536
 MAX_CMD_CHARS = 4096
-PROMPT_TIMEOUT = 120.0  # seconds to answer before the request is denied
 BELL_INTERVAL = 30.0  # re-ring the terminal bell while a prompt is unanswered
 EXEC_TIMEOUT = 600.0  # seconds before an approved command is killed
 IDLE_EXIT = 1800.0  # exit when nothing has connected for this long
@@ -60,27 +62,61 @@ def log(msg: str) -> None:
     print(f"[sudo-broker] {msg}", file=sys.stderr, flush=True)
 
 
+def terminal():
+    """The stream the operator is looking at: first of stdout, stderr that is a tty.
+
+    None when both are redirected, which is what keeps log files clean: the
+    bell and the notification are only ever written to a real terminal.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:  # fd closed at startup
+            continue
+        try:
+            if stream.isatty():
+                return stream
+        except (AttributeError, OSError, ValueError):
+            continue
+    return None
+
+
+def write_terminal(text: str) -> None:
+    """Write an escape sequence to the operator's terminal, if there is one."""
+    stream = terminal()
+    if stream is None:
+        return
+    try:
+        stream.write(text)
+        stream.flush()
+    except (OSError, ValueError):
+        pass
+
+
 def bell() -> None:
     """Ring the operator's terminal bell so the window asks for attention.
 
     Terminals and multiplexers turn BEL into an urgency hint, a taskbar flash
     or a marked tab — that is how the human notices a request that arrived
-    while another window had focus. The bell goes to the first of stdout and
-    stderr that is a terminal, because an audit setup may redirect stderr to a
-    log; when neither is a tty nothing is written, so log files stay free of
-    stray control bytes.
+    while another window had focus.
     """
-    for stream in (sys.stdout, sys.stderr):
-        if stream is None:  # fd closed at startup — nothing to ring
-            continue
-        try:
-            if not stream.isatty():
-                continue
-            stream.write("\a")
-            stream.flush()
-            return
-        except (AttributeError, OSError, ValueError):
-            continue
+    write_terminal("\a")
+
+
+def notify(title: str, body: str) -> None:
+    """Show a desktop notification through the terminal (kitty/foot OSC 99).
+
+    Kitty turns this into a native notification; `a=focus` (kitty's default,
+    spelled out) makes a click focus the window, and `o=unfocused` suppresses
+    the popup while the terminal already has keyboard focus. A terminal that
+    does not implement OSC 99 ignores the sequence. The id is per daemon, so a
+    later request replaces the previous notification instead of stacking.
+    """
+    title = sanitize(title, 80)
+    body = sanitize(body, 300)
+    ident = f"sudo-broker-{os.getpid()}"
+    write_terminal(
+        f"\x1b]99;i={ident}:d=0:o=unfocused:a=focus;{title}\x1b\\"
+        f"\x1b]99;i={ident}:p=body;{body}\x1b\\"
+    )
 
 
 def sanitize(text: str, limit: int = MAX_CMD_CHARS) -> str:
@@ -138,9 +174,14 @@ def read_request(conn: socket.socket) -> dict | None:
 
 
 def approve(info: tuple[int, int, int, str], cmd: str, cwd: str) -> tuple[bool, str]:
-    """Show the request on the terminal and wait for an explicit y."""
+    """Show the request on the terminal and wait for an explicit y.
+
+    Deliberately no answer timeout: being hurried is how a human approves
+    something they did not read. The request waits until it is answered or the
+    daemon goes away, and the bell keeps repeating in the meantime.
+    """
     pid, uid, _gid, name = info
-    if not _prompt_lock.acquire(timeout=PROMPT_TIMEOUT):
+    if not _prompt_lock.acquire(blocking=False):
         return False, "another request is already pending"
     try:
         print("", flush=True)
@@ -148,24 +189,17 @@ def approve(info: tuple[int, int, int, str], cmd: str, cwd: str) -> tuple[bool, 
         print(f"│ from : {name} (uid {uid}, pid {pid})", flush=True)
         print(f"│ cwd  : {sanitize(cwd, 512)}", flush=True)
         print(f"│ run  : {sanitize(cmd)}", flush=True)
-        print(f"│ answer within {int(PROMPT_TIMEOUT)}s", flush=True)
+        print("│ no timeout — answer when you have read it", flush=True)
         print("└─ approve? [y/N] ", end="", flush=True)
+        notify("sudo-broker: approval requested", f"{name} (uid {uid}) wants to run: {cmd}")
         bell()
         answer = None
-        deadline = time.monotonic() + PROMPT_TIMEOUT
         while answer is None:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            ready, _, _ = select.select([sys.stdin], [], [], min(BELL_INTERVAL, remaining))
+            ready, _, _ = select.select([sys.stdin], [], [], BELL_INTERVAL)
             if ready:
                 answer = sys.stdin.readline().strip().lower()
             else:
                 bell()  # still unanswered — nudge the terminal again
-        if answer is None:
-            print("\n(sudo-broker: no answer -> denied)", flush=True)
-            log(f"DENIED (timeout): {cmd!r} from uid {uid}")
-            return False, "timed out waiting for approval"
         if answer not in ("y", "yes"):
             print("(sudo-broker: denied)", flush=True)
             log(f"DENIED (operator said no): {cmd!r} from uid {uid}")
@@ -301,6 +335,10 @@ def main() -> int:
             try:
                 conn, _ = srv.accept()
             except socket.timeout:
+                # A prompt waiting for the human keeps the daemon alive: the
+                # idle exit must not pull the socket out from under it.
+                if _prompt_lock.locked():
+                    continue
                 if time.monotonic() - last_activity > IDLE_EXIT:
                     log("idle timeout — exiting")
                     break

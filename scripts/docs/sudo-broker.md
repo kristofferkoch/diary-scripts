@@ -15,21 +15,41 @@ sudo /usr/local/sbin/sudo-broker
 sudo-ask systemctl restart caddy
 ```
 
-Nothing runs until you type `y`. Closing the terminal (or Ctrl-C, or 30
-minutes of silence) removes the capability entirely.
+Nothing runs until you type `y`. **There is no answer timeout** — a request
+waits until you have read it and decided, because being hurried is how a wrong
+command gets approved. Closing the terminal (or Ctrl-C, or 30 minutes with
+nothing connected) removes the capability entirely.
 
-## Terminal bell
+## Getting your attention
 
-A request rings the terminal bell (`BEL`, `\a`) right as the prompt appears,
-and again every 30 s while it is still unanswered. Terminals and multiplexers
-turn that into an urgency hint, a taskbar flash or a marked tab, so the window
-you started the broker in asks for focus instead of waiting silently behind
-another window.
+A request arrives in three layers, all optional except the prompt itself:
 
-The bell goes to the first of stdout and stderr that is a terminal. That
-matters if you keep an audit trail with `sudo-broker 2>audit.log`: the prompt
-and the bell stay on your terminal, and the log gets neither. When neither
-stream is a tty, nothing is written.
+1. **A desktop notification** — the broker writes kitty's [OSC 99][osc99]
+   notification escape with `a=focus` and `o=unfocused`, so kitty (and foot)
+   show a native notification *only while the terminal is not focused*, and
+   clicking it brings the window forward. The body names the requesting user
+   and the exact command. One notification per request; a later request
+   replaces the previous one instead of stacking.
+2. **The terminal bell** (`BEL`, `\a`) right as the prompt appears, and again
+   every 30 s while the prompt is unanswered. With kitty's `bell_on_tab` the
+   tab gets marked too.
+3. **The prompt box** in the terminal, which stays until answered.
+
+Both the bell and the notification go to the first of stdout and stderr that
+is a terminal. That matters if you keep an audit trail with
+`sudo-broker 2>audit.log`: the prompt, bell and notification stay on your
+terminal, and the log gets none of them. When neither stream is a tty, nothing
+is written at all.
+
+[osc99]: https://sw.kovidgoyal.net/kitty/desktop-notifications/
+
+Other mechanisms, if you want to change it: OSC 9 (`\e]9;text\a`) is the
+simpler iTerm2/GNOME-style notification, `notify-send` reaches the GNOME
+notification centre directly but needs the session bus and cannot focus the
+terminal from a root daemon, and `kitty @ focus-window` needs
+`allow_remote_control` in `kitty.conf`. OSC 99 is the one that both shows up
+and takes you to the window when clicked, without widening kitty's remote
+control surface.
 
 ## Why this shape
 
@@ -41,8 +61,9 @@ stream is a tty, nothing is written.
   single-use.
 - **The command cannot touch your terminal.** The child gets
   `stdin=/dev/null`, so an approved command can't read what you type next.
-- **Fail-closed.** No socket → `sudo-ask` exits 2 with instructions. A timeout,
-  a denial, or an empty answer all exit 1 and run nothing.
+- **Fail-closed.** No socket → `sudo-ask` exits 2 with instructions. A denial
+  or an empty answer exit 1 and run nothing. A request nobody answers stays
+  open — it never turns into an approval by itself.
 - **Root executes a root-owned copy.** The daemon and client are stdlib-only
   and are installed to `/usr/local/sbin/sudo-broker` and
   `/usr/local/bin/sudo-ask`. Never run the daemon with `uv run` — that would
@@ -67,7 +88,7 @@ change the socket mode and the peer check in `sudo_broker.py`.
 | --- | --- |
 | command's own | approved and ran; stdout/stderr streamed through |
 | 2 | no broker running, or the socket isn't root-owned |
-| 1 | denied, no answer, or a malformed request |
+| 1 | denied, or a malformed request (an unanswered one waits) |
 | 124 | approved, but killed after `EXEC_TIMEOUT` (600 s) |
 
 `sudo-ask 'cmd with | pipes && logic'` takes the whole string as one argument;
@@ -75,9 +96,9 @@ argv is joined with spaces otherwise, so shell syntax needs quoting.
 
 ## Tests
 
-The prompt behaviour — bells, routing between stdout and stderr, suppression
-into redirected streams, the timeout path — runs **in process** in the normal
-suite, with the timers shrunk and no root or pty involved:
+The prompt behaviour — bells, notification escapes, routing between stdout and
+stderr, suppression into redirected streams, the refusals — runs **in process**
+in the normal suite, with the timers shrunk and no root or pty involved:
 
 ```bash
 uv run pytest scripts/test_sudo_broker.py
@@ -92,9 +113,11 @@ sudo /usr/bin/python3 scripts/test_sudo_broker.py
 
 Covers: approval runs and streams the command's exit code, denial runs
 nothing, an empty answer is a denial, the prompt rings the bell and keeps
-ringing while unanswered, the bell follows whichever of stdout/stderr is the
-terminal but never lands in a redirected log, and a missing broker fails
-closed.
+ringing while unanswered (and stops once answered), there is no answer
+timeout, a second request while one is pending is refused, the notification
+escape carries the focus action and the command, and bell/notification follow
+whichever of stdout/stderr is the terminal without ever landing in a redirected
+log. A missing broker fails closed.
 
 ## Removing a standing NOPASSWD rule
 
