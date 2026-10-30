@@ -7,7 +7,7 @@ the Skolemelding migration): messages, oppslag/news (ukeplan-PDFs), samtykker
 with deadlines and **hentemeldinger** — the standing permission for a child to
 leave on their own, which has an expiry date nobody tells you about.
 Unofficial, reverse-engineered API — the full spec and its watch-outs live in
-`PLAN-VIGILO.md` in the diary repo; upstream repos are named in
+`docs/vigilo-pipeline.md` in the diary repo; upstream repos are named in
 `scripts/vigilo_api.py`'s docstring.
 
 `uv run vigilo-sync --once` appends distilled records (never raw — SAS
