@@ -298,7 +298,7 @@ def fetch_threads(
     if hit_ceiling:
         print(
             f"!! vigilo: the thread list returned the pageSize ceiling "
-            f"({PAGE_SIZE}) — older threads are invisible; see PLAN-VIGILO.md",
+            f"({PAGE_SIZE}) — older threads are invisible; see docs/vigilo-pipeline.md",
             file=sys.stderr,
         )
     return counts
@@ -775,7 +775,7 @@ def run_once(
                     state["web_available"] = False
                     print(
                         "!! vigilo: the web gateway refused the app token — "
-                        "news/consent/check_out_note are out of reach (PLAN-VIGILO.md "
+                        "news/consent/check_out_note are out of reach (docs/vigilo-pipeline.md "
                         "Phase B2 fallback). Messages still work.",
                         file=sys.stderr,
                     )

@@ -1,6 +1,6 @@
 """Tests for vigilo_api.py. Run with `uv run pytest scripts/`.
 
-The shapes pinned here are the real API's, as recorded in PLAN-VIGILO.md
+The shapes pinned here are the real API's, as recorded in docs/vigilo-pipeline.md
 Appendix A — with fabricated UUIDs and names. They exist so that the day
 Vigilo changes something under this unofficial client, a test fails instead of
 the pipeline quietly returning empty lists.

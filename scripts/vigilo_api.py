@@ -17,7 +17,7 @@ Read-only by design: the only non-GET request in this module is the OAuth
 token exchange. No reply, no read-receipt, no absence POST — answering AKS
 stays a human act in the app.
 
-Two gateways, one token (verified live; see PLAN-VIGILO.md Phase B2):
+Two gateways, one token (verified live; see docs/vigilo-pipeline.md Phase B2):
 
 ``API_BASE``      app gateway — Bearer **plus** a literal ``appVersion``
                   header **plus** ``userId=<jwt sub>`` as a query param.
@@ -76,7 +76,7 @@ REDIRECT_URI = os.environ.get("VIGILO_REDIRECT_URI", "app://ch-parent-android.vi
 
 # Literal ``appVersion`` header the app gateway expects. The APK sends
 # "Android " + versionName, so this tracks a shipping release: 3.3.0-4 is the
-# current one (read out of its classes*.dex; PLAN-VIGILO.md Phase A). The
+# current one (read out of its classes*.dex; docs/vigilo-pipeline.md Phase A). The
 # gateway is known to reject requests without the header; whether it checks the
 # value is unknown, so [vigilo].app_version overrides without a code change.
 DEFAULT_APP_VERSION = "Android 3.3.0-4"
@@ -87,7 +87,7 @@ EXPIRY_MARGIN = 60
 
 # Effective floor between two live polls of the app gateway. Vigilo is a
 # third-party production service and neither upstream repo throttles at all;
-# we do (PLAN-VIGILO.md "Scope notes & rules").
+# we do (docs/vigilo-pipeline.md "Scope notes & rules").
 POLL_FLOOR_SECONDS = 300
 
 RETRY_STATUSES = (429, 500, 502, 503, 504)
@@ -946,7 +946,7 @@ def api_describe_children(api: VigiloApi) -> str:
         lines.append(
             "web gateway    HTTP 401 — the app token does NOT work here. "
             "Consents/news/timetable are out of reach until the web client is "
-            "mapped; ship app-gateway-only (see PLAN-VIGILO.md Phase B2)."
+            "mapped; ship app-gateway-only (see docs/vigilo-pipeline.md Phase B2)."
         )
     elif web.status_code >= 400:
         lines.append(f"web gateway    HTTP {web.status_code}  {web.text[:120]}")
