@@ -165,6 +165,13 @@ def immich_url() -> str:
     return _host_url("IMMICH_URL", "hosts.immich", "server:2283")
 
 
+def kimi_web_url() -> str:
+    """Public base URL of the kimi web UI (behind the Caddy tailnet proxy),
+    e.g. ``https://server:8446``. Full URL incl. scheme."""
+    return (os.environ.get("KIMI_WEB_URL")
+            or cfg("hosts.kimi_web", "https://server:8446")).rstrip("/")
+
+
 def dsh_web_url() -> str:
     """Public base URL of the dsh web UI (behind the Caddy tailnet proxy),
     e.g. ``https://server:8444``. Full URL incl. scheme, unlike the
