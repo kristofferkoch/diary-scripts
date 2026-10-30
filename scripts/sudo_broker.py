@@ -10,7 +10,9 @@ Agents ask through it instead of holding standing sudo rights:
     sudo-ask systemctl restart caddy
 
 The daemon prints the exact command with the requesting uid/pid/cwd and waits
-for `y`. Approvals are single-use, the executed command gets no access to the
+for `y`. Each request rings the terminal bell (and rings again every 30 s while
+it is unanswered), so the window you started the broker in asks for focus.
+Approvals are single-use, the executed command gets no access to the
 terminal (stdin is /dev/null), and the whole capability disappears when the
 daemon exits (Ctrl-C, terminal closed, or idle timeout). There is deliberately
 no way to pre-authorise a command.
@@ -39,6 +41,7 @@ SOCK_DIR = os.path.dirname(SOCK_PATH)
 MAX_REQUEST_BYTES = 65536
 MAX_CMD_CHARS = 4096
 PROMPT_TIMEOUT = 120.0  # seconds to answer before the request is denied
+BELL_INTERVAL = 30.0  # re-ring the terminal bell while a prompt is unanswered
 EXEC_TIMEOUT = 600.0  # seconds before an approved command is killed
 IDLE_EXIT = 1800.0  # exit when nothing has connected for this long
 
@@ -55,6 +58,29 @@ _prompt_lock = threading.Lock()
 
 def log(msg: str) -> None:
     print(f"[sudo-broker] {msg}", file=sys.stderr, flush=True)
+
+
+def bell() -> None:
+    """Ring the operator's terminal bell so the window asks for attention.
+
+    Terminals and multiplexers turn BEL into an urgency hint, a taskbar flash
+    or a marked tab — that is how the human notices a request that arrived
+    while another window had focus. The bell goes to the first of stdout and
+    stderr that is a terminal, because an audit setup may redirect stderr to a
+    log; when neither is a tty nothing is written, so log files stay free of
+    stray control bytes.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:  # fd closed at startup — nothing to ring
+            continue
+        try:
+            if not stream.isatty():
+                continue
+            stream.write("\a")
+            stream.flush()
+            return
+        except (AttributeError, OSError, ValueError):
+            continue
 
 
 def sanitize(text: str, limit: int = MAX_CMD_CHARS) -> str:
@@ -124,12 +150,22 @@ def approve(info: tuple[int, int, int, str], cmd: str, cwd: str) -> tuple[bool, 
         print(f"│ run  : {sanitize(cmd)}", flush=True)
         print(f"│ answer within {int(PROMPT_TIMEOUT)}s", flush=True)
         print("└─ approve? [y/N] ", end="", flush=True)
-        ready, _, _ = select.select([sys.stdin], [], [], PROMPT_TIMEOUT)
-        if not ready:
+        bell()
+        answer = None
+        deadline = time.monotonic() + PROMPT_TIMEOUT
+        while answer is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            ready, _, _ = select.select([sys.stdin], [], [], min(BELL_INTERVAL, remaining))
+            if ready:
+                answer = sys.stdin.readline().strip().lower()
+            else:
+                bell()  # still unanswered — nudge the terminal again
+        if answer is None:
             print("\n(sudo-broker: no answer -> denied)", flush=True)
             log(f"DENIED (timeout): {cmd!r} from uid {uid}")
             return False, "timed out waiting for approval"
-        answer = sys.stdin.readline().strip().lower()
         if answer not in ("y", "yes"):
             print("(sudo-broker: denied)", flush=True)
             log(f"DENIED (operator said no): {cmd!r} from uid {uid}")

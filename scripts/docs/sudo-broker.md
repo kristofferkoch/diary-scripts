@@ -18,6 +18,19 @@ sudo-ask systemctl restart caddy
 Nothing runs until you type `y`. Closing the terminal (or Ctrl-C, or 30
 minutes of silence) removes the capability entirely.
 
+## Terminal bell
+
+A request rings the terminal bell (`BEL`, `\a`) right as the prompt appears,
+and again every 30 s while it is still unanswered. Terminals and multiplexers
+turn that into an urgency hint, a taskbar flash or a marked tab, so the window
+you started the broker in asks for focus instead of waiting silently behind
+another window.
+
+The bell goes to the first of stdout and stderr that is a terminal. That
+matters if you keep an audit trail with `sudo-broker 2>audit.log`: the prompt
+and the bell stay on your terminal, and the log gets neither. When neither
+stream is a tty, nothing is written.
+
 ## Why this shape
 
 - **No password ever travels.** The daemon *executes* approved commands; it
@@ -62,14 +75,26 @@ argv is joined with spaces otherwise, so shell syntax needs quoting.
 
 ## Tests
 
-End-to-end, driving a real daemon on a pty (needs root and a tty):
+The prompt behaviour — bells, routing between stdout and stderr, suppression
+into redirected streams, the timeout path — runs **in process** in the normal
+suite, with the timers shrunk and no root or pty involved:
+
+```bash
+uv run pytest scripts/test_sudo_broker.py
+```
+
+The daemon itself needs root and a terminal, so the end-to-end half drives a
+real daemon on a pty and types `y`/`n` at it:
 
 ```bash
 sudo /usr/bin/python3 scripts/test_sudo_broker.py
 ```
 
 Covers: approval runs and streams the command's exit code, denial runs
-nothing, an empty answer is a denial, and a missing broker fails closed.
+nothing, an empty answer is a denial, the prompt rings the bell and keeps
+ringing while unanswered, the bell follows whichever of stdout/stderr is the
+terminal but never lands in a redirected log, and a missing broker fails
+closed.
 
 ## Removing a standing NOPASSWD rule
 
