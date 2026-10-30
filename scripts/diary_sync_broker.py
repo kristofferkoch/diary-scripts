@@ -347,7 +347,22 @@ def _fallback_status() -> dict:
     return services_status()
 
 
+GLOBAL_FLAGS = ("--json", "--fallback")
+
+
+def _normalise_argv(argv: list[str]) -> list[str]:
+    """Accept the global flags before *or* after the subcommand.
+
+    ``diary-sync status --json`` is what people type (and what sjekk-collect
+    builds); argparse only takes them before the subcommand, so hoist them.
+    """
+    flags = [a for a in argv if a in GLOBAL_FLAGS]
+    rest = [a for a in argv if a not in GLOBAL_FLAGS]
+    return flags + rest
+
+
 def client_main(argv: list[str] | None = None) -> int:
+    argv = _normalise_argv(list(sys.argv[1:] if argv is None else argv))
     parser = argparse.ArgumentParser(
         prog="diary-sync",
         description="Ask the diary-sync broker (or, with --fallback, do it here).")
@@ -382,6 +397,9 @@ def client_main(argv: list[str] | None = None) -> int:
 
     if args.json:
         print(json.dumps(reply, ensure_ascii=False))
+    elif reply.get("cmd") == "ping":
+        print(f"ok (broker {reply.get('version')}, pid {reply.get('pid')})" if reply.get("ok")
+              else f"diary-sync: {reply.get('error')}")
     elif reply.get("cmd") == "status":
         if not reply.get("ok"):
             print(f"diary-sync: {reply.get('error')}", file=sys.stderr)

@@ -170,3 +170,27 @@ def test_client_prints_json(monkeypatch, capsys, tmp_path):
     assert broker.client_main(["--socket", sock_path, "--json", "status"]) == 0
     printed = json.loads(capsys.readouterr().out)
     assert printed["cmd"] == "status"
+
+
+def test_global_flags_are_accepted_after_the_subcommand():
+    assert broker._normalise_argv(["status", "--json", "--fallback"]) == [
+        "--json", "--fallback", "status"]
+    assert broker._normalise_argv(["--json", "status"]) == ["--json", "status"]
+
+
+def test_client_status_with_flags_after_the_subcommand(monkeypatch, capsys, tmp_path):
+    sock_path = str(tmp_path / "s.sock")
+    thread = threading.Thread(
+        target=broker.serve, args=(sock_path,),
+        kwargs={"runner": lambda argv, timeout: {"ok": True, "output": "active"}},
+        daemon=True)
+    thread.start()
+    for _ in range(100):
+        try:
+            broker.call({"cmd": "ping"}, socket_path=sock_path, timeout=1)
+            break
+        except broker.BrokerUnavailable:
+            threading.Event().wait(0.05)
+    # the shape sjekk-collect uses
+    assert broker.client_main(["--socket", sock_path, "status", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["cmd"] == "status"
