@@ -8,8 +8,10 @@ sjekk SOP. It runs in two phases:
     * If the last `mail-sync.service` run is older than ~15 min (or
       --force-sync), start the unit and wait for it (blocking, 300 s cap)
       so the mail triage reads a fresh index.
-    * `spond-sync --once` (idempotent; auto-bumps its own cursor).
-    * `vigilo-sync --once` / `skolemelding-sync --once` — **gated on the
+    * `diary-sync sync spond` (idempotent; auto-bumps its own cursor). The
+      console client asks the diary-sync broker when it is running and does the
+      work locally with `--fallback` — same command for kek and for the agent.
+    * `diary-sync sync vigilo|skolemelding` — **gated on the
       notification mail**: both services always mail when there is new
       content, so the sync runs only when notmuch has a notification mail
       newer than the sync's own `last_successful_run` (a sync older than
@@ -106,11 +108,10 @@ TRACKS: dict[str, list[list[str]]] = {
     "embed-health.txt": [["psql", "-d", "mailvec", "-t", "-c",
                           "SELECT source, now() - max(embedded_at) "
                           "FROM messages GROUP BY source ORDER BY source;"]],
-    "services.txt": [
-        ["systemctl", "--user", "is-active", "signal-capture.service"],
-        ["systemctl", "--user", "show", "mail-sync.service",
-         "-p", "ExecMainExitTimestamp", "--value"],
-    ],
+    # One command for both identities: `diary-sync status` asks the broker
+    # (agent) and `--fallback` runs `systemctl --user` locally (kek, or a
+    # broker outage). See scripts/docs/diary-sync.md.
+    "services.txt": [["diary-sync", "status", "--fallback"]],
 }
 
 
@@ -253,19 +254,13 @@ def write_run(out_root: Path, results: list[TrackResult],
 # --- Phase A: freshness ------------------------------------------------------
 
 
-def _last_mail_sync() -> dt.datetime | None:
-    """Wall-clock time of the last mail-sync.service run, or None."""
-    try:
-        proc = subprocess.run(
-            ["systemctl", "--user", "show", "mail-sync.service",
-             "-p", "ExecMainExitTimestamp", "--value"],
-            capture_output=True, text=True, timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    # "Sun 2026-10-11 12:34:56 CEST" — drop weekday, ignore the zone label
-    # (host-local time either way; a freshness check tolerates that).
-    parts = proc.stdout.strip().split()
+def _parse_systemd_stamp(text: str) -> dt.datetime | None:
+    """`Sun 2026-10-11 12:34:56 CEST` -> aware local datetime (or None).
+
+    Drops the weekday and ignores the zone label: systemd prints host-local
+    time either way, and a freshness check tolerates that.
+    """
+    parts = (text or "").strip().split()
     if len(parts) < 3:
         return None
     try:
@@ -273,6 +268,46 @@ def _last_mail_sync() -> dt.datetime | None:
     except ValueError:
         return None
     return naive.astimezone()
+
+
+def _broker_status() -> dict | None:
+    """Pipeline unit state from the diary-sync broker, or None when neither the
+    broker nor a local `systemctl --user` answers (agent without the unit)."""
+    try:
+        proc = subprocess.run(
+            ["diary-sync", "status", "--json", "--fallback"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None
+
+
+def _last_mail_sync() -> dt.datetime | None:
+    """Wall-clock time of the last mail-sync.service run, or None.
+
+    Reads `systemctl --user` directly when this process can (kek), and asks the
+    diary-sync broker otherwise (the agent cannot see kek's user manager).
+    """
+    try:
+        proc = subprocess.run(
+            ["systemctl", "--user", "show", "mail-sync.service",
+             "-p", "ExecMainExitTimestamp", "--value"],
+            capture_output=True, text=True, timeout=30,
+        )
+        stamp = _parse_systemd_stamp(proc.stdout)
+    except (OSError, subprocess.TimeoutExpired):
+        stamp = None
+    if stamp is not None:
+        return stamp
+    status = _broker_status() or {}
+    unit = (status.get("units") or {}).get("mail-sync.service") or {}
+    return _parse_systemd_stamp(unit.get("last_run", ""))
 
 
 def mail_sync_stale(max_age: dt.timedelta = MAIL_SYNC_MAX_AGE) -> bool:
@@ -360,7 +395,7 @@ def phase_a(*, force_sync: bool, no_sync: bool) -> list[str]:
     def _mail() -> None:
         if force_sync or mail_sync_stale():
             res = _run_one(
-                ["systemctl", "--user", "start", "mail-sync.service"],
+                ["diary-sync", "start", "mail-sync.service", "--fallback"],
                 timeout=SYNC_TIMEOUT)
             if res.failed:
                 log.append(f"!! mail-sync.service restart failed: "
@@ -371,7 +406,8 @@ def phase_a(*, force_sync: bool, no_sync: bool) -> list[str]:
             log.append("mail-sync fresh — no restart needed")
 
     def _spond() -> None:
-        res = _run_one(["spond-sync", "--once"], timeout=SYNC_TIMEOUT)
+        res = _run_one(["diary-sync", "sync", "spond", "--fallback"],
+                       timeout=SYNC_TIMEOUT)
         tail = res.output.strip().splitlines()[-1] if res.output.strip() else ""
         log.append(f"!! spond-sync failed: {tail}" if res.failed
                    else f"spond-sync: {tail or 'ok'}")
@@ -381,7 +417,8 @@ def phase_a(*, force_sync: bool, no_sync: bool) -> list[str]:
             log.append(f"{track}-sync: skipped — no notification mail "
                        f"since last sync")
             return
-        res = _run_one([f"{track}-sync", "--once"], timeout=SYNC_TIMEOUT)
+        res = _run_one(["diary-sync", "sync", track, "--fallback"],
+                       timeout=SYNC_TIMEOUT)
         tail = res.output.strip().splitlines()[-1] if res.output.strip() else ""
         log.append(f"!! {track}-sync failed: {tail}" if res.failed
                    else f"{track}-sync: {tail or 'ok'}")

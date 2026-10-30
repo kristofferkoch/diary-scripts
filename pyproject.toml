@@ -53,6 +53,8 @@ skolemeldingshow   = "scripts.skolemeldingshow:main"
 kindle-dashboard  = "scripts.kindle_dashboard.serve:main"
 immich-recent     = "scripts.immich_recent:main"
 dsh-web-notify    = "scripts.dsh_web_notify:main"
+diary-sync        = "scripts.diary_sync_broker:client_main"
+diary-sync-broker = "scripts.diary_sync_broker:main"
 
 [build-system]
 requires = ["hatchling"]

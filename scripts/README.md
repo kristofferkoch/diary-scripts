@@ -17,7 +17,7 @@ Entry-point names: `mailshow`, `search-mail`, `embed-mail`, `embed-messages`,
 `retire-calendar`, `sjekk-collect`, `kindle-dashboard`, `immich-recent`,
 `dsh-web-notify`, `vigilo-api`, `vigilo-login`, `vigilo-sync`, `vigiloshown`,
 `skolemelding-api`, `skolemelding-login`, `skolemelding-sync`,
-`skolemeldingshow`. Server modules are
+`skolemeldingshow`, `diary-sync`, `diary-sync-broker`. Server modules are
 invoked as `uv run python -m mail_reader.server` and
 `uv run python -m scripts.kindle_dashboard.serve`.
 
@@ -58,6 +58,7 @@ Per-tool detail and the triage SOPs live in `docs/`. This file is the index.
 | [`docs/immich.md`](docs/immich.md) | `immich-recent` (Immich API reader) |
 | [`docs/dsh-web-notify.md`](docs/dsh-web-notify.md) | dsh web login URL → Signal notifier |
 | [`docs/signal-notify.md`](docs/signal-notify.md) | `signal-notify-proxy`: write-only note-to-self proxy in front of signal-cli (agent-facing) |
+| [`docs/diary-sync.md`](docs/diary-sync.md) | `diary-sync` / `diary-sync-broker`: allow-listed socket for the sjekk's privileged steps (spond/vigilo/skolemelding sync, `systemctl --user`) so the agent never holds those secrets |
 | [`docs/sudo-broker.md`](docs/sudo-broker.md) | `sudo-broker` / `sudo-ask`: per-command root approval from an open terminal, replacing standing `NOPASSWD` |
 | [`docs/retired-notes-shopping.md`](docs/retired-notes-shopping.md) | removed 2026-10: the `/notes/` and `/shopping/` pages |
 
