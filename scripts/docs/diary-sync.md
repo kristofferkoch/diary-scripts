@@ -73,7 +73,9 @@ sudo-ask 'install -m 0644 /home/kek/diary/sync/diary-sync-broker.service /etc/sy
 ```
 
 The installed copy is stdlib-only on purpose: root must never execute code out
-of the agent-writable venv (same rule as `sudo-broker`).
+of an unreviewed checkout. Sync commands come from the human-approved
+`diary-scripts` tree, and secret lookups use fixed argv rather than configurable
+shell commands (same boundary rule as `sudo-broker`).
 
 ## Verify
 

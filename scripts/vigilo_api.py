@@ -95,8 +95,8 @@ MAX_ATTEMPTS = 3
 BACKOFF_BASE = 1.5
 BACKOFF_CAP = 30.0
 
-DEFAULT_PASSWORD_CMD_ID = "pass show vigilo/client-id"
-DEFAULT_PASSWORD_CMD_SECRET = "pass show vigilo/client-secret"
+CLIENT_ID_ARGV = ("pass", "show", "vigilo/client-id")
+CLIENT_SECRET_ARGV = ("pass", "show", "vigilo/client-secret")
 
 
 # --- Errors ------------------------------------------------------------------
@@ -149,38 +149,32 @@ def app_version() -> str:
     return str(cfg("vigilo.app_version", DEFAULT_APP_VERSION))
 
 
-def _secret(cmd: str, what: str) -> str:
-    """Run a ``pass`` command and return its stdout (like spond_sync does)."""
+def _secret(argv: tuple[str, ...], what: str) -> str:
+    """Read one fixed ``pass`` entry without invoking a shell."""
     try:
-        proc = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+        proc = subprocess.run(argv, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
-        raise ConfigError(f"could not read {what} ({cmd!r}): {e}") from e
+        raise ConfigError(f"could not read {what}: {e}") from e
     value = proc.stdout.strip()
     if not value:
-        raise ConfigError(f"{what} command produced empty output: {cmd!r}")
+        raise ConfigError(f"{what} command produced empty output")
     return value
 
 
 def client_credentials() -> tuple[str, str]:
     """The OAuth client id/secret — Vigilo's own Android-app values.
 
-    Env wins, then the ``pass`` entries (``vigilo/client-id``,
-    ``vigilo/client-secret``), overridable through
-    ``[vigilo].client_id_cmd`` / ``[vigilo].client_secret_cmd``. The secret is
-    obfuscation-from-a-public-APK rather than a real credential, but it still
-    never goes in a repo (diary-scripts is public).
+    Env wins, then the fixed ``pass`` entries (``vigilo/client-id`` and
+    ``vigilo/client-secret``). The secret is obfuscation-from-a-public-APK
+    rather than a real credential, but it still never goes in a repo
+    (diary-scripts is public).
     """
     client_id = os.environ.get("VIGILO_CLIENT_ID", "")
     client_secret = os.environ.get("VIGILO_CLIENT_SECRET", "")
     if client_id and client_secret:
         return client_id, client_secret
-    client_id = client_id or _secret(
-        str(cfg("vigilo.client_id_cmd", DEFAULT_PASSWORD_CMD_ID)), "vigilo client_id"
-    )
-    client_secret = client_secret or _secret(
-        str(cfg("vigilo.client_secret_cmd", DEFAULT_PASSWORD_CMD_SECRET)),
-        "vigilo client_secret",
-    )
+    client_id = client_id or _secret(CLIENT_ID_ARGV, "vigilo client_id")
+    client_secret = client_secret or _secret(CLIENT_SECRET_ARGV, "vigilo client_secret")
     return client_id, client_secret
 
 

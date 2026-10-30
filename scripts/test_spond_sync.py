@@ -6,7 +6,9 @@ Regression focus: an RSVP change on an already-seen event must re-emit
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
+from scripts import spond_sync
 from scripts.spond_sync import event_activity_key, fetch_events, member_rsvp
 
 
@@ -93,3 +95,17 @@ def test_legacy_seen_event_ids_is_migrated():
     assert new == 1                          # re-emitted once to re-baseline
     assert "seen_event_ids" not in state     # legacy key gone
     assert state["seen_event_activity"]["ev1"]
+
+
+def test_password_lookup_is_fixed_argv_not_a_shell(monkeypatch):
+    seen = {}
+
+    def _fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        seen["kwargs"] = kwargs
+        return SimpleNamespace(stdout="secret\n")
+
+    monkeypatch.setattr(spond_sync.subprocess, "run", _fake_run)
+    assert spond_sync.get_password() == "secret"
+    assert seen["argv"] == ("pass", "show", "spond/user")
+    assert "shell" not in seen["kwargs"]

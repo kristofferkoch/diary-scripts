@@ -55,6 +55,9 @@ immich-recent     = "scripts.immich_recent:main"
 dsh-web-notify    = "scripts.dsh_web_notify:main"
 diary-sync        = "scripts.diary_sync_broker:client_main"
 diary-sync-broker = "scripts.diary_sync_broker:main"
+agent-merge-queue = "scripts.agent_merge_queue:queue_main"
+agent-merge-approve = "scripts.agent_merge_queue:approve_main"
+agent-merge-token-notify = "scripts.agent_merge_queue:notify_main"
 
 [build-system]
 requires = ["hatchling"]

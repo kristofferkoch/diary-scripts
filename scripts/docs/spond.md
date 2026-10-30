@@ -20,7 +20,7 @@ post bodies, while payment receipts come in over mail.
   `spond-sync` / `spondshow` bare under `uv run`, **no inline
   `SPOND_USERNAME=…` prefix** (a guessed override silently routes to the
   wrong account).
-- Password: `pass show spond/user` (override with `$SPOND_PASSWORD_CMD`).
+- Password: fixed argv `pass show spond/user`; no configurable shell command.
 - 2FA must be **off** on the Spond account — Olen/Spond doesn't implement
   the OTP-verify flow
   ([issue #205](https://github.com/Olen/Spond/issues/205)).

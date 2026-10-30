@@ -32,8 +32,8 @@ Raw output: memory/spond/YYYY-MM-DD.jsonl
   One JSON object per line:
     {"kind": "chat"|"event"|"post", "fetched_at": "...Z", "data": {...}}
 
-Auth: SPOND_USERNAME from env; password from `pass show spond/user`
-(override with $SPOND_PASSWORD_CMD).
+Auth: SPOND_USERNAME from env or config; password from the fixed argv
+`pass show spond/user` (never a configurable shell command).
 
 Examples:
     uv run scripts/spond_sync.py --once
@@ -57,7 +57,7 @@ from mail_reader.config import cfg, workspace_root
 PROJECT_ROOT = workspace_root()
 STATE_PATH = PROJECT_ROOT / "memory" / "spond-state.json"
 OUT_DIR = PROJECT_ROOT / "memory" / "spond"
-DEFAULT_PASSWORD_CMD = "pass show spond/user"
+PASSWORD_ARGV = ("pass", "show", "spond/user")
 
 VALID_KINDS = {"chat", "event", "post"}
 
@@ -94,11 +94,11 @@ def save_state(state: dict[str, Any]) -> None:
     )
 
 
-def get_password(cmd: str) -> str:
-    result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+def get_password() -> str:
+    result = subprocess.run(PASSWORD_ARGV, check=True, capture_output=True, text=True)
     pw = result.stdout.strip()
     if not pw:
-        raise RuntimeError(f"password command produced empty output: {cmd!r}")
+        raise RuntimeError("password command produced empty output")
     return pw
 
 
@@ -256,12 +256,11 @@ async def run_once(
 
     # Env wins; fall back to [spond] in config/local.toml so these survive a
     # restore (they used to be ephemeral shell exports — see
-    # backup/RESTORE-2026-06-22.md). password_cmd stays a `pass` reference.
+    # backup/RESTORE-2026-06-22.md).
     user = os.environ.get("SPOND_USERNAME") or cfg("spond.username", None)
     if not user:
         raise SystemExit("SPOND_USERNAME not set (env or [spond].username in config)")
-    pw_cmd = os.environ.get("SPOND_PASSWORD_CMD") or cfg("spond.password_cmd", DEFAULT_PASSWORD_CMD)
-    pw = get_password(pw_cmd)
+    pw = get_password()
 
     member_id = os.environ.get("SPOND_RSVP_MEMBER_ID") or cfg("spond.rsvp_member_id", None)
     if "event" in kinds and not member_id:

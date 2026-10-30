@@ -110,7 +110,7 @@ def token_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture
-def store(token_file: Path) -> TokenStore:
+def store(token_file: Path, creds: None) -> TokenStore:
     return TokenStore(token_file)
 
 
@@ -269,6 +269,20 @@ def test_missing_credentials_are_a_config_error(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(va, "_secret", _no_secret)
     with pytest.raises(ConfigError):
         va.client_credentials()
+
+
+def test_pass_entries_are_fixed_argv_not_configurable_shell(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("VIGILO_CLIENT_ID", raising=False)
+    monkeypatch.delenv("VIGILO_CLIENT_SECRET", raising=False)
+    seen: list[tuple[str, ...]] = []
+
+    def _fake_secret(argv: tuple[str, ...], what: str) -> str:
+        seen.append(argv)
+        return what
+
+    monkeypatch.setattr(va, "_secret", _fake_secret)
+    va.client_credentials()
+    assert seen == [va.CLIENT_ID_ARGV, va.CLIENT_SECRET_ARGV]
 
 
 # --- Token store: rotation, races, lifetime --------------------------------
