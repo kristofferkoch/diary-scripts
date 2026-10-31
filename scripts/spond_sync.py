@@ -298,6 +298,8 @@ def main(argv: list[str] | None = None) -> int:
                     help=f"Comma-separated subset of {sorted(VALID_KINDS)}.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Print new records to stdout; do NOT write JSONL or update state.")
+    ap.add_argument("--event-spool", type=Path,
+                    help="Also emit fresh in-memory records to this trusted event spool.")
     args = ap.parse_args(argv)
 
     if not args.once:
@@ -317,6 +319,9 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(rec, ensure_ascii=False))
         return 0
 
+    if args.event_spool:
+        from scripts.event_export import emit_records
+        emit_records(args.event_spool, "spond", records)
     if total > 0:
         append_jsonl(today_jsonl(), records)
     save_state(state)

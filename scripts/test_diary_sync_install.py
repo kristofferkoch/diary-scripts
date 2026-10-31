@@ -178,17 +178,28 @@ def test_shell_installer_requires_root_config_and_uses_approved_units(
         integration / "sync",
         approved_diary / "sync",
         approved_scripts / "scripts",
+        approved_scripts / ".venv/bin",
         owner_home / ".config/diary",
         owner_home / ".password-store/spond",
         owner_home / ".password-store/vigilo",
         owner_home / ".gnupg",
     ):
         path.mkdir(parents=True, exist_ok=True)
-    for name in ("diary-sync-broker.service", "diary-sync-runtime.service"):
+    collector_units = (
+        "diary-collect@.service",
+        "diary-collect-spond.timer",
+        "diary-collect-vigilo.timer",
+        "diary-collect-skolemelding.timer",
+    )
+    for name in ("diary-sync-broker.service", "diary-sync-runtime.service", *collector_units):
         (integration / "sync" / name).write_text("unreviewed\n")
         (approved_diary / "sync" / name).write_text("reviewed\n")
-    for name in ("diary_sync_broker.py", "diary_sync_install.py", "safe_io.py"):
+    for name in (
+        "diary_sync_broker.py", "diary_sync_install.py", "safe_io.py",
+        "event_spool.py", "event_export.py",
+    ):
         (approved_scripts / "scripts" / name).write_text("")
+    (approved_scripts / ".venv/bin/diary-event-export").write_text("")
     for path in (
         owner_home / ".config/diary/vigilo-tokens.json",
         owner_home / ".config/diary/skolemelding-auth.json",
@@ -225,7 +236,10 @@ def test_shell_installer_requires_root_config_and_uses_approved_units(
     log = tmp_path / "operations.log"
     mock_bin = tmp_path / "mock-bin"
     mock_bin.mkdir()
-    for name in ("install", "systemctl", "systemd-analyze", "python3", "stat"):
+    for name in (
+        "install", "systemctl", "systemd-analyze", "python3", "stat",
+        "groupadd", "chown", "chmod",
+    ):
         (mock_bin / name).write_text(f"""#!/bin/bash
 printf '{name}' >> "$SYNC_INSTALL_TEST_LOG"
 printf ' %s' "$@" >> "$SYNC_INSTALL_TEST_LOG"
@@ -267,11 +281,19 @@ printf '%s\n' "$SYNC_INSTALL_TEST_CONFIG_UID"
         f"{approved_diary}/sync/diary-sync-runtime.service "
         f"{approved_diary}/sync/diary-sync-broker.service"
     ) in operations
-    for name in ("diary-sync-runtime.service", "diary-sync-broker.service"):
+    for name in ("diary-sync-runtime.service", "diary-sync-broker.service", *collector_units):
         assert (
             "install -o root -g root -m 0644 "
             f"{approved_diary}/sync/{name} /etc/systemd/system/{name}"
         ) in operations
+    assert f"chown root:kek {trusted_config}" in operations
+    assert f"chmod 0640 {trusted_config}" in operations
+    assert "install -d -o kek -g diary-pipeline -m 2750 /var/lib/diary/events" in operations
+    assert "groupadd --system --force diary-pipeline" in operations
     assert not any(f"{integration}/sync" in line for line in operations)
     assert not any("config/local.toml" in line for line in operations)
     assert "systemctl restart diary-sync-runtime.service diary-sync-broker.service" in operations
+    assert (
+        "systemctl restart diary-collect-spond.timer diary-collect-vigilo.timer "
+        "diary-collect-skolemelding.timer"
+    ) in operations

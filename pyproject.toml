@@ -57,6 +57,7 @@ dsh-web-notify    = "scripts.dsh_web_notify:main"
 mail-reader-token-notify = "scripts.mail_reader_token_notify:main"
 diary-sync        = "scripts.diary_sync_broker:client_main"
 diary-sync-broker = "scripts.diary_sync_broker:main"
+diary-event-export = "scripts.event_export:main"
 agent-merge-queue = "scripts.agent_merge_queue:queue_main"
 agent-merge-approve = "scripts.agent_merge_queue:approve_main"
 

@@ -873,6 +873,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="Print records to stdout; write no JSONL, touch no state.")
     ap.add_argument("--force", action="store_true",
                     help=f"Ignore the {POLL_FLOOR_SECONDS}s poll floor between runs.")
+    ap.add_argument("--event-spool", type=Path,
+                    help="Also emit fresh in-memory records to this trusted event spool.")
     args = ap.parse_args(argv)
 
     if not args.once:
@@ -910,6 +912,9 @@ def main(argv: list[str] | None = None) -> int:
         for rec in records:
             print(json.dumps(rec, ensure_ascii=False))
         return 0
+    if args.event_spool:
+        from scripts.event_export import emit_records
+        emit_records(args.event_spool, "vigilo", records)
     if total:
         append_jsonl(today_jsonl(), records)
     save_state(state)

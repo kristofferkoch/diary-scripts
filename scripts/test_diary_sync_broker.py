@@ -91,7 +91,9 @@ def test_sync_all_runs_every_target():
     seen: list[str] = []
 
     def runner(argv, timeout):
-        seen.append(argv[0])
+        assert argv[0] == "/usr/bin/flock"
+        assert argv[1].startswith("/run/diary-collect/")
+        seen.append(argv[-2])
         return {"ok": True, "output": "", "exit_code": 0}
 
     reply = _handle({"cmd": "sync", "target": "all"}, runner=runner)

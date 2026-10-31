@@ -57,9 +57,8 @@ VERSION = "1.0"
 # --- allow-lists (the whole security boundary) -------------------------------
 
 SYNC_TARGETS: dict[str, tuple[str, ...]] = {
-    "spond": ("spond-sync", "--once"),
-    "vigilo": ("vigilo-sync", "--once"),
-    "skolemelding": ("skolemelding-sync", "--once"),
+    target: ("/usr/bin/flock", f"/run/diary-collect/{target}.lock", f"{target}-sync", "--once")
+    for target in ("spond", "vigilo", "skolemelding")
 }
 ALLOWED_START_UNITS = ("mail-sync.service",)
 STATUS_UNITS = (
