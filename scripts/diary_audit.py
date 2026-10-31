@@ -195,6 +195,26 @@ def peer_credentials(conn: socket.socket) -> dict[str, int]:
     return {"pid": pid, "uid": uid, "gid": gid}
 
 
+def sd_notify(message: str) -> bool:
+    """Send a systemd notification when requested; return whether one was sent."""
+    address = os.environ.get("NOTIFY_SOCKET")
+    if not address:
+        return False
+    if address.startswith("@"):
+        address = "\0" + address[1:]
+    elif not address.startswith("/"):
+        raise AuditError("NOTIFY_SOCKET must be an absolute path or abstract socket")
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    try:
+        sock.settimeout(2.0)
+        sock.sendto(message.encode("ascii"), address)
+    except OSError as exc:
+        raise AuditError("could not send systemd readiness notification") from exc
+    finally:
+        sock.close()
+    return True
+
+
 def journal_group_conflicts(group_name: str = DEFAULT_JOURNAL_GROUP, proc_root: str = "/proc") -> list[tuple[int, int]]:
     """Return non-root PIDs that still hold the daemon-only journal group."""
     gid = grp.getgrnam(group_name).gr_gid
@@ -879,10 +899,14 @@ def daemon_main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if os.geteuid() != 0:
         parser.error("diary-auditd must run as root")
+    server: AuditDaemon | None = None
     try:
         service = AuditService(DedupStore(args.state), JournalWriter(args.journal_socket))
         server = AuditDaemon(args.listen, service, args.group)
+        sd_notify("READY=1")
     except (AuditError, KeyError, OSError) as exc:
+        if server is not None:
+            server.server_close()
         print(f"diary-auditd: {exc}", file=sys.stderr)
         return 1
     try:

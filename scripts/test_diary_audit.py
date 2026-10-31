@@ -49,6 +49,20 @@ def service(tmp_path: Path, journal: Path, **kwargs) -> audit.AuditService:
     return audit.AuditService(store, audit.JournalWriter(str(journal)), **kwargs)
 
 
+def allow_daemon_root_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_uid = os.geteuid()
+    first = True
+
+    def effective_uid() -> int:
+        nonlocal first
+        if first:
+            first = False
+            return 0
+        return real_uid
+
+    monkeypatch.setattr(audit.os, "geteuid", effective_uid)
+
+
 def datagram_sink(path: Path):
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
     sock.bind(str(path))
@@ -337,6 +351,84 @@ def test_peer_credentials_come_from_kernel_socketpair() -> None:
     finally:
         left.close()
         right.close()
+
+
+def test_sd_notify_filesystem_socket_and_non_systemd_noop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "notify.sock"
+    sink = datagram_sink(path)
+    monkeypatch.setenv("NOTIFY_SOCKET", str(path))
+    assert audit.sd_notify("READY=1") is True
+    assert sink.recv(1024) == b"READY=1"
+    sink.close()
+    monkeypatch.delenv("NOTIFY_SOCKET")
+    assert audit.sd_notify("READY=1") is False
+
+
+def test_sd_notify_abstract_socket(monkeypatch: pytest.MonkeyPatch) -> None:
+    name = f"diary-audit-test-{os.getpid()}"
+    sink = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    sink.bind("\0" + name)
+    sink.settimeout(2)
+    monkeypatch.setenv("NOTIFY_SOCKET", "@" + name)
+    assert audit.sd_notify("READY=1") is True
+    assert sink.recv(1024) == b"READY=1"
+    sink.close()
+
+
+def test_sd_notify_explicit_socket_failure_is_not_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NOTIFY_SOCKET", str(tmp_path / "missing.sock"))
+    with pytest.raises(audit.AuditError, match="could not send systemd readiness"):
+        audit.sd_notify("READY=1")
+
+
+def test_daemon_ready_follows_initialization_and_listen(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    allow_daemon_root_check(monkeypatch)
+    listen = tmp_path / "audit.sock"
+    ready: list[str] = []
+    served: list[audit.AuditDaemon] = []
+
+    def check_ready(message: str) -> bool:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.connect(str(listen))
+        client.close()
+        ready.append(message)
+        return True
+
+    monkeypatch.setattr(audit, "sd_notify", check_ready)
+    monkeypatch.setattr(audit.AuditDaemon, "serve_forever", lambda self: served.append(self))
+    result = audit.daemon_main([
+        "--listen", str(listen),
+        "--state", str(tmp_path / "dedup.json"),
+        "--group", grp.getgrgid(os.getegid()).gr_name,
+    ])
+    assert result == 0
+    assert ready == ["READY=1"]
+    assert len(served) == 1
+
+
+def test_daemon_failed_initialization_never_reports_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    allow_daemon_root_check(monkeypatch)
+    with patch.object(audit, "sd_notify") as notify:
+        result = audit.daemon_main([
+            "--listen", str(tmp_path / "audit.sock"),
+            "--state", str(tmp_path / "missing" / "dedup.json"),
+            "--group", grp.getgrgid(os.getegid()).gr_name,
+        ])
+    assert result == 1
+    notify.assert_not_called()
+
+
+def test_daemon_notification_failure_closes_listener(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    allow_daemon_root_check(monkeypatch)
+    monkeypatch.setenv("NOTIFY_SOCKET", str(tmp_path / "missing-notify.sock"))
+    listen = tmp_path / "audit.sock"
+    result = audit.daemon_main([
+        "--listen", str(listen),
+        "--state", str(tmp_path / "dedup.json"),
+        "--group", grp.getgrgid(os.getegid()).gr_name,
+    ])
+    assert result == 1
+    assert not listen.exists()
 
 
 def test_daemon_cli_refuses_unprivileged_execution(monkeypatch) -> None:

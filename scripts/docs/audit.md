@@ -135,7 +135,10 @@ sudo-ask /home/kek/diary-approved/systemd/install-audit-root
 
 The installer creates both groups, installs root-owned copies and configuration,
 checks retained process credentials, reloads systemd, and restarts only the
-audit namespace/daemon. It writes and reads a self-test as `kek`, verifies that
+audit namespace/daemon. The daemon uses `Type=notify`: it sends `READY=1` only
+after state initialization and the listening socket succeed, so systemd orders
+the self-test after actual readiness without polling. It writes and reads a
+self-test as `kek`, verifies that
 this trusted client has no direct native journal access, and verifies that
 existing agent/pipeline identities can use neither path. General-agent
 enforcement remains dark.
