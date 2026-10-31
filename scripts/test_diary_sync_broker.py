@@ -45,14 +45,21 @@ def test_unknown_sync_target_is_rejected_and_never_run():
     assert reply["ok"] is False and "unknown sync target" in reply["error"]
 
 
-def test_sync_runs_the_allowlisted_argv_not_the_request():
+def test_sync_runs_fixed_argv_despite_request_and_agent_config(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    config = tmp_path / "local.toml"
+    config.write_text("[commands]\nspond = '/bin/sh'\n")
+    monkeypatch.setenv("DIARY_CONFIG", str(config))
     seen: list[list[str]] = []
 
     def runner(argv, timeout):
         seen.append(list(argv))
         return {"ok": True, "output": "ok", "exit_code": 0}
 
-    reply = _handle({"cmd": "sync", "target": "spond", "argv": ["/bin/sh"]}, runner=runner)
+    reply = _handle(
+        {"cmd": "sync", "target": "spond", "argv": ["/bin/sh"]}, runner=runner
+    )
     assert seen == [list(broker.SYNC_TARGETS["spond"])]
     assert reply["target"] == "spond" and reply["ok"] is True
 

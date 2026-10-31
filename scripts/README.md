@@ -30,12 +30,14 @@ installed by `scripts/install_sudo_broker` to `/usr/local/bin` and
 entry points. Root must never execute code out of the agent-writable venv, so
 the daemon is run from the installed copy, never via `uv run`.
 
-**Config split.** Real infra/PII values (hostnames, paths, home coordinates,
-family names, Spond IDs, the important-senders list) live in a private
-`config/local.toml` + `config/important_senders.txt` in the diary repo, read
-via `mail_reader.config` (`$DIARY_CONFIG` env var or the
-`~/.config/diary/config.toml` symlink). The submodule ships only placeholder
-defaults. New code must resolve the workspace data root (where `CALENDAR.md`,
+**Config split.** Ordinary private values (paths, home coordinates, family
+names and the important-senders list) live in `config/local.toml` +
+`config/important_senders.txt` in the diary repo, read via `mail_reader.config`
+(`$DIARY_CONFIG` env var or the `~/.config/diary/config.toml` symlink).
+Security-sensitive hosts and privileged collector settings live only in
+root-owned `/etc/diary/trusted.toml`, with no env or local-config override.
+The submodule ships only placeholder defaults. New code must resolve the
+workspace data root (where `CALENDAR.md`,
 `memory/`, topic files live) via `mail_reader.config.workspace_root()` (from
 config `paths.project`) — not by walking `__file__`.
 

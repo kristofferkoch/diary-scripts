@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from mail_reader import config as config_module
 from scripts import spondshow
 from scripts.spondshow import (
     iter_records,
@@ -148,6 +149,40 @@ def test_render_header_event_no_rsvp_when_member_id_unset(monkeypatch):
     out = render_header(rec)
     for mark in ("✓", "✗", "?", "—"):
         assert mark not in out
+
+
+def test_main_reads_rsvp_member_from_trusted_config(tmp_path, monkeypatch, capsys):
+    ordinary = tmp_path / "local.toml"
+    ordinary.write_text('[spond]\nmember_ids = { "OTHER" = "X" }\n')
+    trusted = tmp_path / "trusted.toml"
+    trusted.write_text('[spond]\nrsvp_member_id = "TRUSTED-MEMBER"\n')
+    jdir = tmp_path / "spond"
+    jdir.mkdir()
+    record = {
+        "kind": "event",
+        "fetched_at": "2026-05-26T10:00:00Z",
+        "data": {
+            "id": "E1",
+            "heading": "Training",
+            "startTimestamp": "2026-05-26T15:30:00Z",
+            "responses": {"acceptedIds": ["TRUSTED-MEMBER"]},
+        },
+    }
+    (jdir / "2026-05-26.jsonl").write_text(json.dumps(record) + "\n")
+
+    try:
+        with monkeypatch.context() as m:
+            m.setenv("DIARY_CONFIG", str(ordinary))
+            m.delenv(spondshow.RSVP_ENV, raising=False)
+            m.setattr(config_module, "TRUSTED_CONFIG_PATH", trusted)
+            m.setattr(spondshow, "JSONL_DIR", jdir)
+            m.setattr(spondshow, "_RSVP_MEMBER_ID", None)
+            config_module.reload()
+
+            assert spondshow.main(["--headers-only"]) == 0
+            assert "[event ✓]" in capsys.readouterr().out
+    finally:
+        config_module.reload()
 
 
 # ---------- rsvp_status ----------

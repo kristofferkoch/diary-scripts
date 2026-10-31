@@ -79,11 +79,12 @@ LIMIT 1`.
   `CALENDAR.md` anchor. Modules must **not** derive the workspace by
   walking `__file__`: the code is a git submodule one level removed from
   the data root, so `__file__`-relative paths return the wrong directory.
-- **Config:** public placeholder defaults ship in-code. Real deployment
-  values (hostnames, `paths.project`, family names, coordinates, …) live
-  in a private `config/local.toml` in the diary repo, symlinked to the
-  XDG path (`~/.config/diary/config.toml`) or pointed to via
-  `$DIARY_CONFIG`. See `mail_reader/config.py` for the full lookup order.
+- **Config:** public placeholder defaults ship in-code. Ordinary private
+  values (`paths.project`, family names, coordinates, …) live in
+  `config/local.toml` in the diary repo, symlinked to the XDG path
+  (`~/.config/diary/config.toml`) or pointed to via `$DIARY_CONFIG`.
+  Security-sensitive hosts come only from root-owned
+  `/etc/diary/trusted.toml`. See `mail_reader/config.py` for both lookup paths.
 
 ## 6. Routes
 

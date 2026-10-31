@@ -67,7 +67,12 @@ correct for both identities.
 
 ## Install (as root; broker must not run from the venv)
 
+Install the owner-reviewed collector and host settings as root-owned
+`/etc/diary/trusted.toml` first. The broker uses only that file as
+`DIARY_CONFIG`; agent-publishable diary config cannot redirect it.
+
 ```bash
+sudo-ask 'install -D -o root -g root -m 0644 /path/to/owner-reviewed-trusted.toml /etc/diary/trusted.toml'
 sudo-ask 'install -o root -g root -m 0755 /home/kek/diary/diary-scripts/scripts/diary_sync_broker.py /usr/local/bin/diary-sync-broker'
 sudo-ask 'install -m 0644 /home/kek/diary/sync/diary-sync-broker.service /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now diary-sync-broker'
 ```

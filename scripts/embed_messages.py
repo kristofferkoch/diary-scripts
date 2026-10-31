@@ -31,7 +31,7 @@ missing blobs stay metadata-only rows (text_chars=0), same as mail.
 
 Env:
     PG_DSN                  postgres://user@host/mailvec   (default: dbname=mailvec)
-    EMBED_URL / EMBED_MODEL / EMBED_DIMS / EMBED_BATCH / EMBED_BATCH_CHARS
+    EMBED_MODEL / EMBED_DIMS / EMBED_BATCH / EMBED_BATCH_CHARS
                             shared with embed_mail (see its docstring)
     SIGNAL_CLI_ATTACHMENTS  signal-cli blob dir (default:
                             ~/.local/share/signal-cli/attachments)

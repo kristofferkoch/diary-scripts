@@ -8,8 +8,9 @@ the user's Signal note-to-self, so a phone bookmark can be refreshed with
 one tap after each restart. It polls the journal scoped to the service's
 current `InvocationID` (no `--since` race with tokens printed before the
 script is scheduled), rewrites the loopback authority to the public
-Caddy/tailnet base (`hosts.dsh_web` in the private config, env override
-`DSH_WEB_URL`), and sends via the signal-cli daemon's JSON-RPC socket with
+Caddy/tailnet base (`hosts.dsh_web` in root-owned
+`/etc/diary/trusted.toml`, with no local-config or environment override), and
+sends via the signal-cli daemon's JSON-RPC socket with
 `send`/`noteToSelf` — a plain client request, no receive loop, so the
 single-receive rule is not violated.
 

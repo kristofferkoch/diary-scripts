@@ -140,7 +140,9 @@ and anything over 10 MB is refused.
 
 ## Config
 
-`[skolemelding]` in the private `config/local.toml`, all optional:
+The privileged broker reads optional `[skolemelding]` settings from root-owned
+`/etc/diary/trusted.toml`. Direct interactive/debug runs may instead use the
+private `config/local.toml`:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
