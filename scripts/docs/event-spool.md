@@ -31,6 +31,14 @@ they are never trusted inputs. Mirror failures do not move or invalidate the
 trusted state. Future poll timestamps are treated as invalid rather than as a
 reason to skip collection.
 
+**First trusted run / migration policy:** when a collector's trusted state file
+is absent, Spond, Vigilo, and Skolemelding fetch with an empty trusted cursor and
+backfill the trusted spool, but do not append that backfill to legacy JSONL. They
+then save and mirror the resulting trusted cursor. Existing agent-writable
+legacy seen markers are never copied into trusted state and cannot suppress the
+spool backfill; existing legacy output is not replayed or duplicated. Subsequent
+runs use the normal fresh-record JSONL workflow.
+
 The existing kek `mail-sync.timer` remains the independent mail collection
 schedule. A separate `diary-mail-event-export.timer` and oneshot service export
 mail, so an export failure cannot restart or repeat mail collection.
@@ -44,22 +52,26 @@ timestamps are not part of event identity. Revisions are SHA-256 hashes of
 canonical payload JSON, so unchanged records keep the same ID and actual updates
 receive a new immutable event.
 
-Mail uses the notmuch **file path** as native identity, not the RFC Message-ID.
-Distinct files that share a Message-ID therefore remain distinct events, and
-content-derived revisions prevent body collisions. A kek-only
-`mail-event-journal.json` records pending, completed, and quarantined file paths:
+Mail uses the logical notmuch message ID as native identity plus a
+content-derived revision. Initial discovery processes only canonical physical
+`INBOX` files, excluding Proton `All Mail` copies. Exact copies deduplicate;
+different bodies sharing an RFC/notmuch Message-ID remain distinct events. Raw
+content is read directly from notmuch-provided filenames with bounded
+`os.open`/`os.read`, regular-file/no-follow checks, and replacement/write race
+detection—never through a `path:` query.
 
-- New inbox files become pending before raw reads.
-- Pending paths are scanned even after they leave `tag:inbox`, so archiving
-  cannot discard a crash- or restart-interrupted export.
+A versioned kek-only `mail-event-journal.json` records pending logical IDs,
+completed event IDs, and quarantined message/file variants:
+
+- Pending IDs are resolved through notmuch on every retry, so normal
+  INBOX→Archive moves and tag reconciliation do not strand an old pathname.
 - Completion is journaled only after the spool's final link and directory
   `fsync`; a crash before that journal commit is retried as a duplicate.
-- A malformed message is quarantined in the journal without blocking other
-  messages or being reread on every schedule. Quarantine entries remain local
-  review state and require explicit owner intervention to clear.
-
-Raw mail is read with bounded streaming and terminated at the size limit rather
-than buffered in full before validation.
+- Timeout, `OSError`, and transient database/read failures stay pending for the
+  next schedule. Only deterministic malformed/oversized content is quarantined.
+- Quarantined variants do not block other messages or get reread on every
+  schedule. Entries remain local review state and require explicit owner action
+  to clear.
 
 `EventSpool.write()` returns `written` or `duplicate`. A duplicate with different
 content raises `EventConflictError`; neither path overwrites the existing file.

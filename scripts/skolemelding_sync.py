@@ -500,6 +500,7 @@ def main(argv: list[str] | None = None) -> int:
         args.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         args.state_dir.chmod(0o700)
     state_path = args.state_dir / "skolemelding-state.json" if args.state_dir else STATE_PATH
+    first_trusted_run = bool(args.state_dir and not state_path.exists())
     state = load_state(state_path)
     if not args.force and not args.dry_run and recently_ran(state):
         print(f"skolemelding: ran less than {poll_floor_seconds()}s ago — nothing to do")
@@ -535,7 +536,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.event_spool:
         from scripts.event_export import emit_records
         emit_records(args.event_spool, "skolemelding", records)
-    if total:
+    if total and not first_trusted_run:
         append_jsonl(today_jsonl(), records)
     persist()
     return 0

@@ -345,6 +345,7 @@ def main(argv: list[str] | None = None) -> int:
         args.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         args.state_dir.chmod(0o700)
     state_path = args.state_dir / "spond-state.json" if args.state_dir else STATE_PATH
+    first_trusted_run = bool(args.state_dir and not state_path.exists())
     state = load_state(state_path)
     total, records, counts = asyncio.run(run_once(kinds, state))
     print(f"new records: total={total}, by_kind={counts}", file=sys.stderr)
@@ -357,7 +358,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.event_spool:
         from scripts.event_export import emit_records
         emit_records(args.event_spool, "spond", records)
-    if total > 0:
+    if total > 0 and not first_trusted_run:
         append_jsonl(today_jsonl(), records)
     save_state(state, path=state_path, private=bool(args.state_dir))
     if args.state_dir:

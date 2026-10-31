@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 import email
 import json
+import os
+import stat
 import subprocess
 from email.policy import default as email_default
 from pathlib import Path
@@ -55,42 +57,75 @@ def emit_records(
     return counts
 
 
-def search_mail_files(query: str = "tag:inbox") -> list[str]:
+class MailContentError(EventValidationError):
+    """Deterministically malformed or oversized mail content."""
+
+
+def search_mail_messages(query: str = "tag:inbox") -> list[str]:
     result = subprocess.run(
-        ["notmuch", "search", "--output=files", "--", query],
+        ["notmuch", "search", "--output=messages", "--", query],
         check=True, capture_output=True, text=True, timeout=60,
     )
-    return [line for line in result.stdout.splitlines() if line]
+    return [line.removeprefix("id:") for line in result.stdout.splitlines() if line]
+
+
+def _message_file_nodes(node: Any) -> Iterable[list[str]]:
+    if isinstance(node, dict):
+        if node.get("match") is True and isinstance(node.get("filename"), list):
+            yield [str(path) for path in node["filename"]]
+        for value in node.values():
+            yield from _message_file_nodes(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _message_file_nodes(value)
+
+
+def mail_message_files(message_id: str) -> list[str]:
+    result = subprocess.run(
+        ["notmuch", "show", "--format=json", "--body=false", "--entire-thread=false",
+         "--", f"id:{message_id}"],
+        check=True, capture_output=True, text=True, timeout=60,
+    )
+    document = json.loads(result.stdout)
+    return sorted({path for paths in _message_file_nodes(document) for path in paths})
+
+
+def canonical_inbox_files(paths: Iterable[str]) -> list[str]:
+    """Select physical INBOX copies, excluding Proton's All Mail duplicates."""
+    return sorted(
+        path for path in paths
+        if "INBOX" in Path(path).parts and "All Mail" not in Path(path).parts
+    )
 
 
 def fetch_raw(mail_path: str) -> bytes:
-    """Read one notmuch file without buffering more than MAX_MAIL_BYTES + 1."""
-    proc = subprocess.Popen(
-        ["notmuch", "show", "--format=raw", "--entire-thread=false", f"path:{mail_path}"],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-    )
-    chunks: list[bytes] = []
-    size = 0
+    """Read one regular mail file directly, without links or unbounded buffering."""
+    fd = os.open(mail_path, os.O_RDONLY | os.O_NOFOLLOW)
     try:
-        assert proc.stdout is not None
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise MailContentError("mail source is not a regular file")
+        if before.st_size > MAX_MAIL_BYTES:
+            raise MailContentError("raw mail exceeds the collector limit")
+        chunks: list[bytes] = []
+        size = 0
         while size <= MAX_MAIL_BYTES:
-            chunk = proc.stdout.read(min(128 * 1024, MAX_MAIL_BYTES + 1 - size))
+            chunk = os.read(fd, min(128 * 1024, MAX_MAIL_BYTES + 1 - size))
             if not chunk:
                 break
             chunks.append(chunk)
             size += len(chunk)
+        after = os.fstat(fd)
+        current = os.stat(mail_path, follow_symlinks=False)
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+        ) or (current.st_dev, current.st_ino) != (after.st_dev, after.st_ino):
+            raise OSError("mail file changed while being read")
         if size > MAX_MAIL_BYTES:
-            proc.kill()
-            proc.wait(timeout=5)
-            raise EventValidationError("raw mail exceeds the collector limit")
-        return_code = proc.wait(timeout=60)
-        if return_code:
-            raise EventValidationError(f"notmuch raw read failed with exit {return_code}")
+            raise MailContentError("raw mail exceeds the collector limit")
         return b"".join(chunks)
     finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait(timeout=5)
+        os.close(fd)
 
 
 def mail_payload(raw: bytes) -> dict[str, Any]:
@@ -124,13 +159,17 @@ def mail_payload(raw: bytes) -> dict[str, Any]:
     }
 
 
+def quarantine_key(message_id: str, mail_path: str) -> str:
+    return message_id + "\n" + mail_path
+
+
 class MailJournal:
-    """Durable discovery, completion, and quarantine state independent of inbox tags."""
+    """Durable logical-message discovery, completion, and quarantine state."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
         self.pending: dict[str, str] = {}
-        self.completed: dict[str, str] = {}
+        self.completed: dict[str, list[str]] = {}
         self.failed: dict[str, str] = {}
         self._load()
 
@@ -142,26 +181,32 @@ class MailJournal:
         except (OSError, ValueError) as exc:
             raise EventValidationError("unreadable mail event journal") from exc
         if not isinstance(data, dict) or set(data) != {"version", "pending", "completed", "failed"} \
-                or data["version"] != 1:
+                or type(data["version"]) is not int or data["version"] != 2:
             raise EventValidationError("invalid mail event journal")
-        for key in ("pending", "completed", "failed"):
+        for key in ("pending", "failed"):
             values = data[key]
             if not isinstance(values, dict) or not all(
-                isinstance(path, str) and path and isinstance(value, str)
-                for path, value in values.items()
+                isinstance(item, str) and item and isinstance(value, str)
+                for item, value in values.items()
             ):
                 raise EventValidationError(f"invalid mail journal {key}")
-        if any(not EVENT_ID_RE.fullmatch(value) for value in data["completed"].values()):
-            raise EventValidationError("invalid completed mail event ID")
+        if not isinstance(data["completed"], dict):
+            raise EventValidationError("invalid mail journal completed")
+        for message_id, event_ids in data["completed"].items():
+            if not isinstance(message_id, str) or not message_id \
+                    or not isinstance(event_ids, list) \
+                    or not all(isinstance(value, str) and EVENT_ID_RE.fullmatch(value)
+                               for value in event_ids):
+                raise EventValidationError("invalid completed mail event IDs")
         self.pending = dict(data["pending"])
-        self.completed = dict(data["completed"])
+        self.completed = {key: list(value) for key, value in data["completed"].items()}
         self.failed = dict(data["failed"])
 
     def save(self) -> None:
         atomic_write_text(
             self.path,
             json.dumps({
-                "version": 1,
+                "version": 2,
                 "pending": self.pending,
                 "completed": self.completed,
                 "failed": self.failed,
@@ -174,7 +219,8 @@ def export_mail(
     spool_path: Path | str = DEFAULT_SPOOL,
     state_dir: Path | str = DEFAULT_STATE_DIR,
     *,
-    search_files: Callable[[str], list[str]] = search_mail_files,
+    search_messages: Callable[[str], list[str]] = search_mail_messages,
+    message_files: Callable[[str], list[str]] = mail_message_files,
     raw_fetcher: Callable[[str], bytes] = fetch_raw,
 ) -> dict[str, int]:
     state_dir = Path(state_dir)
@@ -182,46 +228,52 @@ def export_mail(
     state_dir.chmod(0o700)
     journal = MailJournal(state_dir / "mail-event-journal.json")
     spool = EventSpool(spool_path)
-    counts = {"written": 0, "duplicate": 0, "failed": 0, "quarantined": 0}
-    discovered = set(search_files("tag:inbox"))
-    paths = sorted(discovered | set(journal.pending))
+    counts = {"written": 0, "duplicate": 0, "failed": 0, "quarantined": 0, "retry": 0}
+    discovered = set(search_messages("tag:inbox"))
 
-    pending_changed = False
-    for mail_path in discovered:
-        if mail_path not in journal.completed and mail_path not in journal.failed \
-                and mail_path not in journal.pending:
-            journal.pending[mail_path] = ""
-            pending_changed = True
-    if pending_changed:
-        journal.save()
-
-    for mail_path in paths:
-        if mail_path in journal.failed:
-            counts["quarantined"] += 1
-            continue
-        if mail_path in journal.completed and mail_path not in journal.pending:
-            event_id = journal.completed[mail_path]
-            if spool.contains(event_id):
-                counts["duplicate"] += 1
-                continue
-            del journal.completed[mail_path]
-            journal.pending[mail_path] = ""
-            journal.save()
+    for message_id in sorted(discovered | set(journal.pending)):
         try:
-            payload = mail_payload(raw_fetcher(mail_path))
-            event = build_event("mail", "message", mail_path, payload)
-        except Exception as exc:
-            journal.pending.pop(mail_path, None)
-            journal.failed[mail_path] = str(exc)[:500]
+            current_files = message_files(message_id)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            journal.pending.setdefault(message_id, "")
             journal.save()
-            counts["failed"] += 1
+            counts["retry"] += 1
             continue
-        status = spool.write(event)
-        journal.completed[mail_path] = event["event_id"]
-        journal.pending.pop(mail_path, None)
-        journal.failed.pop(mail_path, None)
+        paths = canonical_inbox_files(current_files) if message_id in discovered else current_files
+        if not paths:
+            if message_id in journal.pending:
+                counts["retry"] += 1
+            continue
+        journal.pending.setdefault(message_id, "")
         journal.save()
-        counts[status] += 1
+        transient = False
+        for mail_path in paths:
+            failed_key = quarantine_key(message_id, mail_path)
+            if failed_key in journal.failed:
+                counts["quarantined"] += 1
+                continue
+            try:
+                raw = raw_fetcher(mail_path)
+                event = build_event("mail", "message", message_id, mail_payload(raw))
+            except (ValueError, TypeError) as exc:
+                journal.failed[failed_key] = str(exc)[:500]
+                journal.save()
+                counts["failed"] += 1
+                continue
+            except (OSError, subprocess.SubprocessError, TimeoutError):
+                transient = True
+                counts["retry"] += 1
+                continue
+            status = spool.write(event)
+            completed = journal.completed.setdefault(message_id, [])
+            if event["event_id"] not in completed:
+                completed.append(event["event_id"])
+                completed.sort()
+            journal.save()
+            counts[status] += 1
+        if not transient:
+            journal.pending.pop(message_id, None)
+            journal.save()
     return counts
 
 
@@ -234,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
     counts = export_mail(args.spool, args.state_dir)
     print(
         f"mail events: written={counts['written']} duplicate={counts['duplicate']} "
-        f"failed={counts['failed']} quarantined={counts['quarantined']}"
+        f"failed={counts['failed']} quarantined={counts['quarantined']} retry={counts['retry']}"
     )
     return 0
 

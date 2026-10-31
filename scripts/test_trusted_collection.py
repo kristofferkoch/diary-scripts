@@ -90,6 +90,60 @@ def test_broker_then_timer_exports_before_advancing_shared_trusted_cursor(
     assert legacy.exists(), "legacy state is a mirror, never the trusted input"
 
 
+@pytest.mark.parametrize("source", ["spond", "vigilo", "skolemelding"])
+def test_first_trusted_run_backfills_spool_without_replaying_legacy_jsonl(
+    source: str, spool_path: Path, state_dir: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    modules = {
+        "spond": spond_sync,
+        "vigilo": vigilo_sync,
+        "skolemelding": skolemelding_sync,
+    }
+    module = modules[source]
+    legacy = _patch_legacy(module, tmp_path, monkeypatch)
+    legacy.write_text(json.dumps({"test_seen": True, "forged_legacy": True}))
+    legacy_jsonl = tmp_path / "legacy.jsonl"
+    legacy_jsonl.write_text("existing legacy output\n")
+    native_key = "threadUid" if source == "vigilo" else "id"
+    fresh_record = {
+        "kind": "message" if source != "spond" else "event",
+        "fetched_at": "now",
+        "data": {native_key: "native-1", "body": "backfill"},
+    }
+
+    def selected(state):
+        assert "forged_legacy" not in state
+        if state.get("test_seen"):
+            return 0, [], {}
+        state["test_seen"] = True
+        return 1, [fresh_record], {fresh_record["kind"]: 1}
+
+    if source == "spond":
+        async def run_once(kinds, state):
+            return selected(state)
+    elif source == "vigilo":
+        def run_once(kinds, state):
+            return selected(state)
+    else:
+        def run_once(state):
+            return selected(state)
+    monkeypatch.setattr(module, "run_once", run_once)
+    args = [
+        "--once", "--event-spool", str(spool_path), "--state-dir", str(state_dir),
+    ]
+
+    assert module.main(args) == 0
+    assert len(list(EventSpool(spool_path))) == 1
+    assert legacy_jsonl.read_text() == "existing legacy output\n"
+    trusted = json.loads((state_dir / f"{source}-state.json").read_text())
+    assert trusted["test_seen"] is True
+    assert "forged_legacy" not in trusted
+    mirrored = json.loads(legacy.read_text())
+    assert mirrored["test_seen"] is True
+    assert "forged_legacy" not in mirrored
+
+
 def test_forged_legacy_spond_seen_marker_does_not_suppress_trusted_event(
     spool_path: Path, state_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):
