@@ -24,9 +24,10 @@ uv run signalshow --since-cursor --headers-only     # look for text/comma-separa
 grep 'comma-separated-values' memory/signal/$(date -u +%Y-%m-%d).jsonl
 #   → "id": "E2qcJQbNhCFTpk6tqWrN.csv" in the attachments array
 
-# 3. Run the ingester on the on-disk path:
-uv run finance-ingest ~/.local/share/signal-cli/attachments/<id>.csv
-uv run finance-ingest ~/.local/share/signal-cli/attachments/<id>.csv --enrich
+# 3. Download through the restricted proxy, then run the ingester:
+uv run signal-attachment '<id>' --output memory/signal/<id>
+uv run finance-ingest memory/signal/<id>
+uv run finance-ingest memory/signal/<id> --enrich
 ```
 
 The Signal route has been the actual default since mid-2026 (see `FINANCE.md`

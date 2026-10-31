@@ -66,9 +66,10 @@ lost a whole conversation on 2026-06-07).
    receipts straight into Note to Self, where they show up in the
    `signalshow` triage as image attachments. Handle them like finance
    Route A (see [finance.md](finance.md)): the JSONL record carries attachment metadata only —
-   pull the on-disk blob from
-   `~/.local/share/signal-cli/attachments/<id>`, view it, and digest it
-   into `RECEIPTS.md` (date, vendor, amount, what it was for).
+   download the blob with `uv run signal-attachment '<id>' --output memory/signal/<id>`,
+   view it, and digest it into `RECEIPTS.md` (date, vendor, amount, what it was for).
+   The restricted proxy means no sudo or direct access to the account owner's
+   attachment directory is needed.
 
    **Do NOT mention insignificant messages at all** — real-time
    coordination ("kom hit litt", "ja"), greetings, acknowledgements,
