@@ -66,6 +66,7 @@ from urllib.parse import urlsplit
 
 from mail_reader.config import cfg, workspace_root
 
+from scripts.attachment_store import find_attachment, write_attachment
 from scripts.embed_mail import html_to_text
 from scripts.skolemelding_api import (
     ApiError,
@@ -318,20 +319,20 @@ def _download_attachments(
         while target.name in used:  # two attachments, one name
             target = target.with_name(f"_{target.name}")
         used.add(target.name)
-        if target.exists() and target.stat().st_size > 0:
-            mime = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-            paths[j] = (target, mime)
-            continue
         try:
+            existing = find_attachment(ATTACH_DIR, mid, target.name)
+            if existing is not None:
+                mime = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+                paths[j] = (existing, mime)
+                continue
             data, mime = api.attachment(source)
+            target = write_attachment(ATTACH_DIR, mid, target.name, data)
         except AuthExpiredError:
             raise  # a dead login is main()'s job, not an attachment failure
         except Exception as e:  # noqa: BLE001 — one bad file must not kill the run
             print(f"!! skolemelding: attachment {name!r}: {e}", file=sys.stderr)
             failed.append(name)
             continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
         paths[j] = (target, mime)
     return failed, paths
 

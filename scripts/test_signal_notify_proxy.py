@@ -9,7 +9,9 @@ import threading
 
 import pytest
 
-from scripts.signal_notify_proxy import Limiter, handle, read_attachment, sanitize
+from scripts.signal_notify_proxy import (
+    Limiter, attachment_id, handle, read_attachment, sanitize,
+)
 
 
 def _send(**params):
@@ -58,6 +60,12 @@ def test_limiter_bursts_then_blocks():
     lim = Limiter(burst=2, period=60.0)
     assert lim.allow() and lim.allow()
     assert not lim.allow()
+
+
+@pytest.mark.parametrize("value", [None, 1, True, "", ".", "..", "../secret"])
+def test_attachment_request_rejects_ambiguous_ids(value):
+    with pytest.raises(ValueError):
+        attachment_id(_get(value))
 
 
 def test_attachment_read_rejects_paths_and_symlinks(tmp_path):

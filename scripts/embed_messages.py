@@ -126,14 +126,19 @@ def _payload(source: str, mid: str, *, date: str | None, from_addr: str,
 
 
 def _attachment(filename: str, mime: str, size: int,
-                blob: Path | None) -> AttachmentPayload:
+                blob: Path | None, *, store: Path | None = None) -> AttachmentPayload:
     """One attachment row; extracted text chunks when the blob is on disk
     and the MIME type is extractable, metadata-only otherwise."""
     text = ""
     if blob is not None and is_extractable_mime(mime):
         try:
-            text = extract_attachment_text(mime, blob.read_bytes())
-        except OSError:
+            if store is None:
+                data = blob.read_bytes()
+            else:
+                from scripts.attachment_store import read_attachment_path
+                data = read_attachment_path(store, blob)
+            text = extract_attachment_text(mime, data)
+        except (OSError, ValueError):
             text = ""
     return {
         "filename": filename or "(unnamed)",
@@ -145,6 +150,19 @@ def _attachment(filename: str, mime: str, size: int,
 
 
 # ---------- signal ----------
+
+def _signal_attachment(att: dict[str, Any]) -> AttachmentPayload:
+    from scripts.attachment_store import validate_attachment_id
+    try:
+        attachment_id = validate_attachment_id(att.get("id"))
+    except ValueError:
+        blob = None
+    else:
+        blob = Path(attachment_id)
+    return _attachment(str(att.get("filename") or ""),
+                       str(att.get("contentType") or ""),
+                       int(att.get("size") or 0), blob, store=SIGNAL_ATTACH_DIR)
+
 
 def signal_payload(rec: dict[str, Any]) -> SourcePayload | None:
     """One signal-capture record → payload, or None when nothing recordable.
@@ -182,10 +200,7 @@ def signal_payload(rec: dict[str, Any]) -> SourcePayload | None:
     dest = rec.get("to") or {}
     group = rec.get("group") or {}
     attachments = [
-        _attachment(str(a.get("filename") or ""), str(a.get("contentType") or ""),
-                    int(a.get("size") or 0),
-                    (SIGNAL_ATTACH_DIR / str(a["id"])) if a.get("id") else None)
-        for a in (rec.get("attachments") or [])
+        _signal_attachment(a) for a in (rec.get("attachments") or [])
     ]
     if not text and not attachments:
         return None
@@ -304,9 +319,9 @@ def spond_payload(rec: dict[str, Any]) -> SourcePayload | None:
 def _vigilo_attachment(att: dict[str, Any]) -> AttachmentPayload:
     """Message-kind attachment: the sync recorded the local file it landed
     in, so re-derive nothing — resolve like vigiloshown does."""
-    from scripts.vigiloshown import local_attachment_path
+    from scripts import vigiloshown as vw
     return _attachment(str(att.get("name") or ""), str(att.get("mimeType") or ""),
-                       0, local_attachment_path(att))
+                       0, vw.local_attachment_path(att), store=vw.ATTACH_DIR)
 
 
 def vigilo_payload(rec: dict[str, Any]) -> SourcePayload | None:
@@ -408,9 +423,9 @@ def vigilo_payload(rec: dict[str, Any]) -> SourcePayload | None:
 def _skolemelding_attachment(att: dict[str, Any]) -> AttachmentPayload:
     """The sync recorded the local file it landed in, so re-derive nothing —
     resolve like skolemeldingshow does."""
-    from scripts.skolemeldingshow import local_attachment_path
+    from scripts import skolemeldingshow as sw
     return _attachment(str(att.get("name") or ""), str(att.get("mimeType") or ""),
-                       0, local_attachment_path(att))
+                       0, sw.local_attachment_path(att), store=sw.ATTACH_DIR)
 
 
 def skolemelding_payload(rec: dict[str, Any]) -> SourcePayload | None:

@@ -31,19 +31,22 @@ import base64
 import json
 import os
 import socket
-import stat
 import sys
 import threading
 import time
+
+if __package__:
+    from scripts.attachment_store import read_attachment as _read_attachment
+    from scripts.attachment_store import validate_attachment_id
+else:
+    from attachment_store import read_attachment as _read_attachment  # ty: ignore[unresolved-import]
+    from attachment_store import validate_attachment_id  # ty: ignore[unresolved-import]
 
 MAX_MESSAGE_CHARS = 4000
 MAX_MESSAGES_PER_MINUTE = 20
 MAX_ATTACHMENT_BYTES = 64 * 1024 * 1024
 DEFAULT_LISTEN = "/run/signal-notify/socket"
 ATTACHMENT_SLOTS = threading.BoundedSemaphore(2)
-ATTACHMENT_ID_CHARS = frozenset(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
-)
 
 ADDRESSING_FIELDS = (
     "recipient", "recipients", "groupId", "group", "groupName", "username",
@@ -104,24 +107,11 @@ def attachment_id(request: dict) -> str:
     params = request.get("params")
     if not isinstance(params, dict) or not isinstance(params.get("id"), str):
         raise ValueError("getAttachment requires a string params.id")
-    value = params["id"]
-    if value in ("", ".", "..") or any(char not in ATTACHMENT_ID_CHARS for char in value):
-        raise ValueError("invalid attachment id")
-    return value
+    return validate_attachment_id(params["id"])
 
 
 def read_attachment(root: str, value: str) -> bytes:
-    if value in ("", ".", "..") or any(char not in ATTACHMENT_ID_CHARS for char in value):
-        raise ValueError("invalid attachment id")
-    path = os.path.join(root, value)
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(fd, "rb") as blob:
-        if not stat.S_ISREG(os.fstat(blob.fileno()).st_mode):
-            raise ValueError("attachment is not a regular file")
-        data = blob.read(MAX_ATTACHMENT_BYTES + 1)
-    if len(data) > MAX_ATTACHMENT_BYTES:
-        raise ValueError(f"attachment larger than {MAX_ATTACHMENT_BYTES} bytes")
-    return data
+    return _read_attachment(root, value, MAX_ATTACHMENT_BYTES)
 
 
 def forward_ok(upstream: str, request: dict, timeout: float = 15.0) -> tuple[bool, str]:

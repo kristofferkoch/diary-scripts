@@ -87,6 +87,29 @@ def test_save_attachments_sanitises_path_traversal(tmp_path: Path):
     assert not (tmp_path.parent / "escape.txt").exists()
 
 
+def test_save_attachments_symlink_collision_does_not_overwrite_target(tmp_path: Path):
+    raw = _multipart_msg([("dup.txt", "text/plain", b"new")])
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"original")
+    outdir = tmp_path / "store"
+    outdir.mkdir()
+    (outdir / "dup.txt").symlink_to(outside)
+    written = mailshow.save_attachments(raw, outdir)
+    assert [p.name for p in written] == ["dup.txt.1"]
+    assert outside.read_bytes() == b"original"
+
+
+def test_save_attachments_rejects_symlinked_output_directory(tmp_path: Path):
+    raw = _multipart_msg([("dup.txt", "text/plain", b"new")])
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outdir = tmp_path / "store"
+    outdir.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(OSError):
+        mailshow.save_attachments(raw, outdir)
+    assert not (outside / "dup.txt").exists()
+
+
 def test_load_cursor_parses_zulu(tmp_path: Path):
     state = tmp_path / "mail-state.json"
     state.write_text('{"last_successful_run": "2026-05-17T17:00:00Z"}')

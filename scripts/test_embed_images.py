@@ -237,7 +237,7 @@ class TestSignalBlob:
             {"id": "att-1", "filename": "photo.png",
              "contentType": "image/png", "size": 8},
         ]}
-        assert ei.signal_blob(rec, "photo.png", 8) == blob
+        assert ei.signal_blob(rec, "photo.png", 8) == b"\x89PNG...."
         assert ei.signal_blob(rec, "photo.png", 9) is None
         assert ei.signal_blob(rec, "missing.png", 8) is None
 
@@ -247,7 +247,7 @@ class TestSignalBlob:
         monkeypatch.setattr(ei, "SIGNAL_ATTACH_DIR", tmp_path)
         rec = {"attachments": [{"id": "att-2", "contentType": "image/jpeg",
                                 "size": 8}]}
-        assert ei.signal_blob(rec, "(unnamed)", 8) == blob
+        assert ei.signal_blob(rec, "(unnamed)", 8) == b"12345678"
 
     def test_missing_blob_file(self, tmp_path, monkeypatch):
         monkeypatch.setattr(ei, "SIGNAL_ATTACH_DIR", tmp_path)
@@ -255,16 +255,35 @@ class TestSignalBlob:
                                 "contentType": "image/png", "size": 8}]}
         assert ei.signal_blob(rec, "photo.png", 8) is None
 
+    @pytest.mark.parametrize("attachment_id", ["../outside", "/absolute", ".", ".."])
+    def test_unsafe_attachment_id_is_none(self, tmp_path, monkeypatch, attachment_id):
+        monkeypatch.setattr(ei, "SIGNAL_ATTACH_DIR", tmp_path / "store")
+        rec = {"attachments": [{"id": attachment_id, "filename": "photo.png",
+                                "contentType": "image/png", "size": 8}]}
+        assert ei.signal_blob(rec, "photo.png", 8) is None
+
+    def test_symlinked_blob_is_none(self, tmp_path, monkeypatch):
+        store = tmp_path / "store"
+        store.mkdir()
+        outside = tmp_path / "outside"
+        outside.write_bytes(b"secret!!")
+        (store / "blob").symlink_to(outside)
+        monkeypatch.setattr(ei, "SIGNAL_ATTACH_DIR", store)
+        rec = {"attachments": [{"id": "blob", "filename": "photo.png",
+                                "contentType": "image/png", "size": 8}]}
+        assert ei.signal_blob(rec, "photo.png", 8) is None
+
 
 class TestVigiloBlob:
-    def test_message_attachment_resolves_recorded_path(self, tmp_path):
+    def test_message_attachment_resolves_recorded_path(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("scripts.vigiloshown.ATTACH_DIR", tmp_path)
         f = tmp_path / "bilde.jpg"
         f.write_bytes(b"jpeg-bytes")
         rec = {"kind": "message", "data": {"threadUid": "t1", "messages": [
             {"sender": "Alice", "body": "se her", "attachments": [
                 {"name": "bilde.jpg", "mimeType": "image/jpeg",
                  "path": str(f)}]}]}}
-        assert ei.vigilo_blob(rec, "bilde.jpg", "image/jpeg") == f
+        assert ei.vigilo_blob(rec, "bilde.jpg", "image/jpeg") == b"jpeg-bytes"
         assert ei.vigilo_blob(rec, "annet.jpg", "image/jpeg") is None
 
     def test_missing_file_is_none(self, tmp_path):

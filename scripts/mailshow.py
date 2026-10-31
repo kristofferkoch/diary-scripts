@@ -31,6 +31,8 @@ from pathlib import Path
 
 from mail_reader.config import workspace_root
 
+from scripts.attachment_store import write_attachment
+
 MAIL_STATE_PATH = workspace_root() / "memory" / "mail-state.json"
 
 
@@ -135,16 +137,17 @@ def save_attachments(raw: bytes, outdir: Path) -> list[Path]:
 
     Filename collisions get a `.N` suffix. Creates outdir if missing.
     """
-    outdir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     for idx, (fn, _mime, data, _text) in enumerate(iter_attachments(raw)):
         name = safe_filename(fn, idx)
-        dest = outdir / name
-        n = 1
-        while dest.exists():
-            dest = outdir / f"{name}.{n}"
-            n += 1
-        dest.write_bytes(data)
+        n = 0
+        while True:
+            candidate = name if n == 0 else f"{name}.{n}"
+            try:
+                dest = write_attachment(outdir, None, candidate, data, overwrite=False)
+                break
+            except FileExistsError:
+                n += 1
         written.append(dest)
     return written
 

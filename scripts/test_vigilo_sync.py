@@ -855,6 +855,48 @@ def test_a_failed_check_in_notes_fetch_does_not_bury_a_known_note(serve, workspa
     assert NOTE_ID in json.loads(workspace["state"].read_text())["check_out_notes"]
 
 
+@pytest.mark.parametrize("uid", ["../outside", "/absolute", ".", ".."])
+def test_attachment_container_ids_are_rejected_before_download(
+        workspace, monkeypatch, uid):
+    monkeypatch.setattr(vs.VigiloApi, "download_attachment",
+                        staticmethod(lambda url, **kw: b"new"))
+    messages = thread_detail(atts=[{"name": "plan.pdf", "url": SAS_URL}])["messages"]
+    failed, paths = vs._download_attachments(uid, messages)
+    assert failed == ["plan.pdf"]
+    assert paths == {}
+    assert not (workspace["root"] / "outside").exists()
+
+
+def test_attachment_container_symlink_is_not_followed(workspace, monkeypatch):
+    store = workspace["jsonl"] / "attachments"
+    outside = workspace["root"] / "outside"
+    store.mkdir()
+    outside.mkdir()
+    (store / "safe").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(vs.VigiloApi, "download_attachment",
+                        staticmethod(lambda url, **kw: b"new"))
+    messages = thread_detail(atts=[{"name": "plan.pdf", "url": SAS_URL}])["messages"]
+    failed, paths = vs._download_attachments("safe", messages)
+    assert failed == ["plan.pdf"]
+    assert paths == {}
+    assert not (outside / "plan.pdf").exists()
+
+
+def test_attachment_target_symlink_is_not_overwritten(workspace, monkeypatch):
+    store = workspace["jsonl"] / "attachments"
+    outside = workspace["root"] / "outside"
+    (store / "safe").mkdir(parents=True)
+    outside.write_bytes(b"original")
+    (store / "safe" / "plan.pdf").symlink_to(outside)
+    monkeypatch.setattr(vs.VigiloApi, "download_attachment",
+                        staticmethod(lambda url, **kw: b"new"))
+    messages = thread_detail(atts=[{"name": "plan.pdf", "url": SAS_URL}])["messages"]
+    failed, paths = vs._download_attachments("safe", messages)
+    assert failed == ["plan.pdf"]
+    assert paths == {}
+    assert outside.read_bytes() == b"original"
+
+
 # --- Small helpers ----------------------------------------------------------
 
 

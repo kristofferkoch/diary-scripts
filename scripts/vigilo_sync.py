@@ -66,6 +66,7 @@ from typing import Any
 
 from mail_reader.config import cfg, workspace_root
 
+from scripts.attachment_store import find_attachment, write_attachment
 from scripts.vigilo_api import (
     AuthExpiredError,
     ConfigError,
@@ -331,17 +332,17 @@ def _download_attachments(
             while target.name in used:  # two attachments, one name
                 target = target.with_name(f"_{target.name}")
             used.add(target.name)
-            if target.exists() and target.stat().st_size > 0:
-                paths[(i, j)] = target
-                continue
             try:
+                existing = find_attachment(ATTACH_DIR, uid, target.name)
+                if existing is not None:
+                    paths[(i, j)] = existing
+                    continue
                 data = VigiloApi.download_attachment(str(url))
+                target = write_attachment(ATTACH_DIR, uid, target.name, data)
             except Exception as e:  # noqa: BLE001 — one bad file must not kill the run
                 print(f"!! vigilo: attachment {name!r}: {e}", file=sys.stderr)
                 failed.append(name)
                 continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
             paths[(i, j)] = target
     return failed, paths
 
