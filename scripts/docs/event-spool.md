@@ -31,13 +31,15 @@ they are never trusted inputs. Mirror failures do not move or invalidate the
 trusted state. Future poll timestamps are treated as invalid rather than as a
 reason to skip collection.
 
-**First trusted run / migration policy:** when a collector's trusted state file
-is absent, Spond, Vigilo, and Skolemelding fetch with an empty trusted cursor and
-backfill the trusted spool, but do not append that backfill to legacy JSONL. They
-then save and mirror the resulting trusted cursor. Existing agent-writable
-legacy seen markers are never copied into trusted state and cannot suppress the
-spool backfill; existing legacy output is not replayed or duplicated. Subsequent
-runs use the normal fresh-record JSONL workflow.
+**First trusted run / migration policy:** Spond backfills when its trusted state
+file is absent. Vigilo and Skolemelding backfill while their trusted state lacks
+`last_successful_run`, including when an initial auth expiry already created the
+file. They fetch with an empty trusted cursor and backfill the trusted spool, but
+do not append that backfill to legacy JSONL. A successful export then saves and
+mirrors the completion cursor. Existing agent-writable legacy seen markers are
+never copied into trusted state and cannot suppress the spool backfill; existing
+legacy output is not replayed or duplicated. Subsequent runs use the normal
+fresh-record JSONL workflow.
 
 The existing kek `mail-sync.timer` remains the independent mail collection
 schedule. A separate `diary-mail-event-export.timer` and oneshot service export

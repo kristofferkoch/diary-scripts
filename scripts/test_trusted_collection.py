@@ -144,6 +144,52 @@ def test_first_trusted_run_backfills_spool_without_replaying_legacy_jsonl(
     assert "forged_legacy" not in mirrored
 
 
+@pytest.mark.parametrize("source", ["vigilo", "skolemelding"])
+def test_auth_expiry_before_first_success_does_not_replay_backfill_to_legacy(
+    source: str, spool_path: Path, state_dir: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    module = vigilo_sync if source == "vigilo" else skolemelding_sync
+    _patch_legacy(module, tmp_path, monkeypatch)
+    legacy_jsonl = tmp_path / "legacy.jsonl"
+    legacy_jsonl.write_text("existing legacy output\n")
+
+    if source == "vigilo":
+        def expired(kinds, state):
+            raise module.AuthExpiredError("expired")
+    else:
+        def expired(state):
+            raise module.AuthExpiredError("expired")
+    monkeypatch.setattr(module, "run_once", expired)
+    args = [
+        "--once", "--event-spool", str(spool_path), "--state-dir", str(state_dir),
+    ]
+
+    assert module.main(args) == 0
+    state_path = state_dir / f"{source}-state.json"
+    assert state_path.exists()
+    assert not json.loads(state_path.read_text()).get("last_successful_run")
+    assert list(EventSpool(spool_path)) == []
+
+    native_key = "threadUid" if source == "vigilo" else "id"
+    record = {
+        "kind": "message", "fetched_at": "now",
+        "data": {native_key: "native-1", "body": "backfill"},
+    }
+    if source == "vigilo":
+        def success(kinds, state):
+            return 1, [record], {"message": 1}
+    else:
+        def success(state):
+            return 1, [record], {"message": 1}
+    monkeypatch.setattr(module, "run_once", success)
+
+    assert module.main(args) == 0
+    assert len(list(EventSpool(spool_path))) == 1
+    assert legacy_jsonl.read_text() == "existing legacy output\n"
+    assert json.loads(state_path.read_text())["last_successful_run"]
+
+
 def test_forged_legacy_spond_seen_marker_does_not_suppress_trusted_event(
     spool_path: Path, state_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):
