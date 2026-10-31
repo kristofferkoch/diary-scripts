@@ -310,6 +310,7 @@ def test_pipe01_units_pin_trusted_state_spool_and_shared_lock():
     runtime = (root / "sync/diary-sync-runtime.service").read_text()
     mail = (root / "systemd/units/diary-mail-event-export.service").read_text()
     for unit in (broker, collector):
+        assert "SupplementaryGroups=kek" in unit
         assert "BindPaths=/var/lib/diary/events" in unit
         assert "BindPaths=/var/lib/diary/collector-state" in unit
         assert "BindPaths=/run/user/1000/diary-collect" in unit
