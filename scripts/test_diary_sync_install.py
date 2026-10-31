@@ -289,6 +289,7 @@ printf '%s\n' "$SYNC_INSTALL_TEST_CONFIG_UID"
     assert f"chown root:kek {trusted_config}" in operations
     assert f"chmod 0640 {trusted_config}" in operations
     assert "install -d -o kek -g diary-pipeline -m 2750 /var/lib/diary/events" in operations
+    assert "install -d -o kek -g kek -m 0700 /var/lib/diary/collector-state" in operations
     assert "groupadd --system --force diary-pipeline" in operations
     assert not any(f"{integration}/sync" in line for line in operations)
     assert not any("config/local.toml" in line for line in operations)
@@ -297,3 +298,27 @@ printf '%s\n' "$SYNC_INSTALL_TEST_CONFIG_UID"
         "systemctl restart diary-collect-spond.timer diary-collect-vigilo.timer "
         "diary-collect-skolemelding.timer"
     ) in operations
+
+
+def test_pipe01_units_pin_trusted_state_spool_and_shared_lock():
+    root = os.environ.get("DIARY_PIPE01_ROOT")
+    if root is None:
+        pytest.skip("set DIARY_PIPE01_ROOT to test the diary collector units")
+    root = Path(root)
+    broker = (root / "sync/diary-sync-broker.service").read_text()
+    collector = (root / "sync/diary-collect@.service").read_text()
+    runtime = (root / "sync/diary-sync-runtime.service").read_text()
+    mail = (root / "systemd/units/diary-mail-event-export.service").read_text()
+    for unit in (broker, collector):
+        assert "BindPaths=/var/lib/diary/events" in unit
+        assert "BindPaths=/var/lib/diary/collector-state" in unit
+        assert "BindPaths=/run/user/1000/diary-collect" in unit
+        assert "Environment=XDG_RUNTIME_DIR=/run/user/1000" in unit
+    assert "ExecStart=/usr/bin/flock /run/user/1000/diary-collect/%i.lock" in collector
+    assert "--event-spool /var/lib/diary/events" in collector
+    assert "--state-dir /var/lib/diary/collector-state" in collector
+    assert "/usr/bin/install -d -o kek -g diary -m 0700 /run/user/1000/diary-collect" in runtime
+    assert "diary-event-export mail --state-dir /var/lib/diary/collector-state" in mail
+    assert "--spool /var/lib/diary/events" in mail
+    assert "mail-sync.service" not in mail
+    assert not (root / "systemd/units/mail-sync.service.d/20-event-spool.conf").exists()

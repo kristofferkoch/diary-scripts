@@ -10,6 +10,14 @@ import pytest
 import scripts.diary_sync_broker as broker
 
 
+@pytest.fixture(autouse=True)
+def isolated_runtime(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    return runtime
+
+
 def _limiters(sync_burst: int = 6) -> tuple[broker.Limiter, broker.Limiter]:
     return broker.Limiter(sync_burst, 3600.0), broker.Limiter(120, 60.0)
 
@@ -58,7 +66,12 @@ def test_sync_runs_fixed_argv_despite_agent_config(
         return {"ok": True, "output": "ok", "exit_code": 0}
 
     reply = _handle({"cmd": "sync", "target": "spond"}, runner=runner)
-    assert seen == [list(broker.SYNC_TARGETS["spond"])]
+    assert seen == [list(broker.sync_argv("spond"))]
+    assert seen[0][2:] == [
+        "spond-sync", "--once",
+        "--event-spool", "/var/lib/diary/events",
+        "--state-dir", "/var/lib/diary/collector-state",
+    ]
     assert reply["target"] == "spond" and reply["ok"] is True
 
 
@@ -87,18 +100,27 @@ def test_non_scalar_sync_target_is_rejected_without_running():
     assert reply["ok"] is False and "unknown sync target" in reply["error"]
 
 
-def test_sync_all_runs_every_target():
+def test_sync_all_runs_every_target(isolated_runtime):
     seen: list[str] = []
 
     def runner(argv, timeout):
         assert argv[0] == "/usr/bin/flock"
-        assert argv[1].startswith("/run/diary-collect/")
-        seen.append(argv[-2])
+        assert argv[1].startswith(str(isolated_runtime / "diary-collect") + "/")
+        seen.append(argv[2])
         return {"ok": True, "output": "", "exit_code": 0}
 
     reply = _handle({"cmd": "sync", "target": "all"}, runner=runner)
     assert set(seen) == {"spond-sync", "vigilo-sync", "skolemelding-sync"}
     assert reply["ok"] is True and reply["target"] == "all"
+
+
+def test_fresh_boot_fallback_creates_owner_writable_lock_dir(isolated_runtime):
+    lock_dir = isolated_runtime / "diary-collect"
+    assert not lock_dir.exists()
+    argv = broker.sync_argv("spond")
+    assert lock_dir.is_dir()
+    assert argv[1] == str(lock_dir / "spond.lock")
+    assert lock_dir.stat().st_mode & 0o777 == 0o700
 
 
 def test_start_accepts_only_mail_sync():

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from scripts import skolemelding_sync, spond_sync, vigilo_sync
-from scripts.safe_io import append_text, ensure_dir
+from scripts.safe_io import append_text, ensure_dir, write_text_nofollow
 
 
 def test_append_text_creates_and_appends_to_a_real_file(tmp_path: Path):
@@ -49,6 +49,25 @@ def test_ensure_dir_rejects_a_symlink(tmp_path: Path):
     linked.symlink_to(outside, target_is_directory=True)
     with pytest.raises(OSError):
         ensure_dir(linked)
+
+
+def test_nofollow_mirror_write_preserves_inode_for_bind_mounts(tmp_path: Path):
+    path = tmp_path / "state.json"
+    path.write_text("old")
+    inode = path.stat().st_ino
+    write_text_nofollow(path, "new")
+    assert path.read_text() == "new"
+    assert path.stat().st_ino == inode
+
+
+def test_nofollow_mirror_write_rejects_symlink(tmp_path: Path):
+    target = tmp_path / "target"
+    target.write_text("unchanged")
+    path = tmp_path / "state.json"
+    path.symlink_to(target)
+    with pytest.raises(OSError):
+        write_text_nofollow(path, "not written")
+    assert target.read_text() == "unchanged"
 
 
 def test_spond_empty_or_non_object_state_uses_the_normal_default(tmp_path: Path, monkeypatch):

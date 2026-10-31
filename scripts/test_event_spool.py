@@ -253,3 +253,39 @@ def test_oversized_serialized_event_is_rejected(spool: EventSpool):
     path.write_bytes(b" " * (2 * 1024 * 1024 + 1))
     with pytest.raises(EventValidationError, match="too large"):
         spool.read(item["event_id"])
+
+
+def test_temp_is_unlinked_before_directory_fsync_crash(
+    spool: EventSpool, monkeypatch: pytest.MonkeyPatch,
+):
+    item = event()
+    operations = []
+    real_fsync = os.fsync
+    real_unlink = os.unlink
+    real_fchmod = os.fchmod
+
+    def fsync(fd):
+        operations.append("file-fsync" if len([op for op in operations if op == "file-fsync"]) == 0 else "dir-fsync")
+        if operations[-1] == "dir-fsync":
+            raise OSError("simulated directory sync crash")
+        real_fsync(fd)
+
+    def unlink(path, **kwargs):
+        operations.append("unlink")
+        return real_unlink(path, **kwargs)
+
+    def fchmod(fd, mode):
+        operations.append("fchmod")
+        return real_fchmod(fd, mode)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "unlink", unlink)
+    monkeypatch.setattr(os, "fchmod", fchmod)
+    with pytest.raises(OSError, match="directory sync crash"):
+        spool.write(item)
+    assert operations.index("fchmod") < operations.index("file-fsync")
+    assert operations.index("unlink") < operations.index("dir-fsync")
+    path = spool.path_for(item["event_id"])
+    assert path.stat().st_nlink == 1
+    assert spool.read(item["event_id"]) == item
+    assert list(spool.root.glob("*.tmp")) == []

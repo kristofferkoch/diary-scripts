@@ -14,6 +14,7 @@ import os
 import re
 import secrets
 import stat
+import time
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -236,6 +237,16 @@ class EventSpool:
         finally:
             os.close(dir_fd)
 
+    def _read_for_write(self, dir_fd: int, event_id: str) -> dict[str, Any]:
+        deadline = time.monotonic() + 1.0
+        while True:
+            try:
+                return self._read_at(dir_fd, event_id)
+            except EventValidationError as exc:
+                if "single-link" not in str(exc) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.001)
+
     def write(self, event: dict[str, Any]) -> str:
         validate_event(event)
         encoded = canonical_json(event) + b"\n"
@@ -247,7 +258,7 @@ class EventSpool:
         temp_name: str | None = None
         try:
             try:
-                existing = self._read_at(dir_fd, event_id)
+                existing = self._read_for_write(dir_fd, event_id)
             except FileNotFoundError:
                 existing = None
             if existing is not None:
@@ -266,8 +277,8 @@ class EventSpool:
                 with os.fdopen(fd, "wb", closefd=False) as handle:
                     handle.write(encoded)
                     handle.flush()
+                    os.fchmod(fd, 0o640)
                     os.fsync(fd)
-                os.fchmod(fd, 0o640)
             finally:
                 os.close(fd)
             try:
@@ -276,10 +287,12 @@ class EventSpool:
                     follow_symlinks=False,
                 )
             except FileExistsError:
-                existing = self._read_at(dir_fd, event_id)
+                existing = self._read_for_write(dir_fd, event_id)
                 if existing != event:
                     raise EventConflictError(f"immutable event conflict: {event_id}")
                 return "duplicate"
+            os.unlink(temp_name, dir_fd=dir_fd)
+            temp_name = None
             os.fsync(dir_fd)
             return "written"
         finally:

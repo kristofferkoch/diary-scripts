@@ -137,24 +137,58 @@ def safe_filename(name: str, index: int) -> str:
     return cleaned if index == 0 else f"{index}_{cleaned}"
 
 
-def load_state() -> dict[str, Any]:
-    if not STATE_PATH.exists():
-        return {}
+LEGACY_STATE_PATH = STATE_PATH
+
+
+def load_state(path: Path | None = None) -> dict[str, Any]:
+    path = path or STATE_PATH
     try:
-        data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    for key in ("threads", "news", "consents", "check_out_notes", "attachment_retries"):
+        if not isinstance(data.get(key), dict):
+            data[key] = {}
+    for key in ("threads", "check_out_notes"):
+        data[key] = {
+            str(item_id): entry for item_id, entry in data[key].items()
+            if isinstance(entry, dict)
+        }
+    data["attachment_retries"] = {
+        str(item_id): attempts for item_id, attempts in data["attachment_retries"].items()
+        if type(attempts) is int and attempts >= 0
+    }
+    return data
 
 
-def save_state(state: dict[str, Any], *, bump: bool = True) -> None:
+def save_state(
+    state: dict[str, Any], *, bump: bool = True,
+    path: Path | None = None, private: bool = False,
+) -> None:
+    from scripts.safe_io import atomic_write_text
+    path = path or STATE_PATH
     if bump:
         state["last_successful_run"] = utcnow_iso()
         state["auth_required"] = False
-    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(
-        json.dumps(state, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    atomic_write_text(
+        path,
+        json.dumps(state, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+        mode=0o600 if private else 0o664,
     )
+
+
+def mirror_legacy_state(state: dict[str, Any]) -> None:
+    from scripts.safe_io import write_text_nofollow
+    try:
+        write_text_nofollow(
+            LEGACY_STATE_PATH,
+            json.dumps(state, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+            mode=0o664,
+        )
+    except OSError as exc:
+        print(f"!! vigilo legacy state mirror failed: {exc}", file=sys.stderr)
 
 
 def child_labels() -> dict[str, str]:
@@ -853,7 +887,8 @@ def recently_ran(state: dict[str, Any]) -> bool:
             then = then.replace(tzinfo=timezone.utc)
     except ValueError:
         return False
-    return datetime.now(timezone.utc) - then < timedelta(seconds=floor)
+    age = datetime.now(timezone.utc) - then
+    return timedelta(0) <= age < timedelta(seconds=floor)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -875,6 +910,8 @@ def main(argv: list[str] | None = None) -> int:
                     help=f"Ignore the {POLL_FLOOR_SECONDS}s poll floor between runs.")
     ap.add_argument("--event-spool", type=Path,
                     help="Also emit fresh in-memory records to this trusted event spool.")
+    ap.add_argument("--state-dir", type=Path,
+                    help="Read trusted collector state here; mirror legacy state after success.")
     args = ap.parse_args(argv)
 
     if not args.once:
@@ -885,10 +922,19 @@ def main(argv: list[str] | None = None) -> int:
     if bad:
         ap.error(f"unknown kinds: {sorted(bad)}; valid: {sorted(VALID_KINDS)}")
 
-    state = load_state()
+    if args.state_dir:
+        args.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        args.state_dir.chmod(0o700)
+    state_path = args.state_dir / "vigilo-state.json" if args.state_dir else STATE_PATH
+    state = load_state(state_path)
     if not args.force and not args.dry_run and recently_ran(state):
         print(f"vigilo: ran less than {poll_floor_seconds()}s ago — nothing to do")
         return 0
+
+    def persist(*, bump: bool = True) -> None:
+        save_state(state, bump=bump, path=state_path, private=bool(args.state_dir))
+        if args.state_dir:
+            mirror_legacy_state(state)
 
     try:
         total, records, counts = run_once(kinds, state)
@@ -896,7 +942,7 @@ def main(argv: list[str] | None = None) -> int:
         # Normal end-of-life for a refresh token (30-90 days). Loud, but a
         # success as far as the sjekk is concerned.
         state["auth_required"] = True
-        save_state(state, bump=False)
+        persist(bump=False)
         print("!! vigilo auth expired — run vigilo-login", file=sys.stderr)
         print(f"   ({e})", file=sys.stderr)
         return 0
@@ -917,7 +963,7 @@ def main(argv: list[str] | None = None) -> int:
         emit_records(args.event_spool, "vigilo", records)
     if total:
         append_jsonl(today_jsonl(), records)
-    save_state(state)
+    persist()
     return 0
 
 

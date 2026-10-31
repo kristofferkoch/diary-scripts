@@ -57,9 +57,23 @@ VERSION = "1.0"
 # --- allow-lists (the whole security boundary) -------------------------------
 
 SYNC_TARGETS: dict[str, tuple[str, ...]] = {
-    target: ("/usr/bin/flock", f"/run/diary-collect/{target}.lock", f"{target}-sync", "--once")
+    target: (
+        f"{target}-sync", "--once",
+        "--event-spool", "/var/lib/diary/events",
+        "--state-dir", "/var/lib/diary/collector-state",
+    )
     for target in ("spond", "vigilo", "skolemelding")
 }
+
+
+def sync_argv(target: str) -> tuple[str, ...] | None:
+    template = SYNC_TARGETS.get(target)
+    if template is None:
+        return None
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or os.path.join(os.path.expanduser("~"), ".cache")
+    lock_dir = os.path.join(runtime, "diary-collect")
+    os.makedirs(lock_dir, mode=0o700, exist_ok=True)
+    return ("/usr/bin/flock", os.path.join(lock_dir, f"{target}.lock"), *template)
 ALLOWED_START_UNITS = ("mail-sync.service",)
 STATUS_UNITS = (
     "mail-sync.timer",
@@ -155,7 +169,7 @@ def run_command(argv: list[str] | tuple[str, ...],
 def run_sync(target: str, *, runner=run_command,
              timeout: float = SYNC_TIMEOUT) -> dict:
     """Run one allow-listed sync target (never an arbitrary argv)."""
-    argv = SYNC_TARGETS.get(target)
+    argv = sync_argv(target)
     if argv is None:
         return {"ok": False, "error": f"unknown sync target {target!r}"}
     result = runner(argv, timeout)
