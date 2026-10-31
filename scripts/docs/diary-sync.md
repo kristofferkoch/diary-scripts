@@ -39,15 +39,21 @@ Reply: `{"ok": bool, "cmd": …, "output": "<tail>", "exit_code": n, …}`.
 
 | Rule | Why |
 | --- | --- |
-| **the request never carries an argv** | targets and units are looked up in fixed tables, so a caller cannot run arbitrary code as kek |
+| **only the documented request fields** | extra `argv`, `env`, `cwd`, `path`, and similar fields are rejected before a command runs; targets and units come from fixed tables |
 | `start` only for `mail-sync.service` | the one unit the sjekk needs to poke (the timer runs it anyway) |
 | `sync` 6/hour (burst 6), `status` 120/min | a runaway agent cannot hammer the upstreams |
-| one sync at a time | the second concurrent request gets `busy`, never a queue |
+| one sync at a time | the second concurrent request waits up to 240 s for the slot, then gets `busy` |
 | 64 KiB request cap, 4000-char output tail | bounded payloads both ways |
 | rejections logged to the journal | `[diary-sync] 'sync' -> rate limit exceeded` |
 
 The socket is `0660` in a `0750` runtime dir owned by `kek:diary` — group
 membership *is* the capability, and `diary` contains only `agent` and `kek`.
+The service environment pins `DIARY_ROOT` and both token-file paths. The
+explicit data-root environment takes precedence over `paths.project`, and each
+token-file environment takes precedence over its TOML setting, so the ordinary
+publishable configuration cannot redirect privileged reads or writes. The
+host unit additionally hides unrelated home and user-runtime paths and bind
+mounts only the fixed inputs and outputs; see the diary `sync/README.md`.
 
 ## Client
 
@@ -68,14 +74,14 @@ correct for both identities.
 ## Install (as root; broker must not run from the venv)
 
 ```bash
-sudo-ask 'install -o root -g root -m 0755 /home/kek/diary/diary-scripts/scripts/diary_sync_broker.py /usr/local/bin/diary-sync-broker'
-sudo-ask 'install -m 0644 /home/kek/diary/sync/diary-sync-broker.service /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now diary-sync-broker'
+sudo-ask /home/kek/diary/sync/install
 ```
 
 The installed copy is stdlib-only on purpose: root must never execute code out
-of an unreviewed checkout. Sync commands come from the human-approved
-`diary-scripts` tree, and secret lookups use fixed argv rather than configurable
-shell commands (same boundary rule as `sudo-broker`).
+of an unreviewed checkout. The installer reads the broker only from the
+human-approved standalone `diary-scripts` tree, and secret lookups use fixed
+argv rather than configurable shell commands (same boundary rule as
+`sudo-broker`).
 
 ## Verify
 

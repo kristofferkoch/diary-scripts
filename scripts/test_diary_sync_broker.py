@@ -45,16 +45,41 @@ def test_unknown_sync_target_is_rejected_and_never_run():
     assert reply["ok"] is False and "unknown sync target" in reply["error"]
 
 
-def test_sync_runs_the_allowlisted_argv_not_the_request():
+def test_sync_runs_the_allowlisted_argv():
     seen: list[list[str]] = []
 
     def runner(argv, timeout):
         seen.append(list(argv))
         return {"ok": True, "output": "ok", "exit_code": 0}
 
-    reply = _handle({"cmd": "sync", "target": "spond", "argv": ["/bin/sh"]}, runner=runner)
+    reply = _handle({"cmd": "sync", "target": "spond"}, runner=runner)
     assert seen == [list(broker.SYNC_TARGETS["spond"])]
     assert reply["target"] == "spond" and reply["ok"] is True
+
+
+@pytest.mark.parametrize("payload", [
+    {"cmd": "sync", "target": "spond", "argv": ["/bin/sh"]},
+    {"cmd": "sync", "target": "spond", "cwd": "/"},
+    {"cmd": "sync", "target": "spond", "env": {"DIARY_ROOT": "/"}},
+    {"cmd": "start", "unit": "mail-sync.service", "path": "/etc/passwd"},
+    {"cmd": "status", "paths": ["/etc", "/home"]},
+    {"cmd": "ping", "output": "/tmp/agent-selected"},
+])
+def test_agent_selected_process_and_filesystem_arguments_are_rejected(payload):
+    def boom(argv, timeout):  # pragma: no cover - must not run
+        raise AssertionError("a request with extra fields must not reach the runner")
+
+    reply = _handle(payload, runner=boom)
+    assert reply["ok"] is False
+    assert "unexpected request fields" in reply["error"]
+
+
+def test_non_scalar_sync_target_is_rejected_without_running():
+    def boom(argv, timeout):  # pragma: no cover - must not run
+        raise AssertionError("a malformed target must not reach the runner")
+
+    reply = _handle({"cmd": "sync", "target": ["spond"]}, runner=boom)
+    assert reply["ok"] is False and "unknown sync target" in reply["error"]
 
 
 def test_sync_all_runs_every_target():

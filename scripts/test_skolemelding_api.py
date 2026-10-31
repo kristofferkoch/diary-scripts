@@ -90,6 +90,13 @@ def token_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return path
 
 
+def test_fixed_token_path_bypasses_config_lookup(tmp_path, monkeypatch):
+    fixed = tmp_path / "fixed-auth.json"
+    monkeypatch.setenv("SKOLEMELDING_TOKEN_FILE", str(fixed))
+    monkeypatch.setattr(sa, "cfg_path", lambda *args: pytest.fail("config path was consulted"))
+    assert sa.token_path() == fixed
+
+
 @pytest.fixture
 def store(token_file: Path) -> TokenStore:
     return TokenStore(token_file)

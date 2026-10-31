@@ -69,17 +69,20 @@ def workspace_root() -> Path:
     sits*, not on where the data is.
 
     Resolution order:
-        1. config ``paths.project``
-        2. ``$DIARY_ROOT``
+        1. ``$DIARY_ROOT``
+        2. config ``paths.project``
         3. nearest ancestor of the CWD that contains ``CALENDAR.md`` (dev convenience)
         4. the CWD
+
+    The environment wins so a fixed-purpose service can pin its data root even
+    when its ordinary runtime configuration is writable by a less-trusted user.
     """
-    val = cfg("paths.project", None)
-    if val:
-        return Path(val).expanduser()
     env = os.environ.get("DIARY_ROOT")
     if env:
         return Path(env).expanduser()
+    val = cfg("paths.project", None)
+    if val:
+        return Path(val).expanduser()
     cwd = Path.cwd()
     for base in (cwd, *cwd.parents):
         if (base / "CALENDAR.md").exists():

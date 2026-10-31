@@ -23,12 +23,23 @@ from mail_reader import config
 
 # ---- behaviour: config / env drive the root, not __file__ ------------------
 
-def test_config_paths_project_wins(tmp_path, monkeypatch):
+def test_config_paths_project_used_without_env(tmp_path, monkeypatch):
     cfgfile = tmp_path / "config.toml"
     cfgfile.write_text(f'[paths]\nproject = "{tmp_path / "ws"}"\n')
     monkeypatch.setenv("DIARY_CONFIG", str(cfgfile))
+    monkeypatch.delenv("DIARY_ROOT", raising=False)
     config.reload()
     assert config.workspace_root() == tmp_path / "ws"
+    config.reload()
+
+
+def test_diary_root_env_overrides_config_paths_project(tmp_path, monkeypatch):
+    cfgfile = tmp_path / "config.toml"
+    cfgfile.write_text(f'[paths]\nproject = "{tmp_path / "agent-selected"}"\n')
+    monkeypatch.setenv("DIARY_CONFIG", str(cfgfile))
+    monkeypatch.setenv("DIARY_ROOT", str(tmp_path / "fixed"))
+    config.reload()
+    assert config.workspace_root() == tmp_path / "fixed"
     config.reload()
 
 
