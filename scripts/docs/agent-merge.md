@@ -76,3 +76,21 @@ use approved repositories or root-owned installed copies, never the integration
 checkouts. Scripts approval runs `uv sync --frozen` there so the environment
 matches the reviewed lockfile before GitHub publication. Secret lookups are fixed
 `pass` argv, not shell commands read from the unattended diary configuration.
+
+## Pinned first-run bootstrap
+
+The first installer run uses the owner-reviewed integration checkout because the
+approved diary does not exist yet. The owner supplies full reviewed master OIDs
+for both approved repositories:
+
+```bash
+sudo-ask 'env DIARY_APPROVED_OID=<full-reviewed-diary-OID> DIARY_SCRIPTS_APPROVED_OID=<full-reviewed-scripts-OID> /path/to/diary/dsh/agent-uid/install'
+```
+
+Later runs use `/path/to/diary-approved/dsh/agent-uid/install` and fresh reviewed
+OIDs. The installer quiesces the legacy merge socket, clones or fetches both
+repositories without checkout, and requires local `master` plus any fetched
+master to equal the corresponding owner OID before checkout, `uv sync`, file
+installation, or service restart. A mismatch leaves the legacy socket stopped;
+success installs the reviewed boundary and re-enables the socket. Steady-state
+queue approval remains bound to the exact reviewed queue OID as described above.
