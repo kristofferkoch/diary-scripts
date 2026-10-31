@@ -24,9 +24,11 @@ post bodies, while payment receipts come in over mail.
 - 2FA must be **off** on the Spond account — Olen/Spond doesn't implement
   the OTP-verify flow
   ([issue #205](https://github.com/Olen/Spond/issues/205)).
-- Set `$SPOND_RSVP_MEMBER_ID` to surface accept/decline/unanswered
-  markers in event headers; Robin' member-id in Eksempel-IL G-lag is
-  `0123456789ABCDEF0123456789ABCDEF`.
+- `spondshow` reads `spond.rsvp_member_id` from root-owned
+  `/etc/diary/trusted.toml` to surface accept/decline/unanswered markers in
+  event headers. For interactive use, `--rsvp-as MEMBER_ID` or
+  `$SPOND_RSVP_MEMBER_ID` overrides the trusted value (CLI wins); ordinary
+  `config/local.toml` is not consulted.
 
 ### Processing new Spond items (SOP)
 
@@ -49,9 +51,11 @@ last time we wrote a digest".
    chat|event|post` or pin to `--chat <id>` / `--event <id>`.
    Events are tracked by a **content key** (`event_activity_key`), so an
    RSVP change, reschedule, or cancellation on an already-seen event
-   re-emits and shows up here — set `$SPOND_RSVP_MEMBER_ID` (exported in
-   user's shell) so the key folds in the tracked member's own response.
-   If it's unset, `spond-sync` prints a `!!` warning and only
+   re-emits and shows up here. Both sync and display read the tracked member
+   from trusted `spond.rsvp_member_id`, so the key folds in that member's own
+   response and reconciliation keeps its markers without shell exports.
+   `$SPOND_RSVP_MEMBER_ID` remains an interactive sync override. If neither
+   setting is present, `spond-sync` prints a `!!` warning and only
    reschedule/cancellation are caught, not RSVP. (Before 2026-05-29
    events used a flat id-only seen-set that swallowed RSVP changes
    entirely — see `test_spond_sync.py` for the regression.)
