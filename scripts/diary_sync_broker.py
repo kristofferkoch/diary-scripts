@@ -25,8 +25,10 @@ process that touches the secrets. The client (``client_main``, entry point
 
 Security boundary
 -----------------
-* Only the verbs above exist; the request never supplies an argv. Targets and
-  units are looked up in fixed tables, so a caller cannot run arbitrary code.
+* Only the verbs and fields above exist; extra argv, environment, working
+  directory, and filesystem fields are rejected before any command runs.
+  Targets and units are looked up in fixed tables, so a caller cannot run
+  arbitrary code.
 * ``sync`` is rate-limited (6/hour, burst 6) and serialised: a second
   request waits up to 240 s for the slot, then gets ``busy``.
 * Requests are capped at 64 KiB, replies at 4000 chars of output tail.
@@ -213,6 +215,14 @@ def _acquire(busy: threading.Lock, timeout: float) -> bool:
     return busy.acquire(timeout=timeout)
 
 
+REQUEST_FIELDS = {
+    "ping": {"cmd"},
+    "status": {"cmd"},
+    "start": {"cmd", "unit"},
+    "sync": {"cmd", "target"},
+}
+
+
 def handle(request, *, sync_limiter: Limiter, status_limiter: Limiter,
            busy: threading.Lock, runner=run_command,
            busy_wait: float = BUSY_WAIT) -> dict:
@@ -221,6 +231,14 @@ def handle(request, *, sync_limiter: Limiter, status_limiter: Limiter,
     if not isinstance(request, dict):
         return {"ok": False, "error": "request must be a JSON object"}
     cmd = request.get("cmd")
+    fields = REQUEST_FIELDS.get(cmd) if isinstance(cmd, str) else None
+    if fields is None:
+        return {"ok": False, "error": f"unknown cmd {cmd!r}"}
+    unexpected = set(request) - fields
+    if unexpected:
+        return {"ok": False,
+                "error": f"unexpected request fields: {', '.join(sorted(unexpected))}"}
+
     if cmd == "ping":
         return {"ok": True, "cmd": "ping", "version": VERSION, "pid": os.getpid()}
 
@@ -242,28 +260,25 @@ def handle(request, *, sync_limiter: Limiter, status_limiter: Limiter,
         finally:
             busy.release()
 
-    if cmd == "sync":
-        target = request.get("target")
-        if target == "all":
-            targets = list(SYNC_TARGETS)
-        elif target in SYNC_TARGETS:
-            targets = [target]
-        else:
-            return {"ok": False, "error": f"unknown sync target {target!r}"}
-        if not sync_limiter.allow():
-            return {"ok": False, "error": "rate limit exceeded, try again later"}
-        if not _acquire(busy, busy_wait):
-            return {"ok": False, "error": "busy: another request is running"}
-        try:
-            results = [run_sync(t, runner=runner) for t in targets]
-        finally:
-            busy.release()
-        if len(results) == 1:
-            return results[0]
-        return {"ok": all(r.get("ok") for r in results), "cmd": "sync",
-                "target": "all", "results": results}
-
-    return {"ok": False, "error": f"unknown cmd {cmd!r}"}
+    target = request.get("target")
+    if target == "all":
+        targets = list(SYNC_TARGETS)
+    elif isinstance(target, str) and target in SYNC_TARGETS:
+        targets = [target]
+    else:
+        return {"ok": False, "error": f"unknown sync target {target!r}"}
+    if not sync_limiter.allow():
+        return {"ok": False, "error": "rate limit exceeded, try again later"}
+    if not _acquire(busy, busy_wait):
+        return {"ok": False, "error": "busy: another request is running"}
+    try:
+        results = [run_sync(t, runner=runner) for t in targets]
+    finally:
+        busy.release()
+    if len(results) == 1:
+        return results[0]
+    return {"ok": all(r.get("ok") for r in results), "cmd": "sync",
+            "target": "all", "results": results}
 
 
 def serve(listen: str, *, runner=run_command) -> int:
@@ -304,7 +319,8 @@ def serve(listen: str, *, runner=run_command) -> int:
             reply = handle(request, sync_limiter=sync_limiter,
                            status_limiter=status_limiter, busy=busy, runner=runner)
             if not reply.get("ok"):
-                print(f"[diary-sync] {request.get('cmd')!r} -> "
+                cmd = request.get("cmd") if isinstance(request, dict) else None
+                print(f"[diary-sync] {cmd!r} -> "
                       f"{reply.get('error', 'failed')}", file=sys.stderr, flush=True)
             conn.sendall(json.dumps(reply).encode() + b"\n")
         except OSError:

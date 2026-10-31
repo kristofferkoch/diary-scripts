@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import Any
 
 from mail_reader.config import trusted_cfg, workspace_root
+from scripts.safe_io import append_text, ensure_dir
 
 PROJECT_ROOT = workspace_root()
 STATE_PATH = PROJECT_ROOT / "memory" / "spond-state.json"
@@ -76,14 +77,17 @@ def utcnow_iso() -> str:
 
 
 def load_state() -> dict[str, Any]:
-    if not STATE_PATH.exists():
-        return {
-            "seen_chat_activity": {},
-            "seen_event_activity": {},
-            "seen_post_ids": [],
-            "last_successful_run": None,
-        }
-    return json.loads(STATE_PATH.read_text())
+    default = {
+        "seen_chat_activity": {},
+        "seen_event_activity": {},
+        "seen_post_ids": [],
+        "last_successful_run": None,
+    }
+    try:
+        data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return default
+    return data if isinstance(data, dict) else default
 
 
 def save_state(state: dict[str, Any]) -> None:
@@ -104,16 +108,15 @@ def get_password() -> str:
 
 def today_jsonl() -> Path:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_dir(OUT_DIR)
     return OUT_DIR / f"{today}.jsonl"
 
 
 def append_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
     if not records:
         return
-    with path.open("a", encoding="utf-8") as f:
-        for rec in records:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    text = "".join(json.dumps(rec, ensure_ascii=False) + "\n" for rec in records)
+    append_text(path, text)
 
 
 def chat_activity_key(chat: dict[str, Any]) -> str:

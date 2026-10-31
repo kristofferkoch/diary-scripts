@@ -109,6 +109,13 @@ def token_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return path
 
 
+def test_fixed_token_path_bypasses_config_lookup(tmp_path, monkeypatch):
+    fixed = tmp_path / "fixed-tokens.json"
+    monkeypatch.setenv("VIGILO_TOKEN_FILE", str(fixed))
+    monkeypatch.setattr(va, "cfg_path", lambda *args: pytest.fail("config path was consulted"))
+    assert va.token_path() == fixed
+
+
 @pytest.fixture
 def store(token_file: Path, creds: None) -> TokenStore:
     return TokenStore(token_file)

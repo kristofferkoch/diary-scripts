@@ -68,6 +68,7 @@ from mail_reader.config import cfg, workspace_root
 
 from scripts.attachment_store import find_attachment, write_attachment
 from scripts.embed_mail import html_to_text
+from scripts.safe_io import append_text, ensure_dir
 from scripts.skolemelding_api import (
     ApiError,
     AuthExpiredError,
@@ -410,14 +411,13 @@ def run_once(state: dict[str, Any]) -> tuple[int, list[dict[str, Any]], dict[str
 
 
 def today_jsonl() -> Path:
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_dir(OUT_DIR)
     return OUT_DIR / f"{datetime.now(timezone.utc):%Y-%m-%d}.jsonl"
 
 
 def append_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
-    with path.open("a", encoding="utf-8") as f:
-        for rec in records:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    text = "".join(json.dumps(rec, ensure_ascii=False) + "\n" for rec in records)
+    append_text(path, text)
 
 
 def poll_floor_seconds() -> int:
