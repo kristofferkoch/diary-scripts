@@ -182,6 +182,10 @@ def test_socket_round_trip(tmp_path):
     status = broker.call({"cmd": "status"}, socket_path=sock_path, timeout=5)
     assert status["ok"] is True and "mail-sync.timer" in status["units"]
 
+    rejected = broker.call([], socket_path=sock_path, timeout=2)
+    assert rejected["ok"] is False
+    assert rejected["error"] == "request must be a JSON object"
+
 
 def test_local_fallback_status_uses_systemctl(monkeypatch):
     calls: list[list[str]] = []

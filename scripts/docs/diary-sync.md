@@ -53,7 +53,10 @@ explicit data-root environment takes precedence over `paths.project`, and each
 token-file environment takes precedence over its TOML setting, so the ordinary
 publishable configuration cannot redirect privileged reads or writes. The
 host unit additionally hides unrelated home and user-runtime paths and bind
-mounts only the fixed inputs and outputs; see the diary `sync/README.md`.
+mounts only the fixed inputs and outputs. The installer pins those mount
+sources against agent replacement, and all three JSONL sinks use dirfd-relative
+no-follow appends so output symlinks cannot select another write target; see
+the diary `sync/README.md`.
 
 ## Client
 

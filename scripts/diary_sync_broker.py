@@ -319,7 +319,8 @@ def serve(listen: str, *, runner=run_command) -> int:
             reply = handle(request, sync_limiter=sync_limiter,
                            status_limiter=status_limiter, busy=busy, runner=runner)
             if not reply.get("ok"):
-                print(f"[diary-sync] {request.get('cmd')!r} -> "
+                cmd = request.get("cmd") if isinstance(request, dict) else None
+                print(f"[diary-sync] {cmd!r} -> "
                       f"{reply.get('error', 'failed')}", file=sys.stderr, flush=True)
             conn.sendall(json.dumps(reply).encode() + b"\n")
         except OSError:
