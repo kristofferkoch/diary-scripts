@@ -44,8 +44,8 @@ needed.
 ## Install
 
 ```bash
-sudo-ask 'install -o root -g root -m 0755 /home/kek/diary/diary-scripts/scripts/signal_notify_proxy.py /usr/local/bin/signal-notify-proxy'
-sudo-ask 'install -m 0644 /home/kek/diary/signal/signal-notify.service /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now signal-notify'
+sudo-ask 'install -o root -g root -m 0755 /path/to/diary-scripts-approved/scripts/signal_notify_proxy.py /usr/local/bin/signal-notify-proxy'
+sudo-ask 'install -m 0644 /path/to/diary-approved/signal/signal-notify.service /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now signal-notify'
 ```
 
 Runs as the account owner with `Group=diary`, so the `diary` group can reach

@@ -68,8 +68,8 @@ correct for both identities.
 ## Install (as root; broker must not run from the venv)
 
 ```bash
-sudo-ask 'install -o root -g root -m 0755 /home/kek/diary/diary-scripts/scripts/diary_sync_broker.py /usr/local/bin/diary-sync-broker'
-sudo-ask 'install -m 0644 /home/kek/diary/sync/diary-sync-broker.service /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now diary-sync-broker'
+sudo-ask 'install -o root -g root -m 0755 /path/to/diary-scripts-approved/scripts/diary_sync_broker.py /usr/local/bin/diary-sync-broker'
+sudo-ask 'install -m 0644 /path/to/diary-approved/sync/diary-sync-broker.service /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now diary-sync-broker'
 ```
 
 The installed copy is stdlib-only on purpose: root must never execute code out
