@@ -2,7 +2,7 @@
 """Human-approved publication queues for code and private-workspace changes.
 
 Only regular-file memory changes may publish unattended. Other requests fetch
-agent branches into an isolated ``queue/automatic`` repository. Only
+agent source branches into an isolated ``queue/automatic`` repository. Only
 ``agent-merge-approve`` from the account owner's UID, naming the exact reviewed
 commit OID, may merge that commit into the approved repository and push
 ``master``.
@@ -46,6 +46,7 @@ class ReviewRequired(QueueError):
 @dataclass(frozen=True)
 class QueuePaths:
     integration: Path
+    source: Path
     approved: Path
     queue: Path
     worktrees: Path
@@ -54,39 +55,49 @@ class QueuePaths:
 
 def default_paths() -> QueuePaths:
     integration = os.environ.get("AGENT_MERGE_INTEGRATION_ROOT")
+    source = os.environ.get("AGENT_MERGE_SOURCE_ROOT")
     approved = os.environ.get("AGENT_MERGE_APPROVED_ROOT")
     queue = os.environ.get("AGENT_MERGE_QUEUE_ROOT")
     worktrees = os.environ.get("AGENT_MERGE_WORKTREE_ROOT")
-    if integration and approved and queue and worktrees:
-        return QueuePaths(Path(integration), Path(approved), Path(queue), Path(worktrees))
+    if integration and source and approved and queue and worktrees:
+        return QueuePaths(
+            Path(integration), Path(source), Path(approved), Path(queue), Path(worktrees)
+        )
 
     from mail_reader.config import workspace_root
 
     workspace = workspace_root()
+    worktrees = workspace.parent / "diary-worktrees"
     return QueuePaths(
         integration=workspace / "diary-scripts",
+        source=worktrees / "_sources" / "diary-scripts",
         approved=workspace.parent / "diary-scripts-approved",
         queue=workspace.parent / "diary-scripts-automatic",
-        worktrees=workspace.parent / "diary-worktrees",
+        worktrees=worktrees,
     )
 
 
 def diary_paths() -> QueuePaths:
     integration = os.environ.get("AGENT_MERGE_DIARY_INTEGRATION_ROOT")
+    source = os.environ.get("AGENT_MERGE_DIARY_SOURCE_ROOT")
     approved = os.environ.get("AGENT_MERGE_DIARY_APPROVED_ROOT")
     queue = os.environ.get("AGENT_MERGE_DIARY_QUEUE_ROOT")
     worktrees = os.environ.get("AGENT_MERGE_DIARY_WORKTREE_ROOT")
-    if integration and approved and queue and worktrees:
-        return QueuePaths(Path(integration), Path(approved), Path(queue), Path(worktrees))
+    if integration and source and approved and queue and worktrees:
+        return QueuePaths(
+            Path(integration), Path(source), Path(approved), Path(queue), Path(worktrees)
+        )
 
     from mail_reader.config import workspace_root
 
     workspace = workspace_root()
+    worktrees = workspace.parent / "diary-worktrees"
     return QueuePaths(
         integration=workspace,
+        source=worktrees / "_sources" / "diary",
         approved=workspace.parent / "diary-approved",
         queue=workspace.parent / "diary-automatic",
-        worktrees=workspace.parent / "diary-worktrees",
+        worktrees=worktrees,
     )
 
 
@@ -115,7 +126,24 @@ def git(repo: Path, *args: str, safe: bool = False, check: bool = True) -> subpr
     if safe:
         cmd += ["-c", f"safe.directory={repo}"]
     cmd += ["-C", str(repo), *args]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    env = os.environ.copy()
+    for key in list(env):
+        if key in {"GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"}:
+            del env[key]
+        elif key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
+            del env[key]
+    protected = (
+        ("core.fsmonitor", "false"),
+        ("core.hooksPath", "/dev/null"),
+        ("diff.external", ""),
+        ("uploadpack.packObjectsHook", ""),
+        ("safe.directory", "*"),
+    )
+    env["GIT_CONFIG_COUNT"] = str(len(protected))
+    for index, (key, value) in enumerate(protected):
+        env[f"GIT_CONFIG_KEY_{index}"] = key
+        env[f"GIT_CONFIG_VALUE_{index}"] = value
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if check and proc.returncode:
         detail = (proc.stderr or proc.stdout).strip()
         raise QueueError(f"git {' '.join(args)} failed: {detail}")
@@ -130,7 +158,7 @@ def clean(repo: Path, *, safe: bool = False) -> bool:
 
 
 def worktree_branch(repo: Path, branch: str) -> Path | None:
-    out = git(repo, "worktree", "list", "--porcelain").stdout
+    out = git(repo, "worktree", "list", "--porcelain", safe=True).stdout
     path: Path | None = None
     for line in out.splitlines():
         if line.startswith("worktree "):
@@ -161,16 +189,15 @@ def ensure_queue(paths: QueuePaths) -> None:
 
 
 def remove_source(paths: QueuePaths, branch: str, source: Path) -> None:
-    git(source, "submodule", "deinit", "--force", "--all", safe=True, check=False)
-    git(paths.integration, "worktree", "remove", "--force", str(source))
+    git(paths.source, "worktree", "remove", "--force", str(source), safe=True)
     # The branch is merged into the queue, not necessarily into approved master.
-    git(paths.integration, "branch", "-D", branch)
+    git(paths.source, "branch", "-D", branch, safe=True)
 
 
 def source_worktree(paths: QueuePaths, branch: str) -> Path:
     if not BRANCH_RE.fullmatch(branch):
         raise QueueError("expected branch dev/<slug> or mem/<slug>")
-    source = worktree_branch(paths.integration, branch)
+    source = worktree_branch(paths.source, branch)
     if source is None:
         raise QueueError(f"{branch} is not checked out in a worktree")
     try:
@@ -187,7 +214,7 @@ def queue_change(branch: str, paths: QueuePaths, *, repo: str = "scripts") -> bo
     source = source_worktree(paths, branch)
     with queue_lock(paths):
         ensure_queue(paths)
-        git(paths.queue, "fetch", "--no-tags", str(paths.integration), branch)
+        git(paths.queue, "fetch", "--no-tags", str(paths.source), branch)
         fetched = git(paths.queue, "rev-parse", "FETCH_HEAD").stdout.strip()
         if git(paths.queue, "merge-base", "--is-ancestor", fetched, QUEUE_BRANCH, check=False).returncode == 0:
             print(f"agent-merge: {branch} is already queued")
@@ -337,10 +364,10 @@ def diary_review_required(repo: Path, reviewed: str) -> list[str]:
 
 
 def publish_diary_unattended(branch: str, paths: QueuePaths, *, push: bool = True) -> bool:
-    """Publish only regular-file memory changes; never trust integration master."""
+    """Publish only regular-file memory changes; never trust source master."""
     source = source_worktree(paths, branch)
     with queue_lock(paths):
-        git(paths.approved, "fetch", "--no-tags", str(paths.integration), branch)
+        git(paths.approved, "fetch", "--no-tags", str(paths.source), branch)
         fetched = git(paths.approved, "rev-parse", "FETCH_HEAD").stdout.strip()
         sensitive = diary_review_required(paths.approved, fetched)
         if sensitive:

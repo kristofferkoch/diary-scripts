@@ -35,6 +35,12 @@ def paths(tmp_path: Path) -> amq.QueuePaths:
     run("git", "config", "user.email", "queue@example.invalid", cwd=integration)
     commit(integration, "README.md", "approved\n")
 
+    worktrees = tmp_path / "diary-worktrees"
+    source = worktrees / "_sources" / "diary-scripts"
+    run("git", "clone", "--no-hardlinks", str(integration), str(source))
+    run("git", "config", "user.name", "Queue Test", cwd=source)
+    run("git", "config", "user.email", "queue@example.invalid", cwd=source)
+
     approved = tmp_path / "diary-scripts-approved"
     run("git", "clone", "--no-hardlinks", str(integration), str(approved))
     remote = tmp_path / "origin.git"
@@ -44,16 +50,17 @@ def paths(tmp_path: Path) -> amq.QueuePaths:
 
     return amq.QueuePaths(
         integration=integration,
+        source=source,
         approved=approved,
         queue=tmp_path / "diary-scripts-automatic",
-        worktrees=tmp_path / "diary-worktrees",
+        worktrees=worktrees,
         lock=tmp_path / "queue.lock",
     )
 
 
 def source_branch(paths: amq.QueuePaths, branch: str = "dev/change") -> Path:
     source = paths.worktrees / branch.split("/", 1)[1]
-    run("git", "worktree", "add", str(source), "-b", branch, "master", cwd=paths.integration)
+    run("git", "worktree", "add", str(source), "-b", branch, "master", cwd=paths.source)
     commit(source, "queued.txt", "not yet approved\n")
     return source
 
@@ -62,17 +69,34 @@ def reviewed(paths: amq.QueuePaths) -> str:
     return run("git", "rev-parse", "HEAD", cwd=paths.queue)
 
 
-def test_queue_does_not_touch_approved_tree_or_github(paths: amq.QueuePaths):
+def test_source_is_a_standalone_non_hardlinked_clone(paths: amq.QueuePaths):
+    assert (paths.source / ".git").is_dir()
+    source_objects = paths.source / ".git" / "objects"
+    integration_objects = paths.integration / ".git" / "objects"
+    source_object = next(path for path in source_objects.glob("[0-9a-f][0-9a-f]/*") if path.is_file())
+    integration_object = integration_objects / source_object.relative_to(source_objects)
+    assert source_object.stat().st_ino != integration_object.stat().st_ino
+
+
+def test_queue_does_not_touch_approved_integration_or_github(paths: amq.QueuePaths):
     source = source_branch(paths)
     approved_head = run("git", "rev-parse", "master", cwd=paths.approved)
+    integration_head = run("git", "rev-parse", "master", cwd=paths.integration)
 
     assert amq.queue_change("dev/change", paths) is True
 
     assert not source.exists(), "the cleanly queued source worktree is removed"
+    branch = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", "refs/heads/dev/change"],
+        cwd=paths.source,
+    )
+    assert branch.returncode != 0, "queue cleanup deletes the source branch"
     assert (paths.queue / ".git").is_dir(), "queue metadata is standalone"
     assert (paths.queue / "queued.txt").read_text() == "not yet approved\n"
-    assert not (paths.approved / "queued.txt").exists()
-    assert run("git", "rev-parse", "master", cwd=paths.approved) == approved_head
+    for repo in (paths.approved, paths.integration):
+        assert not (repo / "queued.txt").exists()
+        assert run("git", "rev-parse", "master", cwd=repo) == approved_head
+    assert integration_head == approved_head
     remote = run("git", "config", "--get", "remote.origin.url", cwd=paths.approved)
     assert run("git", "--git-dir", remote, "rev-parse", "master") == approved_head
 
@@ -159,7 +183,7 @@ def test_dirty_approved_tree_cannot_be_published_over(paths: amq.QueuePaths):
 
 def test_source_must_be_in_the_agent_worktree_root(paths: amq.QueuePaths):
     outside = paths.integration.parent / "outside"
-    run("git", "worktree", "add", str(outside), "-b", "dev/outside", "master", cwd=paths.integration)
+    run("git", "worktree", "add", str(outside), "-b", "dev/outside", "master", cwd=paths.source)
     commit(outside, "queued.txt", "outside\n")
 
     with pytest.raises(amq.QueueError, match="outside"):
@@ -195,7 +219,7 @@ def test_peer_uid_comes_from_the_kernel_socket_credentials():
 
 def empty_source(paths: amq.QueuePaths, branch: str = "dev/diary") -> Path:
     source = paths.worktrees / branch.split("/", 1)[1]
-    run("git", "worktree", "add", str(source), "-b", branch, "master", cwd=paths.integration)
+    run("git", "worktree", "add", str(source), "-b", branch, "master", cwd=paths.source)
     return source
 
 
@@ -206,6 +230,11 @@ def test_diary_regular_memory_change_publishes_without_owner_review(paths: amq.Q
     assert amq.publish_diary_unattended("dev/diary", paths) is True
 
     assert not source.exists()
+    branch = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", "refs/heads/dev/diary"],
+        cwd=paths.source,
+    )
+    assert branch.returncode != 0, "unattended cleanup deletes the source branch"
     for repo in (paths.approved, paths.integration):
         assert (repo / "memory/2026-10-31.md").read_text() == "routine notes\n"
 
@@ -225,7 +254,7 @@ def test_diary_instruction_executable_and_service_paths_require_review(paths: am
     commit(source, name, "agent-controlled change\n")
     oid = run("git", "rev-parse", "HEAD", cwd=source)
 
-    assert amq.diary_review_required(paths.integration, oid) == [name]
+    assert amq.diary_review_required(paths.source, oid) == [name]
 
 
 def test_diary_sensitive_change_cannot_publish_without_exact_oid_approval(paths: amq.QueuePaths):
@@ -258,7 +287,7 @@ def test_diary_executable_memory_file_requires_review(paths: amq.QueuePaths):
     run("git", "commit", "-m", "make executable", cwd=source)
     oid = run("git", "rev-parse", "HEAD", cwd=source)
 
-    assert amq.diary_review_required(paths.integration, oid) == ["memory/run-me"]
+    assert amq.diary_review_required(paths.source, oid) == ["memory/run-me"]
 
 
 def test_diary_symlink_memory_file_requires_review(paths: amq.QueuePaths):
@@ -269,7 +298,7 @@ def test_diary_symlink_memory_file_requires_review(paths: amq.QueuePaths):
     run("git", "commit", "-m", "add symlink", cwd=source)
     oid = run("git", "rev-parse", "HEAD", cwd=source)
 
-    assert amq.diary_review_required(paths.integration, oid) == ["memory/link"]
+    assert amq.diary_review_required(paths.source, oid) == ["memory/link"]
 
 
 def test_diary_publication_pins_the_fetched_oid(paths: amq.QueuePaths, monkeypatch: pytest.MonkeyPatch):
@@ -289,17 +318,51 @@ def test_diary_publication_pins_the_fetched_oid(paths: amq.QueuePaths, monkeypat
     assert (paths.approved / "memory/2026-10-31.md").exists()
 
 
-def test_diary_agent_controlled_integration_master_is_not_a_trust_base(paths: amq.QueuePaths):
+def test_diary_agent_controlled_source_master_is_not_a_trust_base(paths: amq.QueuePaths):
     source = empty_source(paths)
     commit(source, "memory/2026-10-31.md", "safe on its own\n")
-    approved_head = run("git", "rev-parse", "master", cwd=paths.approved)
     attacker = empty_source(paths, "dev/attacker")
-    commit(attacker, "AGENTS.md", "integration refs are untrusted\n")
+    commit(attacker, "AGENTS.md", "source refs are untrusted\n")
     attacker_oid = run("git", "rev-parse", "HEAD", cwd=attacker)
-    run("git", "update-ref", "refs/heads/master", attacker_oid, cwd=paths.integration)
+    integration_head = run("git", "rev-parse", "master", cwd=paths.integration)
+    run("git", "update-ref", "refs/heads/master", attacker_oid, cwd=paths.source)
 
-    with pytest.raises(amq.QueueError):
+    assert amq.publish_diary_unattended("dev/diary", paths) is True
+
+    assert run("git", "rev-parse", "master", cwd=paths.source) == attacker_oid
+    assert not (paths.approved / "AGENTS.md").exists()
+    assert not (paths.integration / "AGENTS.md").exists()
+    assert run("git", "rev-parse", "master^", cwd=paths.integration) == integration_head
+
+
+def test_source_change_cannot_bypass_a_dirty_integration_guard(paths: amq.QueuePaths):
+    source = empty_source(paths)
+    commit(source, "memory/2026-10-31.md", "must not overwrite local work\n")
+    approved_head = run("git", "rev-parse", "master", cwd=paths.approved)
+    (paths.integration / "README.md").write_text("owner work in progress\n")
+
+    with pytest.raises(amq.QueueError, match="integration.*uncommitted"):
         amq.publish_diary_unattended("dev/diary", paths)
 
+    assert source.exists()
     assert run("git", "rev-parse", "master", cwd=paths.approved) == approved_head
-    assert not (paths.approved / "AGENTS.md").exists()
+    assert (paths.integration / "README.md").read_text() == "owner work in progress\n"
+
+
+@pytest.mark.parametrize("operation", ["queue", "unattended"])
+def test_malicious_source_git_config_cannot_execute(paths: amq.QueuePaths, operation: str):
+    marker = paths.source.parent / f"{operation}-config-executed"
+    if operation == "queue":
+        source_branch(paths)
+    else:
+        source = empty_source(paths)
+        commit(source, "memory/2026-10-31.md", "safe memory change\n")
+    run("git", "config", "uploadpack.packObjectsHook", f"touch {marker}", cwd=paths.source)
+    run("git", "config", "core.fsmonitor", f"touch {marker}", cwd=paths.source)
+
+    if operation == "queue":
+        assert amq.queue_change("dev/change", paths) is True
+    else:
+        assert amq.publish_diary_unattended("dev/diary", paths) is True
+
+    assert not marker.exists()

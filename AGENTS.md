@@ -4,13 +4,24 @@ Public, sanitized helper-code repo for the diary workspace (the private parent r
 
 ## Worktrees
 
-**All edits happen in a worktree.** The checkout at `~/diary/diary-scripts` is the diary repo's submodule and is reserved for merges and pushes only — never edit tracked files there. Use the sibling scripts directory under the one agent-writable worktree root:
+**All edits happen in a worktree.** The integration checkout at `~/diary/diary-scripts` is reserved for owner-approved synchronization — never edit tracked files there. Use the agent-owned standalone source and a sibling scripts worktree under the one agent-writable Git root. Source and integration have independent `.git` directories, objects, refs, logs, worktree registrations, and config.
 
-    (umask 002; git -C ~/diary/diary-scripts worktree add ~/diary-worktrees/<slug>-scripts -b dev/<slug>)
+The installer normally creates the source. If bootstrapping it manually, clone once without hardlinks:
 
-Do not use `~/diary-scripts-worktrees`: the web agents' systemd confinement makes it read-only. Leave the diary branch's submodule uninitialized and run code and tests in this sibling worktree.
+    install -d -m 2775 ~/diary-worktrees/_sources
+    git clone --no-hardlinks ~/diary/diary-scripts ~/diary-worktrees/_sources/diary-scripts
 
-Full policy (branch naming, review-before-merge, merge + cleanup): `~/diary/AGENTS.md` §Worktrees. After merging here, bump the submodule pointer on the diary side — and always push **this repo before** pushing diary, so the pointer never dangles.
+Fetch from the read-only integration origin, rebase the worktree, and create new worktrees only from `_sources`:
+
+    git -C ~/diary-worktrees/_sources/diary-scripts fetch --no-tags origin
+    git -C ~/diary-worktrees/<slug>-scripts rebase origin/master
+    (umask 002; git -C ~/diary-worktrees/_sources/diary-scripts worktree add ~/diary-worktrees/<slug>-scripts -b dev/<slug> origin/master)
+
+Do not use `~/diary-scripts-worktrees`: the web agents' systemd confinement makes it read-only. Leave the diary branch's submodule uninitialized and run code and tests in this sibling worktree. The corresponding diary source is `~/diary-worktrees/_sources/diary`; its worktree is `<slug>`. Stage a reviewed gitlink in that diary worktree without initializing the submodule:
+
+    git -C ~/diary-worktrees/<slug> update-index --cacheinfo "160000,<sha>,diary-scripts"
+
+Full policy (branch naming, review-before-merge, publication + cleanup): `~/diary/AGENTS.md` §Worktrees. The merge service removes source worktrees and deletes their branches after queueing or publication. After approval here, bump the submodule pointer on the diary side — and always push **this repo before** pushing diary, so the pointer never dangles.
 
 ## Red lines
 
