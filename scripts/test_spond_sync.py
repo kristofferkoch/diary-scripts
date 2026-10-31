@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import spond.spond
+
 from scripts import spond_sync
 from scripts.spond_sync import event_activity_key, fetch_events, member_rsvp
 
@@ -109,3 +111,33 @@ def test_password_lookup_is_fixed_argv_not_a_shell(monkeypatch):
     assert spond_sync.get_password() == "secret"
     assert seen["argv"] == ("pass", "show", "spond/user")
     assert "shell" not in seen["kwargs"]
+
+
+def test_collector_settings_ignore_agent_config(monkeypatch):
+    seen = {}
+
+    class ClientSession:
+        async def close(self):
+            pass
+
+    class FakeSpond:
+        def __init__(self, *, username, password):
+            seen["username"] = username
+            seen["password"] = password
+            self.clientsession = ClientSession()
+
+    settings = {
+        "spond.username": "trusted@example.com",
+        "spond.rsvp_member_id": "trusted-member",
+    }
+    monkeypatch.setattr(spond.spond, "Spond", FakeSpond)
+    monkeypatch.setattr(spond_sync, "trusted_cfg", lambda key, default: settings[key])
+    monkeypatch.setattr(spond_sync, "get_password", lambda: "fixed-secret")
+    monkeypatch.delenv("SPOND_USERNAME", raising=False)
+    monkeypatch.delenv("SPOND_RSVP_MEMBER_ID", raising=False)
+    monkeypatch.setenv("DIARY_CONFIG", "/agent-controlled/missing.toml")
+
+    total, records, counts = asyncio.run(spond_sync.run_once(set(), {}))
+
+    assert (total, records, counts) == (0, [], {})
+    assert seen == {"username": "trusted@example.com", "password": "fixed-secret"}

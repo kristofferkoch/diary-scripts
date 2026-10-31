@@ -254,10 +254,11 @@ psql -d mailvec -c "CREATE INDEX chunks_embed_hnsw ON chunks USING hnsw ((subvec
 Re-run manually after a big mail import. After a large batch, drop+rebuild
 the HNSW index for best recall (same SQL as above).
 
-Env vars (defaults usually fine, real values from `config/local.toml` via
-`mail_reader.config`): `PG_DSN=dbname=mailvec`,
-`EMBED_URL=http://gpu-host:8081` (config `hosts.embed`), `EMBED_MODEL=qwen3-embedding`,
-`EMBED_DIMS=4096`, `EMBED_BATCH=32`, `EMBED_BATCH_CHARS=6000`,
+The embedding URL comes only from `hosts.embed` in root-owned
+`/etc/diary/trusted.toml`; `EMBED_URL` and `config/local.toml` cannot override
+it. Other env vars (defaults usually fine): `PG_DSN=dbname=mailvec`,
+`EMBED_MODEL=qwen3-embedding`, `EMBED_DIMS=4096`, `EMBED_BATCH=32`,
+`EMBED_BATCH_CHARS=6000`,
 `EMBED_QUERY_INSTRUCTION` (retrieval prefix; `ME_ADDRS=user@example.com`). Do **not** try to
 install `talon` — won't build on Python 3.14 (`cchardet` needs
 `longintrepr.h`, removed in 3.12+).
@@ -317,9 +318,10 @@ after their syncs run.
 ### Image descriptions — `embed-images`
 
 `uv run embed-images` describes image attachments (mail + Signal + Vigilo)
-with a vision-language model (OpenAI-compatible `/v1/chat/completions`,
-`$VLM_URL` → config `hosts.vlm`; model `$VLM_MODEL` → config `vlm.model` →
-`qwen3.8-flash-next`) and embeds the descriptions into the same `mailvec`
+with a vision-language model (OpenAI-compatible `/v1/chat/completions`; URL
+from trusted `/etc/diary/trusted.toml` `hosts.vlm`, with no `VLM_URL` or local
+override; model `$VLM_MODEL` → config `vlm.model` → `qwen3.8-flash-next`) and
+embeds the descriptions into the same `mailvec`
 store — so receipts are findable by their printed text and photos by what's
 in them, through `search-mail`'s normal path.
 

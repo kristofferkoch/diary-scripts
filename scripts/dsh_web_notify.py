@@ -13,8 +13,8 @@ Works for both web UIs behind Caddy:
 
 The tool polls the unit's journal for the URL printed by the current boot,
 rewrites the loopback authority to the public Caddy/tailnet base
-(``hosts.dsh_web`` / ``hosts.kimi_web`` in config, env overrides
-``DSH_WEB_URL`` / ``KIMI_WEB_URL``), and sends it to the user's own
+(``hosts.dsh_web`` / ``hosts.kimi_web`` in the root-owned
+``/etc/diary/trusted.toml``), and sends it to the user's own
 note-to-self chat via the signal-cli daemon's JSON-RPC socket.
 
 The socket call is a plain JSON-RPC *client* request — it runs no receive

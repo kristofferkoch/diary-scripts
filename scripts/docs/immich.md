@@ -35,11 +35,11 @@ listing is the container-side path (`/data/…`); the library root is
 `UPLOAD_LOCATION` (NFS mount, see diary PHOTOS.md) when you need the
 original.
 
-Auth: API key from `$IMMICH_API_KEY`, else `immich.api_key_cmd` in the
-private config (a `pass` reference, same pattern as `spond.password_cmd`
-— the key is never committed). Create the key in Immich → user avatar →
-Account Settings → API Keys; check **`asset.read`** (search) +
-**`asset.view`** (thumbnails) + **`map.read`** (`--near`) — keep it
-read-only. `asset.download` is only needed if originals must ever be
-fetched via the API (they're normally read over NFS).
-Base URL: `$IMMICH_URL`, else `hosts.immich` in config.
+Auth: API key from `$IMMICH_API_KEY`, else the fixed argv
+`pass show immich/api-key` (the key is never committed). Create the key in
+Immich → user avatar → Account Settings → API Keys; check **`asset.read`**
+(search) + **`asset.view`** (thumbnails) + **`map.read`** (`--near`) — keep it
+read-only. `asset.download` is only needed if originals must ever be fetched
+via the API (they're normally read over NFS).
+Base URL: `hosts.immich` in root-owned `/etc/diary/trusted.toml`; local config
+and `IMMICH_URL` cannot override it.

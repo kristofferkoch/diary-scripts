@@ -1,21 +1,25 @@
-"""Runtime configuration overlay.
+"""Runtime configuration overlays.
 
-This public repo ships *placeholder* defaults inline in the code. Real
-deployment values (hostnames, paths, home coordinates, family names, the
-real important-senders list, …) live in a private TOML file kept outside
-this repo — in the diary workspace, symlinked to the XDG path — so the code
-stays publishable while still running for real.
+This public repo ships *placeholder* defaults inline in the code. Ordinary
+private values (paths, home coordinates, family names, the real
+important-senders list, …) live in a TOML file kept outside this repo — in the
+diary workspace, symlinked to the XDG path — so the code stays publishable
+while still running for real.
 
-Every consumer reads a value with a hardcoded fallback::
+Every ordinary consumer reads a value with a hardcoded fallback::
 
     from mail_reader.config import cfg
     WEATHER_LAT = cfg("weather.lat", 59.913)
 
 so nothing breaks when no config file is present (the public default wins).
 
-File lookup order:
+Ordinary file lookup order:
     1. ``$DIARY_CONFIG``                         (explicit; must exist if set)
     2. ``$XDG_CONFIG_HOME/diary/config.toml``    (default ``~/.config``)
+
+Security-sensitive hosts and privileged collector settings instead come only
+from the fixed, root-owned ``/etc/diary/trusted.toml`` through ``trusted_cfg``.
+That file has no environment override and never falls back to ordinary config.
 
 A malformed TOML file raises (loud failure); a *missing* file in the XDG
 slot is simply "no overrides". An explicitly-set ``$DIARY_CONFIG`` that
@@ -52,8 +56,9 @@ def _data() -> dict[str, Any]:
 
 
 def reload() -> None:
-    """Drop the cached parse + workspace root (used by tests after changing env)."""
+    """Drop cached config and workspace root (used by tests after changing env)."""
     _data.cache_clear()
+    _trusted_data.cache_clear()
     workspace_root.cache_clear()
 
 
@@ -123,54 +128,67 @@ def cfg_path(dotted: str, default: Path) -> Path:
     return p
 
 
-def _host_url(env_var: str, dotted: str, default_hostport: str) -> str:
-    """Build ``http://host:port`` from an env override or a ``hosts.*`` config key.
+TRUSTED_CONFIG_PATH = Path("/etc/diary/trusted.toml")
 
-    The host MUST be sourced from config, not just a hardcoded default. When
-    this code moved to the public ``diary-scripts`` submodule the real hosts
-    were wiped to ``gpu-host`` placeholders; consumers read only their env var
-    (``$OLLAMA_URL`` etc.), so once that var stopped being exported the dead
-    placeholder leaked through, DNS failed, and the 15-min embed pipeline went
-    down silently for hours (2026-06-02). Reading the ``hosts.*`` config key
-    here closes that gap; the env var still wins for ad-hoc overrides.
+
+@lru_cache(maxsize=1)
+def _trusted_data() -> dict[str, Any]:
+    """Load security-sensitive settings from the root-owned system config.
+
+    There is deliberately no environment override or fallback to the ordinary
+    diary config: those are agent-publishable in the attended-agent threat model.
     """
-    return (os.environ.get(env_var)
-            or f"http://{cfg(dotted, default_hostport)}").rstrip("/")
+    if not TRUSTED_CONFIG_PATH.exists():
+        return {}
+    with TRUSTED_CONFIG_PATH.open("rb") as fh:
+        return tomllib.load(fh)
+
+
+def trusted_cfg(dotted: str, default: Any) -> Any:
+    """Return a value from the fixed trusted config, or ``default`` if absent."""
+    node: Any = _trusted_data()
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return default
+        node = node[part]
+    return node
+
+
+def _host_url(dotted: str, default_hostport: str) -> str:
+    """Build ``http://host:port`` from a trusted ``hosts.*`` config key."""
+    return f"http://{trusted_cfg(dotted, default_hostport)}".rstrip("/")
 
 
 def embed_url() -> str:
     """OpenAI-compatible embedding server (llama.cpp ``/v1/embeddings``),
     e.g. ``http://gpu-host:8081``."""
-    return _host_url("EMBED_URL", "hosts.embed", "gpu-host:8081")
+    return _host_url("hosts.embed", "gpu-host:8081")
 
 
 def vlm_url() -> str:
     """Vision-language model server (OpenAI-compatible
     ``/v1/chat/completions`` with image input), e.g. ``http://gpu-host:8080``."""
-    return _host_url("VLM_URL", "hosts.vlm", "gpu-host:8080")
+    return _host_url("hosts.vlm", "gpu-host:8080")
 
 
 def immich_url() -> str:
     """Immich photo server API base, e.g. ``http://server:2283``."""
-    return _host_url("IMMICH_URL", "hosts.immich", "server:2283")
+    return _host_url("hosts.immich", "server:2283")
 
 
 def kimi_web_url() -> str:
     """Public base URL of the kimi web UI (behind the Caddy tailnet proxy),
     e.g. ``https://server:8446``. Full URL incl. scheme."""
-    return (os.environ.get("KIMI_WEB_URL")
-            or cfg("hosts.kimi_web", "https://server:8446")).rstrip("/")
+    return trusted_cfg("hosts.kimi_web", "https://server:8446").rstrip("/")
 
 
 def dsh_web_url() -> str:
     """Public base URL of the dsh web UI (behind the Caddy tailnet proxy),
     e.g. ``https://server:8444``. Full URL incl. scheme, unlike the
     ``host:port`` keys above."""
-    return (os.environ.get("DSH_WEB_URL")
-            or cfg("hosts.dsh_web", "https://server:8444")).rstrip("/")
+    return trusted_cfg("hosts.dsh_web", "https://server:8444").rstrip("/")
 
 
 def mail_web_url() -> str:
     """Public base URL of the authenticated mail UI, without a trailing slash."""
-    return (os.environ.get("MAIL_WEB_URL")
-            or cfg("hosts.tailnet_base", "https://server") + "/mail").rstrip("/")
+    return (trusted_cfg("hosts.tailnet_base", "https://server") + "/mail").rstrip("/")

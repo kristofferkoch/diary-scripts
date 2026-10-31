@@ -23,12 +23,13 @@ and no explicit ``--since`` there is no 24 h default — the whole library
 is searched. When any place mode is active the listing gets a location
 column (city + lat,lon from exif).
 
-Auth: API key from ``$IMMICH_API_KEY``, else ``immich.api_key_cmd`` in
-the private config (a ``pass`` reference — the key itself is never
-committed). The key needs ``asset.read`` (search) + ``asset.view``
-(thumbnails), plus ``map.read`` for ``--near`` — keep it read-only; add
-``asset.download`` only if originals must ever be fetched via the API.
-Base URL: ``$IMMICH_URL``, else ``hosts.immich`` in config. Thumbnails
+Auth: API key from ``$IMMICH_API_KEY``, else the fixed argv
+``pass show immich/api-key`` (the key itself is never committed). The key
+needs ``asset.read`` (search) + ``asset.view`` (thumbnails), plus ``map.read``
+for ``--near`` — keep it read-only; add ``asset.download`` only if originals
+must ever be fetched via the API.
+Base URL: ``hosts.immich`` in the root-owned ``/etc/diary/trusted.toml``.
+Thumbnails
 are written as ``NN-<originalFileName>.jpg`` so names match the listing
 order; ``originalPath`` is the container-side path — the library root is
 ``UPLOAD_LOCATION`` (NFS mount on the photo host, see diary PHOTOS.md).
@@ -45,27 +46,27 @@ from pathlib import Path
 
 import httpx
 
-from mail_reader.config import cfg, immich_url
+from mail_reader.config import immich_url
+
+
+API_KEY_ARGV = ("pass", "show", "immich/api-key")
 
 
 def _api_key() -> str:
     key = os.environ.get("IMMICH_API_KEY")
     if key:
         return key.strip()
-    cmd = cfg("immich.api_key_cmd", None)
-    if cmd:
-        try:
-            out = subprocess.run(
-                cmd, shell=True, check=True, capture_output=True, text=True
-            ).stdout.strip()
-        except subprocess.CalledProcessError:
-            out = ""
-        if out:
-            return out
+    try:
+        out = subprocess.run(
+            API_KEY_ARGV, check=True, capture_output=True, text=True
+        ).stdout.strip()
+    except subprocess.CalledProcessError:
+        out = ""
+    if out:
+        return out
     raise SystemExit(
-        "No Immich API key — set $IMMICH_API_KEY or immich.api_key_cmd "
-        "in the private config (create the key in Immich → user settings "
-        "→ API Keys)."
+        "No Immich API key — set $IMMICH_API_KEY or create the fixed "
+        "pass entry immich/api-key (Immich → user settings → API Keys)."
     )
 
 

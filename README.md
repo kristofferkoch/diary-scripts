@@ -83,14 +83,15 @@ uv run pytest scripts/                       # scripts-only
 
 ## Configuration
 
-Real infra/PII values (hostnames, paths, home coordinates, family names,
-Spond/Vigilo/Skoleplattform member-ids, the important-senders list) live in a
-private `config/local.toml` + `config/important_senders.txt` in the parent
-diary repo, read via `mail_reader.config` (`$DIARY_CONFIG` env var or the
-`~/.config/diary/config.toml` symlink). Placeholder defaults are baked in, so
-everything compiles and the tests pass without any config file present. To adapt
-to your own setup, create a config file and override the relevant keys (mail
-store path, Postgres DSN, LLM server URL, workspace root, etc.).
+Ordinary private values (paths, home coordinates, family names and the
+important-senders list) live in `config/local.toml` +
+`config/important_senders.txt` in the parent diary repo, read via
+`mail_reader.config` (`$DIARY_CONFIG` env var or the
+`~/.config/diary/config.toml` symlink). Security-sensitive hosts and privileged
+collector settings live only in root-owned `/etc/diary/trusted.toml`; host
+helpers have no environment override or local-config fallback. Placeholder
+defaults are baked in, so everything compiles and the tests pass without any
+config file present.
 
 New code that needs the workspace path must call
 `mail_reader.config.workspace_root()` — never walk `__file__`.

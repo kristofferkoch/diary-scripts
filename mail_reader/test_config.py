@@ -84,32 +84,82 @@ def test_cfg_path_default_when_absent(with_config):
     assert config.cfg_path("important_senders", fallback) == fallback
 
 
-def test_host_urls_come_from_config(with_config, monkeypatch: pytest.MonkeyPatch):
-    """Regression for 2026-06-02: the host must be read from `hosts.*`, not a
-    hardcoded `gpu-host` default that silently leaked when $EMBED_URL was unset."""
-    monkeypatch.delenv("EMBED_URL", raising=False)
-    monkeypatch.delenv("VLM_URL", raising=False)
-    with_config(
+@pytest.fixture
+def with_trusted_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Point the fixed trusted-config path at a temp file and reset its cache."""
+    def _write(text: str) -> Path:
+        p = tmp_path / "trusted.toml"
+        p.write_text(text)
+        monkeypatch.setattr(config, "TRUSTED_CONFIG_PATH", p)
+        config.reload()
+        return p
+    yield _write
+    config.reload()
+
+
+def test_host_urls_come_from_trusted_config(with_trusted_config):
+    with_trusted_config(
         """
         [hosts]
         embed = "studio.example:8081"
         vlm = "studio.example:8083"
+        immich = "server.example:2283"
+        tailnet_base = "https://server.example"
+        dsh_web = "https://server.example:8444"
+        kimi_web = "https://server.example:8446"
         """
     )
     assert config.embed_url() == "http://studio.example:8081"
     assert config.vlm_url() == "http://studio.example:8083"
+    assert config.immich_url() == "http://server.example:2283"
+    assert config.mail_web_url() == "https://server.example/mail"
+    assert config.dsh_web_url() == "https://server.example:8444"
+    assert config.kimi_web_url() == "https://server.example:8446"
 
 
-def test_host_url_env_overrides_config(with_config, monkeypatch: pytest.MonkeyPatch):
-    with_config('[hosts]\nembed = "studio.example:8081"\n')
-    monkeypatch.setenv("EMBED_URL", "http://override:9999/")
-    assert config.embed_url() == "http://override:9999"  # env wins, trailing / trimmed
+def test_agent_config_and_env_cannot_redirect_host_urls(
+    with_config, with_trusted_config, monkeypatch: pytest.MonkeyPatch
+):
+    with_config(
+        """
+        [hosts]
+        embed = "attacker.invalid:1"
+        vlm = "attacker.invalid:2"
+        immich = "attacker.invalid:3"
+        tailnet_base = "https://attacker.invalid"
+        dsh_web = "https://attacker.invalid:4"
+        kimi_web = "https://attacker.invalid:5"
+        """
+    )
+    with_trusted_config(
+        """
+        [hosts]
+        embed = "studio.example:8081"
+        vlm = "studio.example:8083"
+        immich = "server.example:2283"
+        tailnet_base = "https://server.example"
+        dsh_web = "https://server.example:8444"
+        kimi_web = "https://server.example:8446"
+        """
+    )
+    for name in ("EMBED_URL", "VLM_URL", "IMMICH_URL", "MAIL_WEB_URL",
+                 "DSH_WEB_URL", "KIMI_WEB_URL"):
+        monkeypatch.setenv(name, "https://attacker.invalid/")
+
+    assert config.embed_url() == "http://studio.example:8081"
+    assert config.vlm_url() == "http://studio.example:8083"
+    assert config.immich_url() == "http://server.example:2283"
+    assert config.mail_web_url() == "https://server.example/mail"
+    assert config.dsh_web_url() == "https://server.example:8444"
+    assert config.kimi_web_url() == "https://server.example:8446"
 
 
-def test_host_url_falls_back_to_placeholder_when_unconfigured(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("EMBED_URL", raising=False)
-    monkeypatch.delenv("DIARY_CONFIG", raising=False)
-    monkeypatch.setenv("XDG_CONFIG_HOME", "/nonexistent-xdg-dir")
+def test_missing_trusted_config_does_not_fall_back_to_agent_config(
+    with_config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    with_config('[hosts]\nembed = "attacker.invalid:9999"\n')
+    monkeypatch.setattr(config, "TRUSTED_CONFIG_PATH", tmp_path / "missing.toml")
+    monkeypatch.setenv("EMBED_URL", "http://attacker.invalid:9999")
     config.reload()
     assert config.embed_url() == "http://gpu-host:8081"
 
