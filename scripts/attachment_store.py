@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -48,27 +49,31 @@ def _relative_path(root: Path, path: str | os.PathLike[str]) -> Path:
     return candidate
 
 
+def _descend(fd: int, component: str, *, create: bool) -> int:
+    _component(component)
+    if create:
+        try:
+            os.mkdir(component, 0o700, dir_fd=fd)
+        except FileExistsError:
+            pass
+    next_fd = os.open(
+        component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd
+    )
+    os.close(fd)
+    return next_fd
+
+
 @contextmanager
 def _directory(
     root: str | os.PathLike[str], parts: tuple[str, ...] = (), *, create: bool = False
 ) -> Iterator[int]:
     root_path = _root_path(root)
-    if create:
-        root_path.mkdir(parents=True, exist_ok=True)
-    fd = os.open(root_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    fd = os.open(root_path.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        for part in parts:
-            _component(part)
-            if create:
-                try:
-                    os.mkdir(part, 0o700, dir_fd=fd)
-                except FileExistsError:
-                    pass
-            next_fd = os.open(
-                part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd
-            )
-            os.close(fd)
-            fd = next_fd
+        for component in root_path.parts[1:]:
+            fd = _descend(fd, component, create=create)
+        for component in parts:
+            fd = _descend(fd, component, create=create)
         yield fd
     finally:
         os.close(fd)
@@ -92,9 +97,19 @@ def find_attachment(
             info = os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
     except FileNotFoundError:
         return None
-    if not stat.S_ISREG(info.st_mode):
-        raise ValueError("attachment is not a regular file")
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise ValueError("attachment is not a singly-linked regular file")
     return path if info.st_size > 0 else None
+
+
+def _write_new_file(directory_fd: int, filename: str, data: bytes) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK
+    fd = os.open(filename, flags, 0o600, dir_fd=directory_fd)
+    with os.fdopen(fd, "wb") as output:
+        info = os.fstat(output.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError("attachment target is not a new regular file")
+        output.write(data)
 
 
 def write_attachment(
@@ -108,13 +123,21 @@ def write_attachment(
     path = attachment_path(root, container_id, filename)
     parts = () if container_id is None else (container_id,)
     with _directory(root, parts, create=True) as directory_fd:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
-        flags |= os.O_TRUNC if overwrite else os.O_EXCL
-        fd = os.open(filename, flags, 0o600, dir_fd=directory_fd)
-        with os.fdopen(fd, "wb") as output:
-            if not stat.S_ISREG(os.fstat(output.fileno()).st_mode):
-                raise ValueError("attachment is not a regular file")
-            output.write(data)
+        if not overwrite:
+            _write_new_file(directory_fd, filename, data)
+            return path
+        temporary = f".attachment-{secrets.token_hex(16)}.tmp"
+        try:
+            _write_new_file(directory_fd, temporary, data)
+            os.replace(
+                temporary, filename,
+                src_dir_fd=directory_fd, dst_dir_fd=directory_fd,
+            )
+        finally:
+            try:
+                os.unlink(temporary, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
     return path
 
 
@@ -123,8 +146,9 @@ def _read_at(directory_fd: int, filename: str, max_bytes: int | None) -> bytes:
         filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd
     )
     with os.fdopen(fd, "rb") as blob:
-        if not stat.S_ISREG(os.fstat(blob.fileno()).st_mode):
-            raise ValueError("attachment is not a regular file")
+        info = os.fstat(blob.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError("attachment is not a singly-linked regular file")
         return blob.read(None if max_bytes is None else max_bytes + 1)
 
 
@@ -151,7 +175,7 @@ def existing_attachment_path(
             )
     except (OSError, ValueError):
         return None
-    if not stat.S_ISREG(info.st_mode):
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
         return None
     return root_path / relative
 

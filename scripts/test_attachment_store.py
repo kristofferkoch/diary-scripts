@@ -1,6 +1,8 @@
 """Security tests for contained attachment reads and writes."""
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from scripts.attachment_store import (
@@ -66,6 +68,44 @@ def test_write_rejects_symlinked_store_root(tmp_path):
     assert not (outside / "message-1").exists()
 
 
+def test_store_rejects_symlinked_ancestor(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(outside, target_is_directory=True)
+    root = linked / "store"
+    with pytest.raises(OSError):
+        write_attachment(root, "message-1", "plan.pdf", b"new")
+    with pytest.raises(OSError):
+        read_attachment(root, "plan.pdf")
+    assert not (outside / "store").exists()
+
+
+def test_ancestor_replacement_race_does_not_redirect_write(tmp_path, monkeypatch):
+    safe = tmp_path / "safe"
+    opened = tmp_path / "opened"
+    outside = tmp_path / "outside"
+    safe.mkdir()
+    outside.mkdir()
+    real_open = os.open
+    swapped = False
+
+    def swap_after_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        fd = real_open(path, flags, *args, **kwargs)
+        if path == "safe" and not swapped:
+            safe.rename(opened)
+            safe.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return fd
+
+    monkeypatch.setattr("scripts.attachment_store.os.open", swap_after_open)
+    write_attachment(safe / "store", "message-1", "plan.pdf", b"new")
+    assert swapped
+    assert not (outside / "store").exists()
+    assert (opened / "store" / "message-1" / "plan.pdf").read_bytes() == b"new"
+
+
 def test_write_rejects_symlinked_container(tmp_path):
     root = tmp_path / "store"
     outside = tmp_path / "outside"
@@ -77,15 +117,65 @@ def test_write_rejects_symlinked_container(tmp_path):
     assert not (outside / "plan.pdf").exists()
 
 
-def test_write_rejects_symlinked_target_without_truncating_it(tmp_path):
+def test_overwrite_replaces_symlink_without_touching_its_target(tmp_path):
     root = tmp_path / "store"
     outside = tmp_path / "outside"
     (root / "message-1").mkdir(parents=True)
     outside.write_bytes(b"original")
-    (root / "message-1" / "plan.pdf").symlink_to(outside)
-    with pytest.raises(OSError):
-        write_attachment(root, "message-1", "plan.pdf", b"new")
+    target = root / "message-1" / "plan.pdf"
+    target.symlink_to(outside)
+    path = write_attachment(root, "message-1", "plan.pdf", b"new")
+    assert path == target
+    assert not target.is_symlink()
+    assert target.read_bytes() == b"new"
     assert outside.read_bytes() == b"original"
+
+
+def test_overwrite_detaches_hard_link_without_touching_external_inode(tmp_path):
+    root = tmp_path / "store"
+    outside = tmp_path / "outside"
+    (root / "message-1").mkdir(parents=True)
+    outside.write_bytes(b"original")
+    target = root / "message-1" / "plan.pdf"
+    os.link(outside, target)
+    assert outside.stat().st_nlink == 2
+    write_attachment(root, "message-1", "plan.pdf", b"new")
+    assert outside.read_bytes() == b"original"
+    assert outside.stat().st_nlink == 1
+    assert target.read_bytes() == b"new"
+    assert target.stat().st_nlink == 1
+    assert target.stat().st_ino != outside.stat().st_ino
+
+
+def test_target_swap_before_replace_cannot_redirect_write(tmp_path, monkeypatch):
+    root = tmp_path / "store"
+    outside = tmp_path / "outside"
+    (root / "message-1").mkdir(parents=True)
+    outside.write_bytes(b"original")
+    target = root / "message-1" / "plan.pdf"
+    target.write_bytes(b"old")
+    assert find_attachment(root, "message-1", "plan.pdf") == target
+    real_replace = os.replace
+
+    def swap_then_replace(source, destination, **kwargs):
+        target.unlink()
+        target.symlink_to(outside)
+        return real_replace(source, destination, **kwargs)
+
+    monkeypatch.setattr("scripts.attachment_store.os.replace", swap_then_replace)
+    write_attachment(root, "message-1", "plan.pdf", b"new")
+    assert outside.read_bytes() == b"original"
+    assert not target.is_symlink()
+    assert target.read_bytes() == b"new"
+    assert list(target.parent.glob(".attachment-*.tmp")) == []
+
+
+def test_no_overwrite_preserves_exclusive_creation(tmp_path):
+    root = tmp_path / "store"
+    target = write_attachment(root, None, "plan.pdf", b"original")
+    with pytest.raises(FileExistsError):
+        write_attachment(root, None, "plan.pdf", b"new", overwrite=False)
+    assert target.read_bytes() == b"original"
 
 
 def test_no_overwrite_does_not_follow_a_symlink_collision(tmp_path):
@@ -125,6 +215,25 @@ def test_recorded_path_rejects_escape_and_symlinks(tmp_path):
         with pytest.raises((OSError, ValueError)):
             read_attachment_path(root, path)
         assert existing_attachment_path(root, path) is None
+
+
+def test_read_and_existence_checks_reject_hard_links(tmp_path):
+    root = tmp_path / "store"
+    outside = tmp_path / "outside"
+    (root / "message-1").mkdir(parents=True)
+    outside.write_bytes(b"secret")
+    flat = root / "blob"
+    nested = root / "message-1" / "plan.pdf"
+    os.link(outside, flat)
+    os.link(outside, nested)
+    with pytest.raises(ValueError):
+        read_attachment(root, "blob")
+    with pytest.raises(ValueError):
+        read_attachment_path(root, nested)
+    with pytest.raises(ValueError):
+        find_attachment(root, "message-1", "plan.pdf")
+    assert existing_attachment_path(root, nested) is None
+    assert outside.read_bytes() == b"secret"
 
 
 def test_read_size_cap(tmp_path):
