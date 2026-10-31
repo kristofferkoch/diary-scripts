@@ -21,9 +21,12 @@ trusted API clients, including `kek`, have no direct native journal access.
 The installer removes every supplemental member from the daemon-only group and
 makes removal failures fatal. Because account-database changes do not alter
 existing process credentials, it also checks `/proc` before changing sockets.
-If any non-root process still holds `diary-audit-journal`, installation stops
-and names the PID/UID. The owner must stop or restart only those services in a
-controlled window and rerun the installer; it never kills unrelated services.
+If any process with nonzero effective UID still holds
+`diary-audit-journal` as its effective primary or supplementary group,
+installation stops and names the PID/effective UID. This also catches processes
+with real UID 0 that dropped to a nonzero effective UID. The owner must stop or
+restart only those services in a controlled window and rerun the installer; it
+never kills unrelated services.
 The API additionally checks account identity on every connection, so retained
 client-group credentials cannot make `agent` or `diary-pipeline` trusted.
 

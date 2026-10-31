@@ -398,12 +398,43 @@ def test_running_process_retaining_private_journal_group_blocks_revocation(tmp_p
         directory = proc / str(pid)
         directory.mkdir(parents=True)
         (directory / "status").write_text(
-            f"Name:\texample\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\nGroups:\t{groups}\n",
+            f"Name:\texample\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n"
+            f"Gid:\t{uid}\t{uid}\t{uid}\t{uid}\nGroups:\t{groups}\n",
             encoding="ascii",
         )
     with patch.object(audit.grp, "getgrnam", return_value=SimpleNamespace(gr_gid=900)):
         conflicts = audit.journal_group_conflicts("diary-audit-journal", str(proc))
     assert conflicts == [(101, 1001)]
+
+
+def test_effective_primary_private_gid_blocks_revocation(tmp_path: Path) -> None:
+    process = tmp_path / "proc" / "104"
+    process.mkdir(parents=True)
+    (process / "status").write_text(
+        "Name:\texample\n"
+        "Uid:\t1001\t1001\t1001\t1001\n"
+        "Gid:\t901\t900\t901\t901\n"
+        "Groups:\t901 1001\n",
+        encoding="ascii",
+    )
+    with patch.object(audit.grp, "getgrnam", return_value=SimpleNamespace(gr_gid=900)):
+        conflicts = audit.journal_group_conflicts("diary-audit-journal", str(tmp_path / "proc"))
+    assert conflicts == [(104, 1001)]
+
+
+def test_real_root_effective_nonroot_retaining_group_blocks_revocation(tmp_path: Path) -> None:
+    process = tmp_path / "proc" / "105"
+    process.mkdir(parents=True)
+    (process / "status").write_text(
+        "Name:\texample\n"
+        "Uid:\t0\t1001\t0\t0\n"
+        "Gid:\t0\t1001\t0\t0\n"
+        "Groups:\t0 900\n",
+        encoding="ascii",
+    )
+    with patch.object(audit.grp, "getgrnam", return_value=SimpleNamespace(gr_gid=900)):
+        conflicts = audit.journal_group_conflicts("diary-audit-journal", str(tmp_path / "proc"))
+    assert conflicts == [(105, 1001)]
 
 
 def test_process_revocation_check_fails_closed_on_unreadable_identity(tmp_path: Path) -> None:

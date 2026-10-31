@@ -215,13 +215,15 @@ def journal_group_conflicts(group_name: str = DEFAULT_JOURNAL_GROUP, proc_root: 
         try:
             lines = raw.decode("ascii").splitlines()
             uid_line = next(line for line in lines if line.startswith("Uid:"))
+            gid_line = next(line for line in lines if line.startswith("Gid:"))
             groups_line = next(line for line in lines if line.startswith("Groups:"))
-            uid = int(uid_line.split()[1])
+            effective_uid = int(uid_line.split()[2])
+            effective_gid = int(gid_line.split()[2])
             groups = {int(value) for value in groups_line.split()[1:]}
         except (StopIteration, ValueError, IndexError, UnicodeDecodeError) as exc:
             raise AuditError(f"unreadable process identity for PID {process.name}") from exc
-        if uid != 0 and gid in groups:
-            conflicts.append((int(process.name), uid))
+        if effective_uid != 0 and (effective_gid == gid or gid in groups):
+            conflicts.append((int(process.name), effective_uid))
     return sorted(conflicts)
 
 
