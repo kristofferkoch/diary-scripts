@@ -410,6 +410,46 @@ def test_dry_run_touches_nothing(serve, workspace):
     assert not workspace["state"].exists()
 
 
+class _AttachmentApi(SkolemeldingApi):
+    def __init__(self):
+        pass
+
+    def attachment(self, path: str, *, max_bytes: int = 1) -> tuple[bytes, str]:
+        return b"new", "application/pdf"
+
+
+@pytest.mark.parametrize("mid", ["../outside", "/absolute", ".", ".."])
+def test_attachment_container_ids_are_rejected_before_download(workspace, mid):
+    failed, paths = ss._download_attachments(_AttachmentApi(), mid, [ATT_PATH])
+    assert failed == ["skjema.pdf"]
+    assert paths == {}
+    assert not (workspace["root"] / "outside").exists()
+
+
+def test_attachment_container_symlink_is_not_followed(workspace):
+    store = workspace["jsonl"] / "attachments"
+    outside = workspace["root"] / "outside"
+    store.mkdir()
+    outside.mkdir()
+    (store / "safe").symlink_to(outside, target_is_directory=True)
+    failed, paths = ss._download_attachments(_AttachmentApi(), "safe", [ATT_PATH])
+    assert failed == ["skjema.pdf"]
+    assert paths == {}
+    assert not (outside / "skjema.pdf").exists()
+
+
+def test_attachment_target_symlink_is_not_overwritten(workspace):
+    store = workspace["jsonl"] / "attachments"
+    outside = workspace["root"] / "outside"
+    (store / "safe").mkdir(parents=True)
+    outside.write_bytes(b"original")
+    (store / "safe" / "skjema.pdf").symlink_to(outside)
+    failed, paths = ss._download_attachments(_AttachmentApi(), "safe", [ATT_PATH])
+    assert failed == ["skjema.pdf"]
+    assert paths == {}
+    assert outside.read_bytes() == b"original"
+
+
 # --- Small helpers ----------------------------------------------------------
 
 

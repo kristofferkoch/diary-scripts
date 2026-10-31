@@ -68,7 +68,6 @@ from scripts.embed_mail import (
     vec_literal,
 )
 from scripts.embed_messages import BUILDERS, SIGNAL_ATTACH_DIR, iter_records
-from scripts.vigiloshown import local_attachment_path
 
 PG_DSN = os.environ.get("PG_DSN", "dbname=mailvec")
 VLM = vlm_url()  # $VLM_URL → config hosts.vlm (see config.vlm_url)
@@ -225,9 +224,11 @@ def _record_index(source: str) -> dict[str, dict[str, Any]]:
     return index
 
 
-def signal_blob(rec: dict[str, Any], filename: str, size: int) -> Path | None:
+def signal_blob(rec: dict[str, Any], filename: str, size: int) -> bytes | None:
     """The signal-cli blob for a record's attachment matching
-    (filename, size), or None when it isn't on disk."""
+    (filename, size), or None when it isn't safely readable."""
+    from scripts.attachment_store import read_attachment
+
     for a in rec.get("attachments") or []:
         if not isinstance(a, dict):
             continue
@@ -235,18 +236,21 @@ def signal_blob(rec: dict[str, Any], filename: str, size: int) -> Path | None:
             continue
         if int(a.get("size") or 0) != size:
             continue
-        if not a.get("id"):
+        try:
+            return read_attachment(SIGNAL_ATTACH_DIR, a.get("id"))
+        except (OSError, ValueError):
             return None
-        p = SIGNAL_ATTACH_DIR / str(a["id"])
-        return p if p.exists() else None
     return None
 
 
-def vigilo_blob(rec: dict[str, Any], filename: str, mime: str) -> Path | None:
+def vigilo_blob(rec: dict[str, Any], filename: str, mime: str) -> bytes | None:
     """The local file vigilo-sync recorded for a matching attachment
     (message attachments live under `data.messages[*].attachments`, news
     under `data.attachments` — the latter have no local copy and resolve
     to None)."""
+    from scripts import vigiloshown as vw
+    from scripts.attachment_store import read_attachment_path
+
     data = rec.get("data") or {}
     atts: list[Any] = []
     for m in data.get("messages") or []:
@@ -260,7 +264,13 @@ def vigilo_blob(rec: dict[str, Any], filename: str, mime: str) -> Path | None:
             continue
         if str(a.get("mimeType") or "application/octet-stream") != mime:
             continue
-        return local_attachment_path(a)
+        raw = a.get("path")
+        if not raw:
+            return None
+        try:
+            return read_attachment_path(vw.ATTACH_DIR, str(raw))
+        except (OSError, ValueError):
+            return None
     return None
 
 
@@ -282,16 +292,14 @@ def resolve_blob(conn: psycopg.Connection, row: PendingRow,
     if rec is None:
         return None
     if row["source"] == "signal":
-        p = signal_blob(rec, row["filename"], row["size"])
-    else:
-        # Vigilo news attachments are metadata-only by design — embed_messages
-        # stores no blob and they download over the API at show time, so a
-        # local copy will never appear.
-        if rec.get("kind") == "news":
-            raise NoLocalBlob(
-                f"vigilo news attachment {row['filename']!r} has no local copy")
-        p = vigilo_blob(rec, row["filename"], row["mime"])
-    return p.read_bytes() if p is not None else None
+        return signal_blob(rec, row["filename"], row["size"])
+    # Vigilo news attachments are metadata-only by design — embed_messages
+    # stores no blob and they download over the API at show time, so a
+    # local copy will never appear.
+    if rec.get("kind") == "news":
+        raise NoLocalBlob(
+            f"vigilo news attachment {row['filename']!r} has no local copy")
+    return vigilo_blob(rec, row["filename"], row["mime"])
 
 
 # ---------- image preprocessing ----------

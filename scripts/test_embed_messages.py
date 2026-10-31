@@ -5,6 +5,7 @@ import contextlib
 from typing import Any, cast
 
 import psycopg
+import pytest
 
 from scripts.embed_mail import AttachmentPayload
 from scripts.embed_messages import (
@@ -111,6 +112,32 @@ class TestSignalPayload:
         p = _must(signal_payload(_signal_rec(attachments=[
             {"contentType": "application/pdf", "filename": "doc.pdf",
              "size": 99, "id": "gone"}])))
+        assert p["attachments"][0]["text_chars"] == 0
+        assert p["attachments"][0]["chunks"] == []
+
+    @pytest.mark.parametrize("attachment_id", ["../outside", "/absolute", ".", ".."])
+    def test_unsafe_attachment_id_is_metadata_only(
+            self, tmp_path, monkeypatch, attachment_id):
+        store = tmp_path / "store"
+        store.mkdir()
+        (tmp_path / "outside").write_text("secret")
+        monkeypatch.setattr("scripts.embed_messages.SIGNAL_ATTACH_DIR", store)
+        p = _must(signal_payload(_signal_rec(attachments=[
+            {"contentType": "text/plain", "filename": "doc.txt",
+             "size": 6, "id": attachment_id}])))
+        assert p["attachments"][0]["text_chars"] == 0
+        assert p["attachments"][0]["chunks"] == []
+
+    def test_symlinked_attachment_is_metadata_only(self, tmp_path, monkeypatch):
+        store = tmp_path / "store"
+        store.mkdir()
+        outside = tmp_path / "outside"
+        outside.write_text("secret")
+        (store / "blob").symlink_to(outside)
+        monkeypatch.setattr("scripts.embed_messages.SIGNAL_ATTACH_DIR", store)
+        p = _must(signal_payload(_signal_rec(attachments=[
+            {"contentType": "text/plain", "filename": "doc.txt",
+             "size": 6, "id": "blob"}])))
         assert p["attachments"][0]["text_chars"] == 0
         assert p["attachments"][0]["chunks"] == []
 
@@ -249,7 +276,8 @@ class TestVigiloPayload:
         assert updated["mid"] == original["mid"]
         assert updated["content_hash"] != original["content_hash"]
 
-    def test_thread_attachment_extracted_from_recorded_path(self, tmp_path):
+    def test_thread_attachment_extracted_from_recorded_path(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("scripts.vigiloshown.ATTACH_DIR", tmp_path / "attachments")
         blob = tmp_path / "attachments" / "t1" / "Uke_42.txt"
         blob.parent.mkdir(parents=True)
         blob.write_text("weekly plan for week 42")
@@ -346,7 +374,8 @@ class TestSkolemeldingPayload:
         assert updated["mid"] == original["mid"]
         assert updated["content_hash"] != original["content_hash"]
 
-    def test_attachment_extracted_from_recorded_path(self, tmp_path):
+    def test_attachment_extracted_from_recorded_path(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("scripts.skolemeldingshow.ATTACH_DIR", tmp_path / "attachments")
         blob = tmp_path / "attachments" / "12345678" / "Uke_42.txt"
         blob.parent.mkdir(parents=True)
         blob.write_text("weekly plan for week 42")

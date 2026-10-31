@@ -44,6 +44,7 @@ needed.
 ## Install
 
 ```bash
+sudo-ask 'install -o root -g root -m 0644 /home/kek/diary/diary-scripts/scripts/attachment_store.py /usr/local/bin/attachment_store.py'
 sudo-ask 'install -o root -g root -m 0755 /home/kek/diary/diary-scripts/scripts/signal_notify_proxy.py /usr/local/bin/signal-notify-proxy'
 sudo-ask 'install -m 0644 /home/kek/diary/signal/signal-notify.service /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now signal-notify'
 ```
@@ -66,7 +67,7 @@ keep using the **raw** socket — it is the receiver.
 ## Tests
 
 ```bash
-uv run --project diary-scripts pytest scripts/test_signal_notify_proxy.py scripts/test_signal_attachment.py
+uv run --project diary-scripts pytest scripts/test_attachment_store.py scripts/test_signal_notify_proxy.py scripts/test_signal_attachment.py
 ```
 
 Covers send validation, attachment traversal and symlink rejection, an

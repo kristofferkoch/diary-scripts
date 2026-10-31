@@ -80,7 +80,7 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path
     state = tmp_path / "vigilo-state.json"
     monkeypatch.setattr(vw, "STATE_PATH", state)
     monkeypatch.setattr(vw, "JSONL_DIR", jsonl)
-    monkeypatch.setattr(vw, "ATTACH_DIR", jsonl / "attachments")
+    monkeypatch.setattr(vw, "ATTACH_DIR", tmp_path)
     return {"jsonl": jsonl, "state": state, "root": tmp_path}
 
 
@@ -208,6 +208,19 @@ def test_missing_attachment_is_said_not_invented(workspace: dict[str, Path]):
                                        "path": str(workspace["root"] / "nope.pdf")}])
     out = "\n".join(vw.render_full(rec, with_attachments=True, api=None))
     assert "ikke lastet ned" in out
+
+
+def test_attachment_paths_cannot_escape_the_store(workspace: dict[str, Path]):
+    outside = workspace["root"].parent / "outside"
+    outside.write_text("secret")
+    linked = workspace["root"] / "linked"
+    linked.symlink_to(outside)
+    for path in (outside, linked, "../outside"):
+        rec = message_record(attachments=[{
+            "name": "secret.txt", "mimeType": "text/plain", "path": str(path)}])
+        out = "\n".join(vw.render_full(rec, with_attachments=True, api=None))
+        assert "ikke lastet ned" in out
+        assert "secret\n" not in out
 
 
 def test_downloaded_attachment_path_is_shown(workspace: dict[str, Path]):

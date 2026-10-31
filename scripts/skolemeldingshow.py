@@ -195,8 +195,16 @@ def local_attachment_path(att: dict[str, Any]) -> Path | None:
     raw = att.get("path")
     if not raw:
         return None
-    path = Path(str(raw))
-    return path if path.exists() else None
+    from scripts.attachment_store import existing_attachment_path
+    try:
+        return existing_attachment_path(ATTACH_DIR, str(raw))
+    except (OSError, ValueError):
+        return None
+
+
+def local_attachment_bytes(att: dict[str, Any]) -> bytes:
+    from scripts.attachment_store import read_attachment_path
+    return read_attachment_path(ATTACH_DIR, str(att.get("path") or ""))
 
 
 # --- Rendering ---------------------------------------------------------------
@@ -265,9 +273,9 @@ def render_full(rec: dict[str, Any], *, with_attachments: bool) -> list[str]:
             continue
         try:
             out.append(render_attachment_text(
-                path.read_bytes(), str(att.get("mimeType") or ""),
+                local_attachment_bytes(att), str(att.get("mimeType") or ""),
                 str(att.get("name") or "")))
-        except OSError as e:
+        except (OSError, ValueError) as e:
             out.append(f"    !! kunne ikke lese fila: {e}")
     if data.get("note"):
         out.append(f"  !! {data['note']}")
