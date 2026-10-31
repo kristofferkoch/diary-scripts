@@ -21,7 +21,7 @@ Do not use `~/diary-scripts-worktrees`: the web agents' systemd confinement make
 
     git -C ~/diary-worktrees/<slug> update-index --cacheinfo "160000,<sha>,diary-scripts"
 
-Full policy (branch naming, review-before-merge, publication + cleanup): `~/diary/AGENTS.md` §Worktrees. The merge service removes source worktrees and deletes their branches after queueing or publication. After approval here, bump the submodule pointer on the diary side — and always push **this repo before** pushing diary, so the pointer never dangles.
+Full policy (branch naming, review-before-merge, publication + cleanup): `~/diary/AGENTS.md` §Worktrees. `agent-merge-request` performs the source clean precheck, resolves the full expected OID, creates a bundle, and removes the bundle, source worktree, and source branch after success. The kek service reads only the bundle and never runs Git in agent sources. After approval here, bump the submodule pointer on the diary side — and always push **this repo before** pushing diary, so the pointer never dangles.
 
 ## Red lines
 

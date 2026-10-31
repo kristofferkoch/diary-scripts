@@ -2,7 +2,7 @@
 """Human-approved publication queues for code and private-workspace changes.
 
 Only regular-file memory changes may publish unattended. Other requests fetch
-agent source branches into an isolated ``queue/automatic`` repository. Only
+agent-created bundles into an isolated ``queue/automatic`` repository. Only
 ``agent-merge-approve`` from the account owner's UID, naming the exact reviewed
 commit OID, may merge that commit into the approved repository and push
 ``master``.
@@ -16,12 +16,15 @@ from __future__ import annotations
 import argparse
 import fcntl
 import os
+import pwd
 import re
 import shlex
 import socket
+import stat
 import struct
 import subprocess
 import sys
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +36,11 @@ BRANCH_RE = re.compile(r"^(dev|mem)/[a-z0-9][a-z0-9-]*$")
 OID_RE = re.compile(r"^[0-9a-f]{40}$")
 LOCK_PATH = Path("/var/lib/agent-merge/queue.lock")
 SOCKET_PATH = Path("/run/agent-merge/socket")
+AGENT_WORKTREE_ROOT = Path("/home/kek/diary-worktrees")
+AGENT_SOURCES = {
+    "diary": AGENT_WORKTREE_ROOT / "_sources" / "diary",
+    "scripts": AGENT_WORKTREE_ROOT / "_sources" / "diary-scripts",
+}
 
 
 class QueueError(RuntimeError):
@@ -46,7 +54,6 @@ class ReviewRequired(QueueError):
 @dataclass(frozen=True)
 class QueuePaths:
     integration: Path
-    source: Path
     approved: Path
     queue: Path
     worktrees: Path
@@ -55,49 +62,39 @@ class QueuePaths:
 
 def default_paths() -> QueuePaths:
     integration = os.environ.get("AGENT_MERGE_INTEGRATION_ROOT")
-    source = os.environ.get("AGENT_MERGE_SOURCE_ROOT")
     approved = os.environ.get("AGENT_MERGE_APPROVED_ROOT")
     queue = os.environ.get("AGENT_MERGE_QUEUE_ROOT")
     worktrees = os.environ.get("AGENT_MERGE_WORKTREE_ROOT")
-    if integration and source and approved and queue and worktrees:
-        return QueuePaths(
-            Path(integration), Path(source), Path(approved), Path(queue), Path(worktrees)
-        )
+    if integration and approved and queue and worktrees:
+        return QueuePaths(Path(integration), Path(approved), Path(queue), Path(worktrees))
 
     from mail_reader.config import workspace_root
 
     workspace = workspace_root()
-    worktrees = workspace.parent / "diary-worktrees"
     return QueuePaths(
         integration=workspace / "diary-scripts",
-        source=worktrees / "_sources" / "diary-scripts",
         approved=workspace.parent / "diary-scripts-approved",
         queue=workspace.parent / "diary-scripts-automatic",
-        worktrees=worktrees,
+        worktrees=workspace.parent / "diary-worktrees",
     )
 
 
 def diary_paths() -> QueuePaths:
     integration = os.environ.get("AGENT_MERGE_DIARY_INTEGRATION_ROOT")
-    source = os.environ.get("AGENT_MERGE_DIARY_SOURCE_ROOT")
     approved = os.environ.get("AGENT_MERGE_DIARY_APPROVED_ROOT")
     queue = os.environ.get("AGENT_MERGE_DIARY_QUEUE_ROOT")
     worktrees = os.environ.get("AGENT_MERGE_DIARY_WORKTREE_ROOT")
-    if integration and source and approved and queue and worktrees:
-        return QueuePaths(
-            Path(integration), Path(source), Path(approved), Path(queue), Path(worktrees)
-        )
+    if integration and approved and queue and worktrees:
+        return QueuePaths(Path(integration), Path(approved), Path(queue), Path(worktrees))
 
     from mail_reader.config import workspace_root
 
     workspace = workspace_root()
-    worktrees = workspace.parent / "diary-worktrees"
     return QueuePaths(
         integration=workspace,
-        source=worktrees / "_sources" / "diary",
         approved=workspace.parent / "diary-approved",
         queue=workspace.parent / "diary-automatic",
-        worktrees=worktrees,
+        worktrees=workspace.parent / "diary-worktrees",
     )
 
 
@@ -188,37 +185,85 @@ def ensure_queue(paths: QueuePaths) -> None:
         raise QueueError(f"queue checkout has uncommitted changes: {paths.queue}")
 
 
-def remove_source(paths: QueuePaths, branch: str, source: Path) -> None:
-    git(paths.source, "worktree", "remove", "--force", str(source), safe=True)
-    # The branch is merged into the queue, not necessarily into approved master.
-    git(paths.source, "branch", "-D", branch, safe=True)
-
-
-def source_worktree(paths: QueuePaths, branch: str) -> Path:
+def bundle_path(worktrees: Path, repo: str, branch: str, expected: str) -> Path:
+    if repo not in AGENT_SOURCES:
+        raise QueueError(f"unknown repository {repo}")
     if not BRANCH_RE.fullmatch(branch):
         raise QueueError("expected branch dev/<slug> or mem/<slug>")
-    source = worktree_branch(paths.source, branch)
+    if not OID_RE.fullmatch(expected):
+        raise QueueError("a full expected commit OID is required")
+    sanitized = branch.replace("/", "-")
+    return worktrees / "_bundles" / repo / f"{sanitized}-{expected}.bundle"
+
+
+def agent_source_worktree(source_repo: Path, worktrees: Path, branch: str) -> Path:
+    if not BRANCH_RE.fullmatch(branch):
+        raise QueueError("expected branch dev/<slug> or mem/<slug>")
+    source = worktree_branch(source_repo, branch)
     if source is None:
         raise QueueError(f"{branch} is not checked out in a worktree")
     try:
-        source.relative_to(paths.worktrees)
+        source.relative_to(worktrees)
     except ValueError as exc:
-        raise QueueError(f"source worktree is outside {paths.worktrees}: {source}") from exc
+        raise QueueError(f"source worktree is outside {worktrees}: {source}") from exc
     if not clean(source, safe=True):
         raise QueueError(f"source worktree has uncommitted changes: {source}")
     return source
 
 
-def queue_change(branch: str, paths: QueuePaths, *, repo: str = "scripts") -> bool:
-    """Copy and merge one agent branch into the isolated queue. Never push."""
-    source = source_worktree(paths, branch)
+def create_agent_bundle(
+    source_repo: Path, worktrees: Path, repo: str, branch: str
+) -> tuple[Path, str, Path]:
+    source = agent_source_worktree(source_repo, worktrees, branch)
+    expected = git(source, "rev-parse", "--verify", "HEAD^{commit}", safe=True).stdout.strip()
+    branch_head = git(
+        source_repo, "rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}", safe=True
+    ).stdout.strip()
+    if expected != branch_head or not OID_RE.fullmatch(expected):
+        raise QueueError("source worktree HEAD does not match its branch")
+    bundle = bundle_path(worktrees, repo, branch, expected)
+    bundle.parent.mkdir(mode=0o775, parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=bundle.name + ".", dir=bundle.parent)
+    os.close(fd)
+    temporary_path = Path(temporary)
+    temporary_path.unlink()
+    try:
+        git(source_repo, "bundle", "create", str(temporary_path), f"refs/heads/{branch}", safe=True)
+        os.replace(temporary_path, bundle)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+    return source, expected, bundle
+
+
+def cleanup_agent_source(source_repo: Path, branch: str, source: Path) -> None:
+    git(source_repo, "worktree", "remove", "--force", str(source), safe=True)
+    git(source_repo, "branch", "-D", branch, safe=True)
+
+
+def fetch_expected(
+    destination: Path, paths: QueuePaths, repo: str, branch: str, expected: str
+) -> str:
+    bundle = bundle_path(paths.worktrees, repo, branch, expected)
+    try:
+        mode = bundle.lstat().st_mode
+    except OSError as exc:
+        raise QueueError(f"expected bundle is unavailable: {bundle}") from exc
+    if not stat.S_ISREG(mode):
+        raise QueueError(f"expected bundle is not a regular file: {bundle}")
+    git(destination, "fetch", "--no-tags", str(bundle), f"refs/heads/{branch}")
+    fetched = git(destination, "rev-parse", "FETCH_HEAD").stdout.strip()
+    if fetched != expected:
+        raise QueueError(f"fetched commit {fetched} does not match expected {expected}")
+    return fetched
+
+
+def queue_change(branch: str, expected: str, paths: QueuePaths, *, repo: str = "scripts") -> bool:
+    """Merge one expected agent bundle into the isolated queue. Never push."""
     with queue_lock(paths):
         ensure_queue(paths)
-        git(paths.queue, "fetch", "--no-tags", str(paths.source), branch)
-        fetched = git(paths.queue, "rev-parse", "FETCH_HEAD").stdout.strip()
+        fetched = fetch_expected(paths.queue, paths, repo, branch, expected)
         if git(paths.queue, "merge-base", "--is-ancestor", fetched, QUEUE_BRANCH, check=False).returncode == 0:
             print(f"agent-merge: {branch} is already queued")
-            remove_source(paths, branch, source)
             return False
 
         base = git(paths.queue, "rev-parse", "--short", "HEAD").stdout.strip()
@@ -236,7 +281,6 @@ def queue_change(branch: str, paths: QueuePaths, *, repo: str = "scripts") -> bo
         print(f"agent-merge: queued {branch} -> {new}; approved master is unchanged")
         print(f"review: git -C {shlex.quote(str(paths.queue))} diff master...{new}")
         print(f"approve: agent-merge-approve {repo} {new}")
-        remove_source(paths, branch, source)
         return True
 
 
@@ -363,24 +407,22 @@ def diary_review_required(repo: Path, reviewed: str) -> list[str]:
     return sensitive
 
 
-def publish_diary_unattended(branch: str, paths: QueuePaths, *, push: bool = True) -> bool:
-    """Publish only regular-file memory changes; never trust source master."""
-    source = source_worktree(paths, branch)
+def publish_diary_unattended(
+    branch: str, expected: str, paths: QueuePaths, *, push: bool = True
+) -> bool:
+    """Publish only regular-file memory changes from the expected bundle."""
     with queue_lock(paths):
-        git(paths.approved, "fetch", "--no-tags", str(paths.source), branch)
-        fetched = git(paths.approved, "rev-parse", "FETCH_HEAD").stdout.strip()
+        fetched = fetch_expected(paths.approved, paths, "diary", branch, expected)
         sensitive = diary_review_required(paths.approved, fetched)
         if sensitive:
             raise ReviewRequired("owner review required for: " + ", ".join(sensitive))
-        changed = publish_fetched(
+        return publish_fetched(
             fetched,
             paths,
             push=push,
             sync_environment=False,
             synchronize_queue=False,
         )
-        remove_source(paths, branch, source)
-        return changed
 
 
 def request(payload: str, socket_path: Path = SOCKET_PATH, timeout: float = 300.0) -> str:
@@ -396,6 +438,42 @@ def request(payload: str, socket_path: Path = SOCKET_PATH, timeout: float = 300.
     finally:
         sock.close()
     return b"".join(chunks).decode(errors="replace")
+
+
+def agent_request(repo: str, branch: str) -> int:
+    try:
+        is_agent = pwd.getpwuid(os.geteuid()).pw_name == "agent"
+    except KeyError:
+        is_agent = False
+    if not is_agent:
+        print("agent-merge-request: source operations require the agent UID", file=sys.stderr)
+        return 1
+
+    source: Path | None = None
+    bundle: Path | None = None
+    result = 1
+    try:
+        source_repo = AGENT_SOURCES[repo]
+        source, expected, bundle = create_agent_bundle(
+            source_repo, AGENT_WORKTREE_ROOT, repo, branch
+        )
+        output = request(f"{repo} {branch} {expected}")
+        print(output, end="")
+        results = [line for line in output.splitlines() if line.startswith("RESULT ")]
+        if results and results[-1].startswith("RESULT ok"):
+            cleanup_agent_source(source_repo, branch, source)
+            result = 0
+    except KeyError:
+        print(f"agent-merge-request: unknown repository {repo}", file=sys.stderr)
+    except (QueueError, OSError) as exc:
+        print(f"agent-merge-request: {exc}", file=sys.stderr)
+    if bundle is not None:
+        try:
+            bundle.unlink(missing_ok=True)
+        except OSError as exc:
+            print(f"agent-merge-request: could not remove bundle {bundle}: {exc}", file=sys.stderr)
+            result = 1
+    return result
 
 
 def approve_main(argv: list[str] | None = None) -> int:
@@ -433,26 +511,33 @@ def peer_uid(fd: int) -> int:
 def queue_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Operate the reviewed publication queues.")
     sub = parser.add_subparsers(dest="command", required=True)
-    queued = sub.add_parser("queue", help="merge an agent branch without publishing")
+    queued = sub.add_parser("queue", help="merge an expected agent bundle without publishing")
     queued.add_argument("--repo", choices=("scripts", "diary"), default="scripts")
     queued.add_argument("branch")
+    queued.add_argument("expected")
     approved = sub.add_parser("approve", help="publish one reviewed queue OID for the service UID only")
     approved.add_argument("--repo", choices=("scripts", "diary"), default="scripts")
     approved.add_argument("reviewed")
     approved.add_argument("--peer-fd", type=int, required=True)
     unattended = sub.add_parser("publish-diary", help="publish only regular-file memory changes")
     unattended.add_argument("branch")
+    unattended.add_argument("expected")
     client = sub.add_parser("client", help="request approval as the account owner")
     client.add_argument("--repo", choices=("scripts", "diary"), default="scripts")
     client.add_argument("reviewed")
+    agent = sub.add_parser("request", help="bundle and request one source branch as the agent")
+    agent.add_argument("repo", choices=("scripts", "diary"))
+    agent.add_argument("branch")
     args = parser.parse_args(argv)
     if args.command == "client":
         return approve_main(["--repo", args.repo, args.reviewed])
+    if args.command == "request":
+        return agent_request(args.repo, args.branch)
     try:
         if args.command == "queue":
-            queue_change(args.branch, paths_for(args.repo), repo=args.repo)
+            queue_change(args.branch, args.expected, paths_for(args.repo), repo=args.repo)
         elif args.command == "publish-diary":
-            publish_diary_unattended(args.branch, diary_paths())
+            publish_diary_unattended(args.branch, args.expected, diary_paths())
         else:
             if peer_uid(args.peer_fd) != os.geteuid():
                 raise QueueError("approval requires the account owner's UID")

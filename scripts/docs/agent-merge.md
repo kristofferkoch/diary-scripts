@@ -11,36 +11,47 @@ denylist.
 
 ```
 agent source clone + worktree
-        │ pinned branch fetch
+        │ agent UID: clean precheck + full HEAD OID + bundle
         ▼
-isolated queue/automatic ──reviewed OID + owner UID──▶ approved master ──▶ GitHub
-        │                                                │
-        └────────approved master after approval──────────┴──▶ integration mirror
+regular bundle + expected OID ──bundle fetch + OID verification──▶ isolated queue
+                                                                      │
+reviewed queue OID + owner UID ───────────────────────────────────────┤
+                                                                      ▼
+                                                               approved master ──▶ GitHub
+                                                                      │
+                                                   after approval ────┴──▶ integration + queue
 
-regular-file memory branch ──pinned fetch + classification──▶ approved diary
+regular-file memory bundle ──OID verification + classification──▶ approved diary
 ```
 
 The agent source, integration, queue, and approved checkouts are four separate
 repositories with separate object databases. Source clones and all their Git
 metadata are agent-owned. Integration mirrors are writable only by the account
 owner; approved and queue `.git` directories are also owner-only. There are no
-shared refs, objects, logs, worktree registrations, or config between these
-repositories.
+shared refs, objects, logs, worktree registrations, config, or alternates between
+these repositories.
 
-Queueing fetches the named branch from the agent source into the isolated queue;
-it never pushes and never modifies approved `master` or integration. Approval
-publishes exactly the reviewed queue commit, then synchronizes only the approved
-repository into the queue and integration checkouts. Unattended memory
-publication fetches a pinned source commit into the standalone approved diary
-first and classifies that exact object against approved `master`. A source branch
-or source `master` changed after the fetch cannot alter the commit being
-published.
+The agent client writes a deterministic bundle under
+`~/diary-worktrees/_bundles/<repo>/<sanitized-branch>-<full-OID>.bundle` and sends
+the repository, branch, and full expected OID over the socket. The service
+independently derives that fixed path, requires a regular file, fetches the named
+branch from the bundle, and requires `FETCH_HEAD` to equal the expected OID before
+classification or merge. The client removes the bundle afterward. Bundle transport
+does not invoke `upload-pack`, read source config, or follow source alternates.
 
-The service treats source repositories and worktrees as untrusted. Its Git
-environment disables fsmonitor, hooks, external diff, and
-`uploadpack.packObjectsHook`, including in the local `upload-pack` child used for
-fetches. Source code, hooks, aliases, installers, and submodule initialization
-are never executed by the merge service.
+Queueing never pushes and never modifies approved `master`, integration, source
+refs, or source worktrees. Approval publishes exactly the reviewed queue commit,
+then synchronizes only the approved repository into the queue and integration
+checkouts. Unattended memory publication classifies the exact verified object
+against approved `master`. A source branch or source `master` changed after bundle
+creation cannot alter the commit being published.
+
+The kek service never runs Git in or writes through an agent source clone or
+worktree. Source discovery, status/filter evaluation, expected-OID resolution,
+bundle creation, worktree removal, and branch deletion all run as the agent UID in
+the root-owned request client. The client refuses every source operation for any
+other UID. Source code, hooks, aliases, filters, fsmonitor commands, external diff,
+installers, and submodule initialization are never executed by the kek service.
 
 ## Agent operation
 
@@ -68,11 +79,12 @@ agent-merge-request scripts dev/<slug>
 ```
 
 The source branch must be clean and checked out under the agent worktree root.
-After successful queueing or publication the service removes its worktree and
-deletes its branch through the source clone. No routine owner-side Git cleanup
-or sudo is needed. Review and approval remain separate operations. A diary
-request that needs review prints the affected paths and the exact approval
-command.
+The request command handles bundle creation and removal automatically. After
+successful queueing or publication the agent client removes its worktree and
+deletes its branch through the source clone; queue success never depends on kek
+cleaning source. No routine owner-side Git cleanup or sudo is needed. Review and
+approval remain separate operations. A diary request that needs review prints the
+affected paths and the exact approval command.
 
 ## Human review and approval
 
@@ -111,12 +123,16 @@ unmerged commits to branches in the new source clones after the installer create
 them, or remove cleanly published legacy worktrees as the owner before rerunning.
 
 The installer creates missing source clones as `agent` with `git clone
---no-hardlinks`, validates standalone `.git` directories, leaves existing valid
-sources in place, and removes prior group/other write permissions from
-integration Git metadata. Its smoke tests add, commit, remove, and delete
-branches as `agent` in both sources and verify integration metadata is not
-agent-writable. Normal branch publication and cleanup need no sudo; only the
-reviewed installer and service deployment require owner action.
+--no-hardlinks`, validates standalone `.git` directories, nested
+refs/objects/worktrees symlinks, alternates, and hardlinked objects, and leaves
+existing valid sources in place. Recursive permission work on agent trees runs as
+`agent`; root recursively changes only trusted integration/approved paths. The
+installer removes prior group/other write permissions from integration Git
+metadata. Its smoke tests add, commit, remove, and delete branches as `agent` in
+both sources and verify integration metadata is not agent-writable. Any smoke or
+boundary failure aborts nonzero and prevents socket re-enablement. Normal branch
+publication and cleanup need no sudo; only the reviewed installer and service
+deployment require owner action.
 
 ## Execution boundary
 
