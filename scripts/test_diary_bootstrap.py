@@ -95,3 +95,22 @@ printf '\n' >> "$BOOTSTRAP_TEST_LOG"
     assert not any(line.startswith("install ") for line in operations)
     assert not any("uv sync" in line for line in operations)
     assert not any("try-restart" in line or "enable --now" in line for line in operations)
+
+
+def test_clean_host_bootstrap_installs_both_sync_units_before_try_restart():
+    source = os.environ.get("DIARY_BOOTSTRAP_INSTALLER")
+    if source is None:
+        pytest.skip("set DIARY_BOOTSTRAP_INSTALLER to test the diary installer")
+    installer = Path(source).read_text()
+    runtime_install = installer.index(
+        'install -o root -g root -m 0644 "$TRUSTED/sync/diary-sync-runtime.service"'
+    )
+    broker_install = installer.index(
+        'install -o root -g root -m 0644 "$TRUSTED/sync/diary-sync-broker.service"'
+    )
+    reload = installer.index("systemctl daemon-reload", broker_install)
+    restart = installer.index(
+        "systemctl try-restart diary-sync-runtime.service diary-sync-broker.service",
+        reload,
+    )
+    assert runtime_install < broker_install < reload < restart

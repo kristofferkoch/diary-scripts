@@ -53,7 +53,7 @@ def _descend(fd: int, component: str, *, create: bool) -> int:
     _component(component)
     if create:
         try:
-            os.mkdir(component, 0o700, dir_fd=fd)
+            os.mkdir(component, 0o770, dir_fd=fd)
         except FileExistsError:
             pass
     next_fd = os.open(
@@ -104,7 +104,7 @@ def find_attachment(
 
 def _write_new_file(directory_fd: int, filename: str, data: bytes) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK
-    fd = os.open(filename, flags, 0o600, dir_fd=directory_fd)
+    fd = os.open(filename, flags, 0o660, dir_fd=directory_fd)
     with os.fdopen(fd, "wb") as output:
         info = os.fstat(output.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:

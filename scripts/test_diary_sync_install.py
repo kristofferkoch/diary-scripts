@@ -160,3 +160,118 @@ def test_prepare_memory_detects_state_rename_during_metadata(
     with pytest.raises(RuntimeError, match="replaced while being secured"):
         prepare_memory(memory, os.getuid(), os.getgid())
     assert replaced is True
+
+
+@pytest.mark.parametrize("config_uid", [0, 1000])
+def test_shell_installer_requires_root_config_and_uses_approved_units(
+        tmp_path: Path, config_uid: int):
+    source = os.environ.get("DIARY_SYNC_INSTALLER")
+    if source is None:
+        pytest.skip("set DIARY_SYNC_INSTALLER to test the diary installer")
+    integration = tmp_path / "integration"
+    approved_diary = tmp_path / "diary-approved"
+    approved_scripts = tmp_path / "scripts-approved"
+    owner_home = tmp_path / "owner-home"
+    trusted_config = tmp_path / "trusted.toml"
+    bus = tmp_path / "bus"
+    for path in (
+        integration / "sync",
+        approved_diary / "sync",
+        approved_scripts / "scripts",
+        owner_home / ".config/diary",
+        owner_home / ".password-store/spond",
+        owner_home / ".password-store/vigilo",
+        owner_home / ".gnupg",
+    ):
+        path.mkdir(parents=True, exist_ok=True)
+    for name in ("diary-sync-broker.service", "diary-sync-runtime.service"):
+        (integration / "sync" / name).write_text("unreviewed\n")
+        (approved_diary / "sync" / name).write_text("reviewed\n")
+    for name in ("diary_sync_broker.py", "diary_sync_install.py", "safe_io.py"):
+        (approved_scripts / "scripts" / name).write_text("")
+    for path in (
+        owner_home / ".config/diary/vigilo-tokens.json",
+        owner_home / ".config/diary/skolemelding-auth.json",
+        owner_home / ".password-store/spond/user.gpg",
+        owner_home / ".password-store/vigilo/client-id.gpg",
+        owner_home / ".password-store/vigilo/client-secret.gpg",
+        trusted_config,
+    ):
+        path.write_text("{}\n")
+
+    replacements = {
+        "REPO": integration,
+        "APPROVED_DIARY": approved_diary,
+        "APPROVED": approved_scripts,
+        "TRUSTED_CONFIG": trusted_config,
+        "USER_BUS": bus,
+    }
+    lines = Path(source).read_text().splitlines()
+    for index, line in enumerate(lines):
+        key, separator, _ = line.partition("=")
+        if separator and key in replacements:
+            lines[index] = f"{key}={replacements[key]}"
+    installer = tmp_path / "install"
+    installer.write_text(
+        "\n".join(lines) + "\n"
+    )
+    installer_text = installer.read_text().replace(
+        "if ((EUID != 0)); then", "if false; then", 1
+    ).replace("/home/$OWNER", str(owner_home)).replace(
+        "/usr/bin/python3", "python3"
+    )
+    installer.write_text(installer_text)
+
+    log = tmp_path / "operations.log"
+    mock_bin = tmp_path / "mock-bin"
+    mock_bin.mkdir()
+    for name in ("install", "systemctl", "systemd-analyze", "python3", "stat"):
+        (mock_bin / name).write_text(f"""#!/bin/bash
+printf '{name}' >> "$SYNC_INSTALL_TEST_LOG"
+printf ' %s' "$@" >> "$SYNC_INSTALL_TEST_LOG"
+printf '\n' >> "$SYNC_INSTALL_TEST_LOG"
+""")
+    (mock_bin / "stat").write_text("""#!/bin/bash
+printf 'stat' >> "$SYNC_INSTALL_TEST_LOG"
+printf ' %s' "$@" >> "$SYNC_INSTALL_TEST_LOG"
+printf '\n' >> "$SYNC_INSTALL_TEST_LOG"
+printf '%s\n' "$SYNC_INSTALL_TEST_CONFIG_UID"
+""")
+    for command in mock_bin.iterdir():
+        command.chmod(0o755)
+    env = os.environ.copy()
+    env.update({
+        "PATH": f"{mock_bin}:{env['PATH']}",
+        "SYNC_INSTALL_TEST_LOG": str(log),
+        "SYNC_INSTALL_TEST_CONFIG_UID": str(config_uid),
+    })
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.bind(str(bus))
+        proc = subprocess.run(
+            ["bash", str(installer)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    operations = log.read_text().splitlines()
+    if config_uid != 0:
+        assert proc.returncode != 0
+        assert "trusted config must be root-owned" in proc.stderr
+        assert not any(line.startswith("install ") for line in operations)
+        return
+
+    assert proc.returncode == 0, proc.stderr
+    assert (
+        "systemd-analyze verify "
+        f"{approved_diary}/sync/diary-sync-runtime.service "
+        f"{approved_diary}/sync/diary-sync-broker.service"
+    ) in operations
+    for name in ("diary-sync-runtime.service", "diary-sync-broker.service"):
+        assert (
+            "install -o root -g root -m 0644 "
+            f"{approved_diary}/sync/{name} /etc/systemd/system/{name}"
+        ) in operations
+    assert not any(f"{integration}/sync" in line for line in operations)
+    assert not any("config/local.toml" in line for line in operations)
+    assert "systemctl restart diary-sync-runtime.service diary-sync-broker.service" in operations

@@ -31,14 +31,21 @@ def test_attachment_ids_reject_ambiguous_ids_and_paths(value):
 
 
 def test_legitimate_nested_write_read_and_find(tmp_path):
-    root = tmp_path / "store"
-    path = write_attachment(root, "message-1", "plan.pdf", b"new")
-    assert path == root / "message-1" / "plan.pdf"
-    assert path.read_bytes() == b"new"
-    assert find_attachment(root, "message-1", "plan.pdf") == path
-    assert read_attachment_path(root, path) == b"new"
-    assert read_attachment_path(root, "message-1/plan.pdf") == b"new"
-    assert existing_attachment_path(root, path) == path
+    previous_umask = os.umask(0o007)
+    try:
+        root = tmp_path / "store"
+        path = write_attachment(root, "message-1", "plan.pdf", b"new")
+        assert path == root / "message-1" / "plan.pdf"
+        assert path.read_bytes() == b"new"
+        assert root.stat().st_mode & 0o777 == 0o770
+        assert path.parent.stat().st_mode & 0o777 == 0o770
+        assert path.stat().st_mode & 0o777 == 0o660
+        assert find_attachment(root, "message-1", "plan.pdf") == path
+        assert read_attachment_path(root, path) == b"new"
+        assert read_attachment_path(root, "message-1/plan.pdf") == b"new"
+        assert existing_attachment_path(root, path) == path
+    finally:
+        os.umask(previous_umask)
 
 
 def test_zero_length_existing_file_is_not_a_completed_download(tmp_path):
