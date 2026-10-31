@@ -25,19 +25,25 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable, cast
 
 SCHEMA_VERSION = 1
+STATE_VERSION = 2
 DEFAULT_SOCKET = "/run/diary-audit/socket"
 DEFAULT_JOURNAL_SOCKET = "/run/systemd/journal.diary-lock/socket"
 DEFAULT_STATE = "/var/lib/diary-audit/dedup.json"
 DEFAULT_GROUP = "diary-audit"
+DEFAULT_JOURNAL_GROUP = "diary-audit-journal"
 DEFAULT_NAMESPACE = "diary-lock"
 DUPLICATE_WINDOW_US = 60_000_000
 STATE_RETENTION_US = 31 * 24 * 60 * 60 * 1_000_000
 MAX_REQUEST_BYTES = 32 * 1024
 MAX_STATE_BYTES = 16 * 1024 * 1024
+MAX_STATE_RECORD_BYTES = 8192
+MAX_STATE_RECORDS = 10_000
+MAX_PROC_STATUS_BYTES = 64 * 1024
 MAX_REPORT_RECORDS = 10_000
 
 REQUIRED_FIELDS = ("event", "component", "operation", "decision", "lock_state")
@@ -63,6 +69,7 @@ TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@=-]{0,127}\Z")
 EVENT_RE = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+\Z")
 DURATION_RE = re.compile(r"([1-9][0-9]{0,3})([mhd])\Z")
 FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}\Z")
+EMISSION_ID_RE = re.compile(r"[0-9a-f]{32}\Z")
 
 FIELD_MAP = {
     "event": "DIARY_AUDIT_EVENT",
@@ -188,6 +195,36 @@ def peer_credentials(conn: socket.socket) -> dict[str, int]:
     return {"pid": pid, "uid": uid, "gid": gid}
 
 
+def journal_group_conflicts(group_name: str = DEFAULT_JOURNAL_GROUP, proc_root: str = "/proc") -> list[tuple[int, int]]:
+    """Return non-root PIDs that still hold the daemon-only journal group."""
+    gid = grp.getgrnam(group_name).gr_gid
+    conflicts: list[tuple[int, int]] = []
+    for process in Path(proc_root).iterdir():
+        if not process.name.isdigit():
+            continue
+        try:
+            fd = os.open(process / "status", os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd, "rb") as handle:
+                raw = handle.read(MAX_PROC_STATUS_BYTES + 1)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise AuditError(f"cannot verify process group revocation for PID {process.name}") from exc
+        if len(raw) > MAX_PROC_STATUS_BYTES:
+            raise AuditError(f"oversized process status for PID {process.name}")
+        try:
+            lines = raw.decode("ascii").splitlines()
+            uid_line = next(line for line in lines if line.startswith("Uid:"))
+            groups_line = next(line for line in lines if line.startswith("Groups:"))
+            uid = int(uid_line.split()[1])
+            groups = {int(value) for value in groups_line.split()[1:]}
+        except (StopIteration, ValueError, IndexError, UnicodeDecodeError) as exc:
+            raise AuditError(f"unreadable process identity for PID {process.name}") from exc
+        if uid != 0 and gid in groups:
+            conflicts.append((int(process.name), uid))
+    return sorted(conflicts)
+
+
 def _user(uid: int) -> str:
     try:
         return pwd.getpwuid(uid).pw_name
@@ -221,20 +258,60 @@ class JournalWriter:
 
 
 class DedupStore:
-    """Durable per-fingerprint counters with one journal record per time window."""
+    """Bounded JSONL counters with durable, idempotent journal emissions."""
 
-    def __init__(self, path: str, window_us: int = DUPLICATE_WINDOW_US) -> None:
+    ENTRY_FIELDS = frozenset({
+        "count", "emitted_count", "first_seen_us", "last_seen_us", "last_emit_us", "emission",
+    })
+    EMISSION_FIELDS = frozenset({
+        "id", "count", "new_count", "time_us", "first_seen_us", "last_seen_us",
+    })
+
+    def __init__(
+        self,
+        path: str,
+        window_us: int = DUPLICATE_WINDOW_US,
+        clock: Callable[[], int] | None = None,
+    ) -> None:
         self.path = Path(path)
         self.window_us = window_us
+        self.clock = clock or (lambda: time.time_ns() // 1000)
         self.lock = threading.Lock()
-        self.records = self._load()
+        self._needs_compaction = False
+        self.records: dict[str, dict[str, Any]] = self._load()
+        if self._needs_compaction:
+            self._save_locked()
 
     def _check_parent(self) -> None:
         info = self.path.parent.stat()
         if info.st_uid != os.geteuid() or info.st_mode & 0o022:
             raise AuditError("audit state directory must be private to the daemon")
 
-    def _load(self) -> dict:
+    def _validate_entry(self, entry: object) -> dict[str, Any]:
+        if not isinstance(entry, dict) or set(entry) != self.ENTRY_FIELDS:
+            raise AuditError("invalid audit state fields")
+        entry = cast(dict[str, Any], entry)
+        for field in self.ENTRY_FIELDS - {"emission"}:
+            _integer(entry[field], f"audit state {field}", 9_223_372_036_854_775_807)
+        if not 0 <= entry["emitted_count"] <= entry["count"]:
+            raise AuditError("invalid emitted audit counter")
+        emission = entry["emission"]
+        if emission is None:
+            return entry
+        if not isinstance(emission, dict) or set(emission) != self.EMISSION_FIELDS:
+            raise AuditError("invalid pending emission")
+        emission = cast(dict[str, Any], emission)
+        if not isinstance(emission["id"], str) or not EMISSION_ID_RE.fullmatch(emission["id"]):
+            raise AuditError("invalid pending emission ID")
+        for field in self.EMISSION_FIELDS - {"id"}:
+            _integer(emission[field], f"pending emission {field}", 9_223_372_036_854_775_807)
+        if not entry["emitted_count"] <= emission["count"] <= entry["count"]:
+            raise AuditError("invalid pending emission counter")
+        if emission["new_count"] != emission["count"] - entry["emitted_count"] or emission["new_count"] == 0:
+            raise AuditError("inconsistent pending emission delta")
+        return entry
+
+    def _load(self) -> dict[str, dict[str, Any]]:
         self._check_parent()
         try:
             fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -242,28 +319,43 @@ class DedupStore:
             return {}
         except OSError as exc:
             raise AuditError("audit state must be a regular non-symlink file") from exc
-        with os.fdopen(fd, "rb") as handle:
-            info = os.fstat(handle.fileno())
-            if info.st_uid != os.geteuid() or info.st_mode & 0o077 or info.st_size > MAX_STATE_BYTES:
-                raise AuditError("audit state file has unsafe ownership, mode, or size")
-            raw = handle.read(MAX_STATE_BYTES + 1)
+        records: dict[str, dict[str, Any]] = {}
+        cutoff = self.clock() - STATE_RETENTION_US
         try:
-            value = json.loads(raw)
-            records = value["records"]
-            if value["version"] != SCHEMA_VERSION or not isinstance(records, dict):
-                raise AuditError("unsupported audit state")
-            for fingerprint, entry in records.items():
-                if not FINGERPRINT_RE.fullmatch(fingerprint) or not isinstance(entry, dict):
-                    raise AuditError("invalid audit state fingerprint")
-                if set(entry) != {"count", "emitted_count", "first_seen_us", "last_seen_us", "last_emit_us"}:
-                    raise AuditError("invalid audit state fields")
-                for item in entry.values():
-                    _integer(item, "audit state counter", 9_223_372_036_854_775_807)
-                if not 0 <= entry["emitted_count"] <= entry["count"]:
-                    raise AuditError("invalid emitted audit counter")
-            return records
-        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            with os.fdopen(fd, "rb") as handle:
+                info = os.fstat(handle.fileno())
+                if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+                    raise AuditError("audit state file has unsafe ownership or mode")
+                header = handle.readline(MAX_STATE_RECORD_BYTES + 1)
+                if len(header) > MAX_STATE_RECORD_BYTES or not header.endswith(b"\n"):
+                    raise AuditError("invalid audit state header")
+                value = json.loads(header)
+                if value != {"version": STATE_VERSION}:
+                    raise AuditError("unsupported audit state")
+                while True:
+                    raw = handle.readline(MAX_STATE_RECORD_BYTES + 1)
+                    if not raw:
+                        break
+                    if len(raw) > MAX_STATE_RECORD_BYTES or not raw.endswith(b"\n"):
+                        raise AuditError("oversized or incomplete audit state record")
+                    value = json.loads(raw)
+                    if not isinstance(value, dict) or set(value) != {"fingerprint", "entry"}:
+                        raise AuditError("invalid audit state record")
+                    fingerprint = value["fingerprint"]
+                    if not isinstance(fingerprint, str) or not FINGERPRINT_RE.fullmatch(fingerprint):
+                        raise AuditError("invalid audit state fingerprint")
+                    if fingerprint in records:
+                        raise AuditError("duplicate audit state fingerprint")
+                    entry = self._validate_entry(value["entry"])
+                    if entry["last_seen_us"] < cutoff:
+                        self._needs_compaction = True
+                        continue
+                    records[fingerprint] = entry
+                    if len(records) > MAX_STATE_RECORDS:
+                        raise AuditError("active audit state exceeds record capacity")
+        except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise AuditError("unreadable audit state") from exc
+        return records
 
     def _save_locked(self) -> None:
         self._check_parent()
@@ -275,12 +367,13 @@ class DedupStore:
         )
         try:
             with os.fdopen(fd, "w", encoding="ascii") as handle:
-                json.dump(
-                    {"version": SCHEMA_VERSION, "records": self.records},
-                    handle,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
+                handle.write(json.dumps({"version": STATE_VERSION}, separators=(",", ":")) + "\n")
+                for fingerprint, entry in sorted(self.records.items()):
+                    handle.write(json.dumps(
+                        {"fingerprint": fingerprint, "entry": entry},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ) + "\n")
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, self.path)
@@ -310,44 +403,71 @@ class DedupStore:
             }
             entry = self.records.get(fingerprint)
             if entry is None:
+                if len(self.records) >= MAX_STATE_RECORDS:
+                    raise AuditError("active audit state reached record capacity")
                 entry = {
                     "count": 0,
                     "emitted_count": 0,
                     "first_seen_us": now_us,
                     "last_seen_us": now_us,
                     "last_emit_us": 0,
+                    "emission": None,
                 }
                 self.records[fingerprint] = entry
+            entry = cast(dict[str, Any], entry)
             entry["count"] += 1
             entry["last_seen_us"] = now_us
-            should_emit = (
-                entry["last_emit_us"] == 0
-                or now_us >= entry["last_emit_us"] + self.window_us
-            )
+            emission: dict[str, Any] | None = entry["emission"]
+            if emission is None:
+                should_emit = (
+                    entry["last_emit_us"] == 0
+                    or now_us >= entry["last_emit_us"] + self.window_us
+                )
+                if should_emit:
+                    new_count = entry["count"] - entry["emitted_count"]
+                    emission = {
+                        "id": uuid.uuid4().hex,
+                        "count": entry["count"],
+                        "new_count": new_count,
+                        "time_us": now_us,
+                        "first_seen_us": entry["first_seen_us"],
+                        "last_seen_us": entry["last_seen_us"],
+                    }
+                    entry["emission"] = emission
             self._save_locked()
-            if not should_emit:
+            if emission is None:
                 return {
                     "fingerprint": fingerprint,
                     "count": entry["count"],
                     "emitted": False,
                 }
-            new_count = entry["count"] - entry["emitted_count"]
             counters: dict[str, int | str] = {
                 "DIARY_AUDIT_FINGERPRINT": fingerprint,
-                "DIARY_AUDIT_COUNT": entry["count"],
-                "DIARY_AUDIT_NEW_COUNT": new_count,
-                "DIARY_AUDIT_SUPPRESSED_COUNT": new_count - 1,
-                "DIARY_AUDIT_FIRST_SEEN_US": entry["first_seen_us"],
-                "DIARY_AUDIT_LAST_SEEN_US": entry["last_seen_us"],
+                "DIARY_AUDIT_EMISSION_ID": emission["id"],
+                "DIARY_AUDIT_COUNT": emission["count"],
+                "DIARY_AUDIT_NEW_COUNT": emission["new_count"],
+                "DIARY_AUDIT_SUPPRESSED_COUNT": emission["new_count"] - 1,
+                "DIARY_AUDIT_FIRST_SEEN_US": emission["first_seen_us"],
+                "DIARY_AUDIT_LAST_SEEN_US": emission["last_seen_us"],
             }
             send(counters)
-            entry["last_emit_us"] = now_us
-            entry["emitted_count"] = entry["count"]
-            self._save_locked()
+            previous_emitted = entry["emitted_count"]
+            previous_last_emit = entry["last_emit_us"]
+            entry["emitted_count"] = emission["count"]
+            entry["last_emit_us"] = emission["time_us"]
+            entry["emission"] = None
+            try:
+                self._save_locked()
+            except BaseException:
+                entry["emitted_count"] = previous_emitted
+                entry["last_emit_us"] = previous_last_emit
+                entry["emission"] = emission
+                raise
             return {
                 "fingerprint": fingerprint,
+                "emission_id": emission["id"],
                 "count": entry["count"],
-                "new_count": new_count,
+                "new_count": emission["new_count"],
                 "emitted": True,
             }
 
@@ -462,7 +582,9 @@ def _report_counter(entry: dict, field: str, default: int = 0) -> int:
 
 def summarize(entries: list[dict], report: str, since: dt.datetime, until: dt.datetime, limit: int) -> dict:
     groups: dict[str, dict] = {}
+    seen_emissions: set[str] = set()
     records = 0
+    duplicate_records = 0
     for entry in entries:
         if entry.get("DIARY_AUDIT_SCHEMA_VERSION") not in (str(SCHEMA_VERSION), SCHEMA_VERSION):
             continue
@@ -473,7 +595,14 @@ def summarize(entries: list[dict], report: str, since: dt.datetime, until: dt.da
         if not isinstance(fingerprint, str) or not FINGERPRINT_RE.fullmatch(fingerprint):
             continue
         records += 1
-        count = _report_counter(entry, "DIARY_AUDIT_NEW_COUNT")
+        emission_id = entry.get("DIARY_AUDIT_EMISSION_ID")
+        duplicate = False
+        if isinstance(emission_id, str) and EMISSION_ID_RE.fullmatch(emission_id):
+            duplicate = emission_id in seen_emissions
+            seen_emissions.add(emission_id)
+        if duplicate:
+            duplicate_records += 1
+        count = 0 if duplicate else _report_counter(entry, "DIARY_AUDIT_NEW_COUNT")
         timestamp = _report_counter(entry, "__REALTIME_TIMESTAMP")
         first_seen = _report_counter(entry, "DIARY_AUDIT_FIRST_SEEN_US", timestamp)
         last_seen = _report_counter(entry, "DIARY_AUDIT_LAST_SEEN_US", timestamp)
@@ -511,6 +640,7 @@ def summarize(entries: list[dict], report: str, since: dt.datetime, until: dt.da
         "generated_at": dt.datetime.now(dt.UTC).isoformat(),
         "event_count": sum(group["count"] for group in ordered),
         "record_count": records,
+        "duplicate_record_count": duplicate_records,
         "truncated": len(entries) >= limit,
         "groups": ordered,
     }
@@ -688,6 +818,8 @@ def _client_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="cmd", required=True)
     write = sub.add_parser("write", help="write one validated JSON audit event")
     write.add_argument("--json", required=True, help="event object, or - to read stdin")
+    revocation = sub.add_parser("revocation-check", help="fail if non-root processes retain the journal group")
+    revocation.add_argument("--group", default=DEFAULT_JOURNAL_GROUP)
     for name in ("baseline", "review"):
         report = sub.add_parser(name, help=f"produce a fixed {name} report")
         report.add_argument("--since", default="24h")
@@ -700,7 +832,16 @@ def _client_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _client_parser().parse_args(argv)
     try:
-        if args.cmd == "write":
+        if args.cmd == "revocation-check":
+            conflicts = journal_group_conflicts(args.group)
+            if conflicts:
+                processes = ", ".join(f"PID {pid} (UID {uid})" for pid, uid in conflicts)
+                raise AuditError(
+                    f"{args.group} is retained by {processes}; stop or restart only those "
+                    "services in a controlled window, then rerun the installer"
+                )
+            print(f"ok: no non-root process retains {args.group}")
+        elif args.cmd == "write":
             raw = sys.stdin.read(MAX_REQUEST_BYTES + 1) if args.json == "-" else args.json
             if len(raw.encode("utf-8")) > MAX_REQUEST_BYTES:
                 raise AuditError("event is too large")

@@ -10,16 +10,22 @@ cryptographic tamper evidence; off-host export is LATER-04.
 ## Trust boundary
 
 The daemon is installed as a root-owned stdlib-only file. It never runs from a
-worktree or the uv environment. `/run/diary-audit/socket` is `root:diary-audit`
-mode `0660`; each connection also requires kernel peer UID 0 or an account in
-`diary-audit`, with `agent` and `diary-pipeline` explicitly denied even if a
-group is misconfigured. The native journal namespace socket has its own
-`systemd-journald@diary-lock.socket` drop-in because its upstream default is
-world-writable `0666`; the deployed mode is also `0660 root:diary-audit`.
-The separate journald Varlink control socket is restricted identically.
-The installer adds only `kek`, and explicitly removes `agent` and
-`diary-pipeline`. Both trusted writes and fixed reports use the daemon boundary;
-untrusted identities cannot bypass it through the native journal socket.
+worktree or the uv environment. Client access and native journal access use
+separate groups. `/run/diary-audit/socket` is `root:diary-audit` mode `0660`;
+each connection also requires kernel peer UID 0 or an account in `diary-audit`,
+with `agent` and `diary-pipeline` explicitly denied even if a group is
+misconfigured. The native journal and Varlink sockets are instead
+`root:diary-audit-journal` mode `0660`. Only the daemon has that primary group;
+trusted API clients, including `kek`, have no direct native journal access.
+
+The installer removes every supplemental member from the daemon-only group and
+makes removal failures fatal. Because account-database changes do not alter
+existing process credentials, it also checks `/proc` before changing sockets.
+If any non-root process still holds `diary-audit-journal`, installation stops
+and names the PID/UID. The owner must stop or restart only those services in a
+controlled window and rerun the installer; it never kills unrelated services.
+The API additionally checks account identity on every connection, so retained
+client-group credentials cannot make `agent` or `diary-pipeline` trusted.
 
 Writer PID/UID/GID come from `SO_PEERCRED`. A broker may additionally supply a
 `caller` object only when it obtained PID/UID/GID from its own peer credentials
@@ -69,21 +75,35 @@ The SHA-256 fingerprint covers the validated event and trusted caller metadata,
 not the journal writer's process ID. The first event is emitted immediately;
 identical events are suppressed for 60 seconds. The next emitted record has:
 
+- `DIARY_AUDIT_EMISSION_ID`: stable ID for idempotent delivery and report
+  deduplication;
 - `DIARY_AUDIT_COUNT`: cumulative occurrences for the fingerprint;
 - `DIARY_AUDIT_NEW_COUNT`: occurrences since the previous emitted record;
 - `DIARY_AUDIT_SUPPRESSED_COUNT`: suppressed occurrences in that interval;
 - `DIARY_AUDIT_FIRST_SEEN_US` and `DIARY_AUDIT_LAST_SEEN_US` in Unix
   microseconds.
 
-Counters are atomically persisted with fsync in root-only
-`/var/lib/diary-audit/dedup.json` before suppression and after journal writes.
-They therefore survive daemon restarts. State entries expire after 31 days,
-just beyond journal retention. Reports sum `NEW_COUNT`, not cumulative
-snapshots, so repeated windows are not overcounted. Journald's generic burst
-rate limit is disabled in this namespace so it cannot silently discard distinct
-validated events; the daemon's durable duplicate limiter is the audit rate
-boundary. Native journal delivery is datagram-based: socket/write errors fail
-the request, but journald does not return an fsync acknowledgement.
+Counters and the complete pending emission are atomically persisted with fsync
+in root-only `/var/lib/diary-audit/dedup.json` before every journal send. If the
+process crashes after journald accepts a datagram but before the post-send
+save, the next attempt reuses the same emission ID and counters. Reports count
+each emission ID once while retaining the physical record and duplicate-record
+counts, so this recovery cannot inflate occurrence totals.
+
+State is bounded-line JSONL, not a whole-file JSON document. Startup streams
+and validates one bounded record at a time, expires entries older than 31 days,
+and atomically compacts the file; an oversized file of expired entries therefore
+does not make the daemon permanently unloadable. At most 10,000 active
+fingerprints are retained. A new fingerprint beyond that cap fails closed
+rather than discarding active counters; malformed, oversized-line, duplicate
+active-fingerprint, or over-capacity state also fails closed.
+
+Reports sum `NEW_COUNT`, not cumulative snapshots, so repeated windows are not
+overcounted. Journald's generic burst rate limit is disabled in this namespace
+so it cannot silently discard distinct validated events; the daemon's durable
+duplicate limiter is the audit rate boundary. Native journal delivery is
+datagram-based: socket/write errors fail the request, but journald does not
+return an fsync acknowledgement.
 
 ## Reports
 
@@ -110,10 +130,12 @@ owner-approved and synchronized:
 sudo-ask /home/kek/diary-approved/systemd/install-audit-root
 ```
 
-The installer creates the group, installs root-owned copies and configuration,
-reloads systemd, restarts only the audit namespace/daemon, writes and reads a
-self-test as `kek`, and verifies that existing agent/pipeline identities cannot
-use the socket. It leaves all general-agent enforcement dark.
+The installer creates both groups, installs root-owned copies and configuration,
+checks retained process credentials, reloads systemd, and restarts only the
+audit namespace/daemon. It writes and reads a self-test as `kek`, verifies that
+this trusted client has no direct native journal access, and verifies that
+existing agent/pipeline identities can use neither path. General-agent
+enforcement remains dark.
 
 Complete the card's live checks after installation:
 

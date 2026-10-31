@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import grp
+import hashlib
 import json
 import os
 import pwd
@@ -40,11 +41,12 @@ def peer(**changes) -> dict[str, int]:
 
 
 def service(tmp_path: Path, journal: Path, **kwargs) -> audit.AuditService:
-    return audit.AuditService(
-        audit.DedupStore(str(tmp_path / "dedup.json"), kwargs.pop("window_us", 60_000_000)),
-        audit.JournalWriter(str(journal)),
-        **kwargs,
+    store = audit.DedupStore(
+        str(tmp_path / "dedup.json"),
+        kwargs.pop("window_us", 60_000_000),
+        clock=kwargs.get("clock"),
     )
+    return audit.AuditService(store, audit.JournalWriter(str(journal)), **kwargs)
 
 
 def datagram_sink(path: Path):
@@ -161,8 +163,14 @@ def test_write_failure_does_not_lose_or_mark_counter_emitted(tmp_path: Path) -> 
     restarted = service(tmp_path, tmp_path / "journal.sock", clock=lambda: now[0])
     result = restarted.write(event(), peer())
     record = fields(sink.recv(65_535))
-    assert result["count"] == 2 and result["new_count"] == 2
-    assert record["DIARY_AUDIT_NEW_COUNT"] == "2"
+    assert result["count"] == 2 and result["new_count"] == 1
+    assert record["DIARY_AUDIT_NEW_COUNT"] == "1"
+    now[0] += 60_000_000
+    following = restarted.write(event(), peer())
+    following_record = fields(sink.recv(65_535))
+    assert following["new_count"] == 2
+    assert following_record["DIARY_AUDIT_NEW_COUNT"] == "2"
+    assert following_record["DIARY_AUDIT_EMISSION_ID"] != record["DIARY_AUDIT_EMISSION_ID"]
     sink.close()
 
 
@@ -335,3 +343,118 @@ def test_daemon_cli_refuses_unprivileged_execution(monkeypatch) -> None:
     monkeypatch.setattr(audit.os, "geteuid", lambda: 1000)
     with pytest.raises(SystemExit):
         audit.daemon_main([])
+
+
+def test_post_send_crash_reuses_emission_and_reports_do_not_overcount(tmp_path: Path) -> None:
+    sink = datagram_sink(tmp_path / "journal.sock")
+    now = [1_000_000_000_000]
+    svc = service(tmp_path, tmp_path / "journal.sock", clock=lambda: now[0])
+    save = svc.store._save_locked
+    calls = 0
+
+    def fail_post_send_save() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("simulated crash after journal accept")
+        save()
+
+    with patch.object(svc.store, "_save_locked", side_effect=fail_post_send_save):
+        with pytest.raises(OSError, match="after journal accept"):
+            svc.write(event(), peer())
+    first = fields(sink.recv(65_535))
+
+    restarted = service(tmp_path, tmp_path / "journal.sock", clock=lambda: now[0])
+    result = restarted.write(event(), peer())
+    second = fields(sink.recv(65_535))
+    assert result["count"] == 2 and result["new_count"] == 1
+    assert first["DIARY_AUDIT_EMISSION_ID"] == second["DIARY_AUDIT_EMISSION_ID"]
+    assert first["DIARY_AUDIT_NEW_COUNT"] == second["DIARY_AUDIT_NEW_COUNT"] == "1"
+    assert first["DIARY_AUDIT_COUNT"] == second["DIARY_AUDIT_COUNT"] == "1"
+
+    since = dt.datetime.fromtimestamp(0, dt.UTC)
+    until = dt.datetime.fromtimestamp(2_000_000, dt.UTC)
+    replayed = audit.summarize([first, second], "baseline", since, until, 10_000)
+    assert replayed["record_count"] == 2
+    assert replayed["duplicate_record_count"] == 1
+    assert replayed["event_count"] == 1
+
+    now[0] += 60_000_000
+    restarted.write(event(), peer())
+    third = fields(sink.recv(65_535))
+    complete = audit.summarize([first, second, third], "baseline", since, until, 10_000)
+    assert complete["event_count"] == 3
+    assert complete["duplicate_record_count"] == 1
+    sink.close()
+
+
+def test_running_process_retaining_private_journal_group_blocks_revocation(tmp_path: Path) -> None:
+    proc = tmp_path / "proc"
+    for pid, uid, groups in (
+        (101, 1001, "1001 900"),
+        (102, 1000, "1000 901"),
+        (103, 0, "0 900"),
+    ):
+        directory = proc / str(pid)
+        directory.mkdir(parents=True)
+        (directory / "status").write_text(
+            f"Name:\texample\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\nGroups:\t{groups}\n",
+            encoding="ascii",
+        )
+    with patch.object(audit.grp, "getgrnam", return_value=SimpleNamespace(gr_gid=900)):
+        conflicts = audit.journal_group_conflicts("diary-audit-journal", str(proc))
+    assert conflicts == [(101, 1001)]
+
+
+def test_process_revocation_check_fails_closed_on_unreadable_identity(tmp_path: Path) -> None:
+    process = tmp_path / "proc" / "101"
+    process.mkdir(parents=True)
+    (process / "status").write_text("Name:\tmissing identity\n", encoding="ascii")
+    with patch.object(audit.grp, "getgrnam", return_value=SimpleNamespace(gr_gid=900)):
+        with pytest.raises(audit.AuditError, match="unreadable process identity"):
+            audit.journal_group_conflicts("diary-audit-journal", str(tmp_path / "proc"))
+
+
+def test_state_cardinality_is_bounded_without_dropping_active_counters(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(audit, "MAX_STATE_RECORDS", 2)
+    now = 1_000_000_000_000
+    store = audit.DedupStore(str(tmp_path / "dedup.json"), clock=lambda: now)
+    store.record(event(), now, lambda _: None)
+    store.record(event(destination_port=8443), now, lambda _: None)
+    with pytest.raises(audit.AuditError, match="record capacity"):
+        store.record(event(destination_port=9443), now, lambda _: None)
+    assert len(store.records) == 2
+    restarted = audit.DedupStore(str(tmp_path / "dedup.json"), clock=lambda: now)
+    assert len(restarted.records) == 2
+
+
+def test_oversized_expired_state_is_streamed_and_compacted(tmp_path: Path) -> None:
+    path = tmp_path / "dedup.json"
+    expired = {
+        "count": 1,
+        "emitted_count": 1,
+        "first_seen_us": 1,
+        "last_seen_us": 1,
+        "last_emit_us": 1,
+        "emission": None,
+    }
+    with path.open("w", encoding="ascii") as handle:
+        handle.write('{"version":2}\n')
+        index = 0
+        while handle.tell() <= audit.MAX_STATE_BYTES:
+            fingerprint = hashlib.sha256(str(index).encode("ascii")).hexdigest()
+            handle.write(json.dumps({"fingerprint": fingerprint, "entry": expired}, separators=(",", ":")) + "\n")
+            index += 1
+    path.chmod(0o600)
+    assert path.stat().st_size > audit.MAX_STATE_BYTES
+    store = audit.DedupStore(str(path), clock=lambda: audit.STATE_RETENTION_US + 2_000_000)
+    assert store.records == {}
+    assert path.stat().st_size < 100
+
+
+def test_malformed_or_oversized_state_record_fails_closed(tmp_path: Path) -> None:
+    path = tmp_path / "dedup.json"
+    path.write_bytes(b'{"version":2}\n' + b"x" * (audit.MAX_STATE_RECORD_BYTES + 1) + b"\n")
+    path.chmod(0o600)
+    with pytest.raises(audit.AuditError, match="oversized or incomplete"):
+        audit.DedupStore(str(path))
