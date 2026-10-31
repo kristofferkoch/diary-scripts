@@ -5,7 +5,7 @@ Used by an agent that has no standing sudo rights:
 
     sudo-ask systemctl restart caddy
     sudo-ask --as kek 'systemctl --user restart mail-sync'
-    sudo-ask 'docker compose -f /home/kek/diary/immich/compose.yaml up -d'
+    sudo-ask 'docker compose -f /path/to/diary-approved/immich/compose.yaml up -d'
 
 A human with `sudo /usr/local/sbin/sudo-broker` running in a terminal sees the
 command, its cwd and the requesting uid, and types y or n. Output is streamed

@@ -15,6 +15,7 @@ def run(*args: str, cwd: Path | None = None) -> str:
 
 
 def commit(repo: Path, name: str, text: str) -> None:
+    (repo / name).parent.mkdir(parents=True, exist_ok=True)
     (repo / name).write_text(text)
     run("git", "add", name, cwd=repo)
     run("git", "commit", "-m", f"add {name}", cwd=repo)
@@ -118,6 +119,16 @@ def test_client_uses_only_the_explicit_reviewed_oid(paths: amq.QueuePaths, monke
     assert seen == [f"approve scripts {oid}"]
 
 
+def test_diary_client_names_the_repository_and_explicit_oid(paths: amq.QueuePaths, monkeypatch: pytest.MonkeyPatch):
+    oid = "b" * 40
+    seen: list[str] = []
+    monkeypatch.setattr(amq, "diary_paths", lambda: paths)
+    monkeypatch.setattr(amq, "request", lambda payload: seen.append(payload) or "RESULT ok 0\n")
+
+    assert amq.approve_main(["--repo", "diary", oid]) == 0
+    assert seen == [f"approve diary {oid}"]
+
+
 def test_failed_push_can_be_retried_and_synchronizes_queue(paths: amq.QueuePaths):
     source_branch(paths)
     amq.queue_change("dev/change", paths)
@@ -180,3 +191,115 @@ def test_peer_uid_comes_from_the_kernel_socket_credentials():
     finally:
         left.close()
         right.close()
+
+
+def empty_source(paths: amq.QueuePaths, branch: str = "dev/diary") -> Path:
+    source = paths.worktrees / branch.split("/", 1)[1]
+    run("git", "worktree", "add", str(source), "-b", branch, "master", cwd=paths.integration)
+    return source
+
+
+def test_diary_regular_memory_change_publishes_without_owner_review(paths: amq.QueuePaths):
+    source = empty_source(paths)
+    commit(source, "memory/2026-10-31.md", "routine notes\n")
+
+    assert amq.publish_diary_unattended("dev/diary", paths) is True
+
+    assert not source.exists()
+    for repo in (paths.approved, paths.integration):
+        assert (repo / "memory/2026-10-31.md").read_text() == "routine notes\n"
+
+
+@pytest.mark.parametrize("name", [
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".agents/skills/example/SKILL.md",
+    "dsh/agent-uid/agent-merge",
+    "systemd/install-user",
+    "sync/diary-sync-broker.service",
+    "caddy/Caddyfile",
+    "config/local.toml",
+])
+def test_diary_instruction_executable_and_service_paths_require_review(paths: amq.QueuePaths, name: str):
+    source = empty_source(paths)
+    commit(source, name, "agent-controlled change\n")
+    oid = run("git", "rev-parse", "HEAD", cwd=source)
+
+    assert amq.diary_review_required(paths.integration, oid) == [name]
+
+
+def test_diary_sensitive_change_cannot_publish_without_exact_oid_approval(paths: amq.QueuePaths):
+    source = empty_source(paths)
+    commit(source, "AGENTS.md", "unreviewed instructions\n")
+    commit(source, "sync/diary-sync-broker.service", "unreviewed service control\n")
+    approved_head = run("git", "rev-parse", "master", cwd=paths.approved)
+
+    with pytest.raises(amq.ReviewRequired, match="AGENTS.md"):
+        amq.publish_diary_unattended("dev/diary", paths)
+    assert run("git", "rev-parse", "master", cwd=paths.approved) == approved_head
+    assert source.exists(), "a change still needing review is not cleaned up"
+
+    assert amq.queue_change("dev/diary", paths, repo="diary") is True
+    oid = reviewed(paths)
+    assert not (paths.approved / "AGENTS.md").exists()
+    remote = run("git", "config", "--get", "remote.origin.url", cwd=paths.approved)
+    assert run("git", "--git-dir", remote, "rev-parse", "master") == approved_head
+
+    assert amq.approve_queue(oid, paths, sync_environment=False) is True
+    assert (paths.approved / "AGENTS.md").read_text() == "unreviewed instructions\n"
+    assert run("git", "--git-dir", remote, "rev-parse", "master") == oid
+
+
+def test_diary_executable_memory_file_requires_review(paths: amq.QueuePaths):
+    source = empty_source(paths)
+    commit(source, "memory/run-me", "ordinary file\n")
+    (source / "memory/run-me").chmod(0o755)
+    run("git", "add", "memory/run-me", cwd=source)
+    run("git", "commit", "-m", "make executable", cwd=source)
+    oid = run("git", "rev-parse", "HEAD", cwd=source)
+
+    assert amq.diary_review_required(paths.integration, oid) == ["memory/run-me"]
+
+
+def test_diary_symlink_memory_file_requires_review(paths: amq.QueuePaths):
+    source = empty_source(paths)
+    (source / "memory").mkdir()
+    (source / "memory/link").symlink_to("../AGENTS.md")
+    run("git", "add", "memory/link", cwd=source)
+    run("git", "commit", "-m", "add symlink", cwd=source)
+    oid = run("git", "rev-parse", "HEAD", cwd=source)
+
+    assert amq.diary_review_required(paths.integration, oid) == ["memory/link"]
+
+
+def test_diary_publication_pins_the_fetched_oid(paths: amq.QueuePaths, monkeypatch: pytest.MonkeyPatch):
+    source = empty_source(paths)
+    commit(source, "memory/2026-10-31.md", "reviewed automatically\n")
+    original = amq.diary_review_required
+
+    def swap_branch_after_fetch(repo: Path, oid: str) -> list[str]:
+        result = original(repo, oid)
+        commit(source, "AGENTS.md", "too late to swap this in\n")
+        return result
+
+    monkeypatch.setattr(amq, "diary_review_required", swap_branch_after_fetch)
+    assert amq.publish_diary_unattended("dev/diary", paths) is True
+
+    assert not (paths.approved / "AGENTS.md").exists()
+    assert (paths.approved / "memory/2026-10-31.md").exists()
+
+
+def test_diary_agent_controlled_integration_master_is_not_a_trust_base(paths: amq.QueuePaths):
+    source = empty_source(paths)
+    commit(source, "memory/2026-10-31.md", "safe on its own\n")
+    approved_head = run("git", "rev-parse", "master", cwd=paths.approved)
+    attacker = empty_source(paths, "dev/attacker")
+    commit(attacker, "AGENTS.md", "integration refs are untrusted\n")
+    attacker_oid = run("git", "rev-parse", "HEAD", cwd=attacker)
+    run("git", "update-ref", "refs/heads/master", attacker_oid, cwd=paths.integration)
+
+    with pytest.raises(amq.QueueError):
+        amq.publish_diary_unattended("dev/diary", paths)
+
+    assert run("git", "rev-parse", "master", cwd=paths.approved) == approved_head
+    assert not (paths.approved / "AGENTS.md").exists()

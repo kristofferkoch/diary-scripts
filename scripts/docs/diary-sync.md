@@ -82,7 +82,7 @@ Install the owner-reviewed collector and host settings as root-owned
 
 ```bash
 sudo-ask 'install -D -o root -g root -m 0644 /path/to/owner-reviewed-trusted.toml /etc/diary/trusted.toml'
-sudo-ask /home/kek/diary/sync/install
+sudo-ask /path/to/diary-approved/sync/install
 ```
 
 Root must never execute code out of an unreviewed checkout. The installer reads
