@@ -19,6 +19,14 @@ def require_unix_socket(path: Path) -> None:
         raise RuntimeError(f"not a Unix socket: {path}")
 
 
+def _verify_path(fd: int, parent_fd: int, name: str, expected_type) -> None:
+    opened = os.fstat(fd)
+    linked = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if (opened.st_dev, opened.st_ino) != (linked.st_dev, linked.st_ino) \
+            or not expected_type(linked.st_mode):
+        raise RuntimeError(f"{name} was replaced while being secured")
+
+
 def _secure_dir(parent_fd: int, name: str, uid: int, gid: int, mode: int) -> int:
     try:
         os.mkdir(name, mode, dir_fd=parent_fd)
@@ -28,6 +36,7 @@ def _secure_dir(parent_fd: int, name: str, uid: int, gid: int, mode: int) -> int
     try:
         os.fchown(fd, uid, gid)
         os.fchmod(fd, mode)
+        _verify_path(fd, parent_fd, name, stat.S_ISDIR)
     except BaseException:
         os.close(fd)
         raise
@@ -45,6 +54,7 @@ def _secure_state(parent_fd: int, name: str, uid: int, gid: int) -> None:
             os.write(fd, b"{}\n")
         os.fchown(fd, uid, gid)
         os.fchmod(fd, 0o664)
+        _verify_path(fd, parent_fd, name, stat.S_ISREG)
     finally:
         os.close(fd)
 
