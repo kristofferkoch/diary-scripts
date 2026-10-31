@@ -61,6 +61,7 @@ Per-tool detail and the triage SOPs live in `docs/`. This file is the index.
 | [`docs/dsh-web-notify.md`](docs/dsh-web-notify.md) | dsh web login URL → Signal notifier |
 | [`docs/signal-notify.md`](docs/signal-notify.md) | `signal-notify-proxy` + `signal-attachment`: note-to-self sends and read-only attachment downloads (agent-facing) |
 | [`docs/diary-sync.md`](docs/diary-sync.md) | `diary-sync` / `diary-sync-broker`: allow-listed socket for the sjekk's privileged steps (spond/vigilo/skolemelding sync, `systemctl --user`) so the agent never holds those secrets |
+| [`docs/event-spool.md`](docs/event-spool.md) | independent trusted collection, immutable event IDs, atomic spool writes, and pipeline read/agent denial permissions |
 | [`docs/agent-merge.md`](docs/agent-merge.md) | `agent-merge-queue` / `agent-merge-approve`: separate automatic and approved trees, Signal-token publication |
 | [`docs/sudo-broker.md`](docs/sudo-broker.md) | `sudo-broker` / `sudo-ask`: per-command root approval from an open terminal, replacing standing `NOPASSWD` |
 | [`docs/audit.md`](docs/audit.md) | `diary-audit` / `diary-auditd`: trusted metadata-only journal writer, duplicate counters, baseline/review reports |

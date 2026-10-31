@@ -109,24 +109,57 @@ def safe_filename(name: str, index: int) -> str:
     return cleaned if index == 0 else f"{index}_{cleaned}"
 
 
-def load_state() -> dict[str, Any]:
-    if not STATE_PATH.exists():
-        return {}
+LEGACY_STATE_PATH = STATE_PATH
+
+
+def load_state(path: Path | None = None) -> dict[str, Any]:
+    path = path or STATE_PATH
     try:
-        data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    for key in ("messages", "attachment_retries"):
+        if not isinstance(data.get(key), dict):
+            data[key] = {}
+    data["messages"] = {
+        str(item_id): entry for item_id, entry in data["messages"].items()
+        if isinstance(entry, dict)
+    }
+    data["attachment_retries"] = {
+        str(item_id): attempts for item_id, attempts in data["attachment_retries"].items()
+        if type(attempts) is int and attempts >= 0
+    }
+    return data
 
 
-def save_state(state: dict[str, Any], *, bump: bool = True) -> None:
+def save_state(
+    state: dict[str, Any], *, bump: bool = True,
+    path: Path | None = None, private: bool = False,
+) -> None:
+    from scripts.safe_io import atomic_write_text
+    path = path or STATE_PATH
     if bump:
         state["last_successful_run"] = utcnow_iso()
         state["auth_required"] = False
-    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(
-        json.dumps(state, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    atomic_write_text(
+        path,
+        json.dumps(state, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+        mode=0o600 if private else 0o664,
     )
+
+
+def mirror_legacy_state(state: dict[str, Any]) -> None:
+    from scripts.safe_io import write_text_nofollow
+    try:
+        write_text_nofollow(
+            LEGACY_STATE_PATH,
+            json.dumps(state, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+            mode=0o664,
+        )
+    except OSError as exc:
+        print(f"!! skolemelding legacy state mirror failed: {exc}", file=sys.stderr)
 
 
 # --- Distillation -------------------------------------------------------------
@@ -440,7 +473,8 @@ def recently_ran(state: dict[str, Any]) -> bool:
             then = then.replace(tzinfo=timezone.utc)
     except ValueError:
         return False
-    return datetime.now(timezone.utc) - then < timedelta(seconds=floor)
+    age = datetime.now(timezone.utc) - then
+    return timedelta(0) <= age < timedelta(seconds=floor)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -453,15 +487,29 @@ def main(argv: list[str] | None = None) -> int:
                     help="Print records to stdout; write no JSONL, touch no state.")
     ap.add_argument("--force", action="store_true",
                     help=f"Ignore the {POLL_FLOOR_SECONDS}s poll floor between runs.")
+    ap.add_argument("--event-spool", type=Path,
+                    help="Also emit fresh in-memory records to this trusted event spool.")
+    ap.add_argument("--state-dir", type=Path,
+                    help="Read trusted collector state here; mirror legacy state after success.")
     args = ap.parse_args(argv)
 
     if not args.once:
         ap.error("--once is required (no daemon mode)")
 
-    state = load_state()
+    if args.state_dir:
+        args.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        args.state_dir.chmod(0o700)
+    state_path = args.state_dir / "skolemelding-state.json" if args.state_dir else STATE_PATH
+    state = load_state(state_path)
+    first_trusted_run = bool(args.state_dir and not state.get("last_successful_run"))
     if not args.force and not args.dry_run and recently_ran(state):
         print(f"skolemelding: ran less than {poll_floor_seconds()}s ago — nothing to do")
         return 0
+
+    def persist(*, bump: bool = True) -> None:
+        save_state(state, bump=bump, path=state_path, private=bool(args.state_dir))
+        if args.state_dir:
+            mirror_legacy_state(state)
 
     try:
         total, records, counts = run_once(state)
@@ -470,9 +518,9 @@ def main(argv: list[str] | None = None) -> int:
         # as the sjekk is concerned. State is reloaded from disk first:
         # fetch_messages mutates the in-memory copy mid-run, and persisting
         # those seen-marks would skip records the aborted run never emitted.
-        state = load_state()
+        state = load_state(state_path)
         state["auth_required"] = True
-        save_state(state, bump=False)
+        persist(bump=False)
         print("!! skolemelding auth expired — run skolemelding-login", file=sys.stderr)
         print(f"   ({e})", file=sys.stderr)
         return 0
@@ -485,9 +533,12 @@ def main(argv: list[str] | None = None) -> int:
         for rec in records:
             print(json.dumps(rec, ensure_ascii=False))
         return 0
-    if total:
+    if args.event_spool:
+        from scripts.event_export import emit_records
+        emit_records(args.event_spool, "skolemelding", records)
+    if total and not first_trusted_run:
         append_jsonl(today_jsonl(), records)
-    save_state(state)
+    persist()
     return 0
 
 

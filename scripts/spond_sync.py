@@ -76,7 +76,11 @@ def utcnow_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def load_state() -> dict[str, Any]:
+LEGACY_STATE_PATH = STATE_PATH
+
+
+def load_state(path: Path | None = None) -> dict[str, Any]:
+    path = path or STATE_PATH
     default = {
         "seen_chat_activity": {},
         "seen_event_activity": {},
@@ -84,18 +88,43 @@ def load_state() -> dict[str, Any]:
         "last_successful_run": None,
     }
     try:
-        data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return default
-    return data if isinstance(data, dict) else default
+    if not isinstance(data, dict):
+        return default
+    for key in ("seen_chat_activity", "seen_event_activity"):
+        if not isinstance(data.get(key), dict):
+            data[key] = {}
+    if not isinstance(data.get("seen_post_ids"), list) \
+            or not all(isinstance(item, str) for item in data["seen_post_ids"]):
+        data["seen_post_ids"] = []
+    return data
 
 
-def save_state(state: dict[str, Any]) -> None:
-    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+def save_state(
+    state: dict[str, Any], *, path: Path | None = None, private: bool = False
+) -> None:
+    from scripts.safe_io import atomic_write_text
+    path = path or STATE_PATH
     state["last_successful_run"] = utcnow_iso()
-    STATE_PATH.write_text(
-        json.dumps(state, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    atomic_write_text(
+        path,
+        json.dumps(state, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+        mode=0o600 if private else 0o664,
     )
+
+
+def mirror_legacy_state(state: dict[str, Any]) -> None:
+    from scripts.safe_io import write_text_nofollow
+    try:
+        write_text_nofollow(
+            LEGACY_STATE_PATH,
+            json.dumps(state, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+            mode=0o664,
+        )
+    except OSError as exc:
+        print(f"!! spond legacy state mirror failed: {exc}", file=sys.stderr)
 
 
 def get_password() -> str:
@@ -298,6 +327,10 @@ def main(argv: list[str] | None = None) -> int:
                     help=f"Comma-separated subset of {sorted(VALID_KINDS)}.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Print new records to stdout; do NOT write JSONL or update state.")
+    ap.add_argument("--event-spool", type=Path,
+                    help="Also emit fresh in-memory records to this trusted event spool.")
+    ap.add_argument("--state-dir", type=Path,
+                    help="Read trusted collector state here; mirror legacy state after success.")
     args = ap.parse_args(argv)
 
     if not args.once:
@@ -308,7 +341,12 @@ def main(argv: list[str] | None = None) -> int:
     if bad:
         ap.error(f"unknown kinds: {sorted(bad)}; valid: {sorted(VALID_KINDS)}")
 
-    state = load_state()
+    if args.state_dir:
+        args.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        args.state_dir.chmod(0o700)
+    state_path = args.state_dir / "spond-state.json" if args.state_dir else STATE_PATH
+    first_trusted_run = bool(args.state_dir and not state_path.exists())
+    state = load_state(state_path)
     total, records, counts = asyncio.run(run_once(kinds, state))
     print(f"new records: total={total}, by_kind={counts}", file=sys.stderr)
 
@@ -317,9 +355,14 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(rec, ensure_ascii=False))
         return 0
 
-    if total > 0:
+    if args.event_spool:
+        from scripts.event_export import emit_records
+        emit_records(args.event_spool, "spond", records)
+    if total > 0 and not first_trusted_run:
         append_jsonl(today_jsonl(), records)
-    save_state(state)
+    save_state(state, path=state_path, private=bool(args.state_dir))
+    if args.state_dir:
+        mirror_legacy_state(state)
     return 0
 
 
