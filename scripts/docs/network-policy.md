@@ -57,9 +57,16 @@ The controller checks the NFLOG forwarder before recording a successful locked
 or attended transition and during every 30-second runtime audit check. Attended
 mode requires it both before and after activation; locked policy is applied
 before an unavailable forwarder can fail the transition. The forwarder's own
-watchdog covers a stuck receiver/worker and trusted-audit write failure. Runtime
-failure enters the locked failsafe; in dark mode this restores observation
-without stopping agents.
+watchdog covers a stuck receiver/worker and trusted-audit write failure.
+
+Failure handling does not depend on those polls. The CTL-03 drop-in disables
+automatic forwarder restart and wires `OnFailure` to a fresh one-shot recovery
+unit. That unit first applies the network failsafe, then restarts the forwarder,
+then requests and verifies locked controller state. A failure followed by an
+active forwarder before the next poll therefore still has an authoritative
+containment and locked-transition record. Failed containment skips the restart;
+failed recovery falls back to `diary-lock-failsafe.service`. In dark mode the
+same sequence restores observation without stopping agents.
 
 The NFLOG reader accepts only the fixed AUD-02 and CTL-03 prefixes. Dark events
 remain simulated `would_deny` observations. Locked new/established events are
@@ -181,7 +188,16 @@ is mandatory even when a check fails.
    report attended policy. No blocked network operation may be replayed after
    recovery.
 
-7. Inspect the trusted evidence:
+7. Kill the forwarder while attended and wait for
+   `diary-network-audit-failure.service` to finish. Confirm its journal shows
+   network failsafe before forwarder restart, the forwarder is active, and
+   `diary-lock status` is `LOCKED` before any 30-second poll is required. Verify
+   the loaded forwarder has `Restart=no` and
+   `OnFailure=diary-network-audit-failure.service`. Repeat in dark mode after
+   cleanup preparation and confirm the same containment-first recovery does not
+   stop agents.
+
+8. Inspect the trusted evidence:
 
    ```bash
    journalctl --namespace=diary-lock DIARY_AUDIT_EVENT=network.flow \
@@ -194,7 +210,7 @@ is mandatory even when a check fails.
    remain available. No payload, URL, query, command, or source-address fields
    are permitted.
 
-8. Exit the armed shell to run its trap. Confirm the arm file is absent, locked
+9. Exit the armed shell to run its trap. Confirm the arm file is absent, locked
    controller mode is active, attended is inactive, the agent user manager has
    been restarted after failure injection, and `verify locked` passes in dark
    mode. The final `nft list table inet diary_agent_policy` must contain dark

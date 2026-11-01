@@ -71,8 +71,11 @@ backward or forward wall-clock steps do not extend or prematurely expire the
 session. Runtime health checks combine the fixed AUD-01 journal heartbeat and
 exact emission read-back with an active NFLOG-forwarder check every 30 seconds.
 The forwarder has its own 15-second systemd watchdog and exits when its worker
-or trusted audit writer fails, allowing controller supervision to invoke the
-locked failsafe in attended, locked, and dark modes.
+or trusted audit writer fails. Its CTL-03 `OnFailure` unit independently applies
+network containment before restarting the forwarder and requesting locked
+controller state, so a fail-then-active-before-poll sequence cannot bypass the
+locked failsafe in attended, locked, or dark mode. The 30-second checks remain
+defense in depth rather than the failure record.
 
 Failsafe first retains/persists `LOCKING`; it records `LOCKED` only after locked
 mode and conflict checks succeed. Mode, state, and audit errors are propagated.

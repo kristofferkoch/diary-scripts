@@ -53,9 +53,11 @@ audit socket operation has a two-second timeout; a stalled or unavailable
 writer therefore cannot apply backpressure to packet reception. Overflow and
 writer failures are counted, failed flow events are not retried, and health
 reporting is rate-limited to one attempt per 10 seconds. A failed audit write
-also marks the forwarder unhealthy: its bounded one-second receive loop exits
-and systemd restarts it rather than leaving apparently healthy attended
-observation. Healthy receive/worker/audit-writer state produces watchdog
+also marks the forwarder unhealthy: its bounded one-second receive loop exits.
+Standalone AUD-02 restarts it directly; the CTL-03 drop-in instead disables
+immediate restart and runs network containment before the recovery unit restarts
+the forwarder and records locked controller state. Healthy
+receive/worker/audit-writer state produces watchdog
 notifications every five seconds under `WatchdogSec=15`. Detected loss emits a
 bounded `network.audit_health` error when the writer can accept it, with
 `operation=receive` or `audit_write`. Exact cumulative sequence-gap, ENOBUFS,

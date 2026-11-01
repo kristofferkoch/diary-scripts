@@ -311,6 +311,18 @@ def test_runtime_forwarder_failure_invokes_failsafe(tmp_path: Path) -> None:
     assert svc.status()["state"] == "LOCKED"
 
 
+def test_forwarder_fail_then_active_before_poll_enters_locked_recovery(tmp_path: Path) -> None:
+    svc, modes, _, _, _ = controller(tmp_path)
+    svc.startup()
+    svc.break_glass(peer())
+    assert svc.status()["state"] == "ATTENDED"
+    modes.network_audit_available = True
+    svc.enter_locked("network_audit_failed")
+    assert svc.status()["state"] == "LOCKED"
+    assert modes.calls == ["locked", "attended", "locked"]
+    assert "diary-attended.service" not in modes.active
+
+
 def test_failsafe_propagates_write_errors_and_retains_locking(tmp_path: Path) -> None:
     svc, modes, events, _, _ = controller(tmp_path)
     events.fail_emit = True
