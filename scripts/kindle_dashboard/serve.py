@@ -51,8 +51,10 @@ log = logging.getLogger("kindle_dashboard")
 async def _lifespan(_: FastAPI):
     await _startup_selfcheck()
     await _start_watcher()
-    yield
-    await _shutdown()
+    try:
+        yield
+    finally:
+        await _shutdown()
 
 
 app = FastAPI(title="kindle_dashboard", docs_url=None, redoc_url=None,

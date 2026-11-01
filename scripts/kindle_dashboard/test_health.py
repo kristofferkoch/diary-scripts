@@ -122,3 +122,26 @@ def test_lifespan_preserves_startup_and_shutdown_order(monkeypatch):
 
     asyncio.run(exercise())
     assert calls == ["selfcheck", "watcher", "shutdown"]
+
+
+def test_lifespan_shutdown_runs_on_exception(monkeypatch):
+    calls = []
+
+    async def record(name):
+        calls.append(name)
+
+    monkeypatch.setattr(serve, "_startup_selfcheck", lambda: record("selfcheck"))
+    monkeypatch.setattr(serve, "_start_watcher", lambda: record("watcher"))
+    monkeypatch.setattr(serve, "_shutdown", lambda: record("shutdown"))
+
+    async def exercise():
+        errors = []
+        try:
+            async with serve._lifespan(serve.app):
+                raise RuntimeError("stop")
+        except RuntimeError as exc:
+            errors.append(str(exc))
+        return errors
+
+    assert asyncio.run(exercise()) == ["stop"]
+    assert calls == ["selfcheck", "watcher", "shutdown"]
