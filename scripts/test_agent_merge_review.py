@@ -157,7 +157,7 @@ def test_review_once_calls_local_http_model_and_binds_exact_oid(tmp_path: Path):
     assert report["approval"] == "owner-required"
     assert report["stale"] is False
     assert report["model_findings"][0]["kind"] == "security"
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640
     payload = json.dumps(requests[0])
     assert "private-host" not in payload
     assert "person@private-mail.no" not in payload

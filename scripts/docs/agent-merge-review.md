@@ -87,10 +87,12 @@ required; the reviewer has no approval capability.
 The diary-side `dsh/agent-uid/install` installs the root-owned launcher,
 reviewer configuration if absent, service, and path unit from the approved
 trees. It disables the old timer and starts one non-blocking review for any
-change that was already queued during upgrade. The service runs as the owner only because the isolated queue and its Git
-metadata are owner-only. Its writable path is limited to
-`/var/lib/agent-merge`. Home is otherwise inaccessible; only the queue,
-approved scripts, `hosts.toml`, and `review.toml` are read-only mounts. The
+change that was already queued during upgrade. The service runs as the
+unprivileged `diary-review` identity, with read-only ACLs on the isolated queue
+and no general access to owner-private files. Reports are group-accessible to
+the owner but not the agent. Its writable path is limited to
+`/var/lib/agent-merge`. Home is read-only, with explicit paths for the queue,
+approved scripts, `hosts.toml`, and `review.toml`. The
 installer resolves `hosts.vlm` and generates an egress drop-in allowing only
 loopback and those model IP addresses. Rerun the reviewed installer after a
 model endpoint or address change. The service does not run tests or any other

@@ -368,11 +368,10 @@ def call_model(endpoint: str, config: ReviewConfig, user_prompt: str, timeout: f
 
 
 def _write_json(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
+    path.parent.mkdir(mode=0o770, parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
     try:
-        os.fchmod(fd, 0o600)
+        os.fchmod(fd, 0o640)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
             handle.write("\n")
@@ -395,10 +394,8 @@ def review_once(
     timeout: float = 600.0,
 ) -> Path | None:
     """Review the current queue HEAD and persist an advisory, exact-OID report."""
-    report_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(report_dir, 0o700)
-    with (report_dir.parent / "review.lock").open("a+") as lock:
-        os.chmod(lock.name, 0o600)
+    report_dir.mkdir(mode=0o770, parents=True, exist_ok=True)
+    with (report_dir / "review.lock").open("a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         current = snapshot(queue)
         if current is None:
