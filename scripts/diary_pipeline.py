@@ -7,6 +7,7 @@ import dataclasses
 import http.client
 import ipaddress
 import os
+import re
 import stat
 import sys
 import tomllib
@@ -17,6 +18,7 @@ PIPELINE_CONFIG_PATH = Path("/etc/diary/pipeline.toml")
 ROOT_UID = 0
 MAX_CONFIG_BYTES = 4096
 MAX_HEALTH_BYTES = 4096
+MODEL_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
 
 class PipelineError(RuntimeError):
@@ -27,14 +29,18 @@ class PipelineError(RuntimeError):
 class ModelEndpoint:
     address: str
     port: int
+    model: str
 
 
 def _parse_document(document: Any) -> ModelEndpoint:
     if not isinstance(document, dict) or set(document) != {"pipeline"}:
         raise PipelineError("pipeline config must contain only [pipeline]")
     settings = document["pipeline"]
-    if not isinstance(settings, dict) or set(settings) != {"model_ip", "model_port"}:
-        raise PipelineError("pipeline config requires only model_ip and model_port")
+    if not isinstance(settings, dict) or set(settings) != {"model", "model_ip", "model_port"}:
+        raise PipelineError("pipeline config requires only model, model_ip and model_port")
+    model = settings["model"]
+    if not isinstance(model, str) or not MODEL_NAME_RE.fullmatch(model):
+        raise PipelineError("model must be a bounded ASCII identifier")
     value = settings["model_ip"]
     if not isinstance(value, str):
         raise PipelineError("model_ip must be a numeric IPv4 string")
@@ -47,7 +53,7 @@ def _parse_document(document: Any) -> ModelEndpoint:
     port = settings["model_port"]
     if type(port) is not int or not 1 <= port <= 65535:
         raise PipelineError("model_port must be a TCP port number")
-    return ModelEndpoint(str(address), port)
+    return ModelEndpoint(str(address), port, model)
 
 
 def read_pipeline_config(path: Path = PIPELINE_CONFIG_PATH) -> ModelEndpoint:

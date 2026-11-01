@@ -16,35 +16,58 @@ from scripts import diary_pipeline as pipeline
 
 def config(tmp_path: Path, content: str = "") -> Path:
     path = tmp_path / "pipeline.toml"
-    path.write_text(content or '[pipeline]\nmodel_ip = "127.0.0.1"\nmodel_port = 8080\n')
+    path.write_text(content or (
+        '[pipeline]\nmodel = "local-test-model"\n'
+        'model_ip = "127.0.0.1"\nmodel_port = 8080\n'
+    ))
     path.chmod(0o640)
     return path
 
 
-def test_fixed_config_accepts_numeric_ipv4(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_fixed_config_accepts_numeric_ipv4_and_fixed_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     monkeypatch.setattr(pipeline, "ROOT_UID", os.getuid())
     endpoint = pipeline.read_pipeline_config(config(tmp_path))
-    assert endpoint == pipeline.ModelEndpoint("127.0.0.1", 8080)
+    assert endpoint == pipeline.ModelEndpoint("127.0.0.1", 8080, "local-test-model")
 
 
 @pytest.mark.parametrize("content", [
-    '[pipeline]\nmodel_ip = "model-host"\nmodel_port = 8080\n',
-    '[pipeline]\nmodel_ip = "http://127.0.0.1"\nmodel_port = 8080\n',
-    '[pipeline]\nmodel_ip = "::1"\nmodel_port = 8080\n',
-    '[pipeline]\nmodel_ip = "0.0.0.0"\nmodel_port = 8080\n',
-    '[pipeline]\nmodel_ip = "224.0.0.1"\nmodel_port = 8080\n',
-    '[pipeline]\nmodel_ip = "127.0.0.1"\nmodel_port = true\n',
-    '[pipeline]\nmodel_ip = "127.0.0.1"\nmodel_port = 0\n',
-    '[pipeline]\nmodel_ip = "127.0.0.1"\nmodel_port = 65536\n',
-    '[pipeline]\nmodel_ip = "127.0.0.1"\n',
-    '[pipeline]\nmodel_ip = "127.0.0.1"\nmodel_port = 8080\ncloud = "https://example.com"\n',
-    '[other]\nmodel_ip = "127.0.0.1"\nmodel_port = 8080\n',
+    '[pipeline]\nmodel = "local-test-model"\nmodel_ip = "model-host"\nmodel_port = 8080\n',
+    '[pipeline]\nmodel = "local-test-model"\nmodel_ip = "http://127.0.0.1"\nmodel_port = 8080\n',
+    '[pipeline]\nmodel = "local-test-model"\nmodel_ip = "::1"\nmodel_port = 8080\n',
+    '[pipeline]\nmodel = "local-test-model"\nmodel_ip = "0.0.0.0"\nmodel_port = 8080\n',
+    '[pipeline]\nmodel = "local-test-model"\nmodel_ip = "224.0.0.1"\nmodel_port = 8080\n',
+    '[pipeline]\nmodel = "local-test-model"\nmodel_ip = "127.0.0.1"\nmodel_port = true\n',
+    '[pipeline]\nmodel = "local-test-model"\nmodel_ip = "127.0.0.1"\nmodel_port = 0\n',
+    '[pipeline]\nmodel = "local-test-model"\nmodel_ip = "127.0.0.1"\nmodel_port = 65536\n',
+    '[pipeline]\nmodel_ip = "127.0.0.1"\nmodel_port = 8080\n',
+    '[pipeline]\nmodel = "local-test-model"\nmodel_ip = "127.0.0.1"\n',
+    '[pipeline]\nmodel = "local-test-model"\nmodel_ip = "127.0.0.1"\nmodel_port = 8080\ncloud = "https://example.com"\n',
+    '[other]\nmodel = "local-test-model"\nmodel_ip = "127.0.0.1"\nmodel_port = 8080\n',
 ])
 def test_fixed_config_rejects_selectable_or_invalid_endpoints(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str
 ):
     monkeypatch.setattr(pipeline, "ROOT_UID", os.getuid())
     with pytest.raises(pipeline.PipelineError):
+        pipeline.read_pipeline_config(config(tmp_path, content))
+
+
+@pytest.mark.parametrize("model_value", [
+    '""', '"local model"', '"local/model"', '"/models/local.gguf"',
+    '"https://example.com/model"', '"-local"', '"local:8080"',
+    'true', '42', '"' + "a" * 129 + '"',
+])
+def test_fixed_config_rejects_unsafe_model_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_value: str
+):
+    monkeypatch.setattr(pipeline, "ROOT_UID", os.getuid())
+    content = (
+        f'[pipeline]\nmodel = {model_value}\n'
+        'model_ip = "127.0.0.1"\nmodel_port = 8080\n'
+    )
+    with pytest.raises(pipeline.PipelineError, match="model must be"):
         pipeline.read_pipeline_config(config(tmp_path, content))
 
 
@@ -117,7 +140,7 @@ def health_server(status: int = 200, location: str | None = None) -> Iterator[tu
 
 def test_fixed_model_health_succeeds():
     with health_server() as (address, port, requests):
-        pipeline.probe_model(pipeline.ModelEndpoint(address, port))
+        pipeline.probe_model(pipeline.ModelEndpoint(address, port, "local-test-model"))
     assert requests == ["/health"]
 
 
@@ -125,7 +148,7 @@ def test_fixed_model_health_succeeds():
 def test_health_does_not_follow_redirects_or_accept_other_endpoints(status: int):
     with health_server(status=status, location="http://192.0.2.1:8080/health") as (address, port, requests):
         with pytest.raises(pipeline.PipelineError, match=f"HTTP {status}"):
-            pipeline.probe_model(pipeline.ModelEndpoint(address, port))
+            pipeline.probe_model(pipeline.ModelEndpoint(address, port, "local-test-model"))
     assert requests == ["/health"]
 
 

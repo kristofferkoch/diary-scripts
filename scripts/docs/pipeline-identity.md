@@ -18,12 +18,20 @@ neither inherits the other's filesystem grants.
 
 The executable is installed from approved `diary-scripts` as root-owned
 `/usr/local/sbin/diary-pipeline`. Its unit, generated IP drop-in, and nftables
-policy are root-owned files under `/etc`. The only writable temporary namespace
-is private to the service. Home, the normal filesystem, the spool, controller
-state, audit sockets, collector state, and collector configuration are read-only
-or inaccessible as appropriate. There is no state directory, broker access,
-Git invocation, shell command, plugin loader, web search/fetch, endpoint option,
-or environment-selected configuration.
+policy are root-owned files under `/etc`. Home, the normal filesystem, the spool,
+controller state, audit sockets, collector state, and collector configuration
+are read-only or inaccessible as appropriate. There is no broker access, Git
+invocation, shell command, plugin loader, web search/fetch, endpoint option, or
+environment-selected configuration.
+
+The sole persistent writable path is `/var/lib/diary/triage-state`. Both the
+unit (`StateDirectory=diary/triage-state`, `StateDirectoryMode=0750`, and the
+matching single `ReadWritePaths`) and installer provision it as
+`diary-pipeline:diary-pipeline` mode `0750`; the installer rejects a symlink and
+verifies ownership/mode. `ProtectSystem=strict` remains enabled. This private
+directory is for PIPE-03's unambiguous local processing state, not collector
+state. `agent` has no access, and the service's temporary namespace remains
+private.
 
 PIPE-01's `/var/lib/diary/events` remains `kek:diary-pipeline` mode `2750`, with
 single-link `0640` event files. The pipeline group can read but not write them;
@@ -39,21 +47,25 @@ owned by root and group `diary-pipeline`, mode `0640`, and contains exactly:
 
 ```toml
 [pipeline]
+model = "local-model"
 model_ip = "192.0.2.10"
 model_port = 8080
 ```
 
-Replace the documentation address with the owner-selected local model's numeric
-IPv4 address. Hostnames, URLs, IPv6, unspecified/multicast addresses, unknown
-keys, alternate endpoints, non-root ownership, hard links, symlinks, and
-group/other write permission are rejected. The code never resolves DNS and has
-no ordinary-config or environment fallback. A health response other than HTTP
-200, including a redirect, fails closed; no redirect target or cloud endpoint is
+Replace the example values with the owner-selected fixed model identifier and
+local model's numeric IPv4 address. The model identifier is 1–128 ASCII letters,
+digits, dots, underscores, or hyphens and starts alphanumeric; empty values,
+paths, URLs, whitespace, colons, non-strings, and oversized names are rejected.
+Hostnames, endpoint URLs, IPv6, unspecified/multicast addresses, unknown keys,
+alternate endpoints, non-root ownership, hard links, symlinks, and group/other
+write permission are also rejected. The code never resolves DNS and has no
+ordinary-config or environment fallback. A health response other than HTTP 200,
+including a redirect, fails closed; no redirect target or cloud endpoint is
 contacted.
 
-An endpoint change therefore requires an owner edit to the root-owned TOML and a
-rerun of the reviewed installer. Agent-published diary configuration cannot
-alter the executable, address, port, or firewall policy.
+A model or endpoint change therefore requires an owner edit to the root-owned
+TOML and a rerun of the reviewed installer. Agent-published diary configuration
+cannot alter the executable, model, address, port, or firewall policy.
 
 ## Permanent UID egress
 
@@ -87,12 +99,14 @@ uv run pytest scripts/test_diary_pipeline.py
 systemd/test-pipeline-local   # from the diary worktree
 ```
 
-The Python tests pin strict config ownership/mode/schema, numeric-only endpoint
-selection, environment non-override, no CLI endpoint option, health success, and
-redirect/error rejection. The diary test validates the unit's identity and
-filesystem/socket restrictions, boot-persistent no-`ExecStop` policy unit,
-rendered nftables syntax, UID return/allow/drop ordering, installer fixed paths,
-and `systemd-analyze verify` syntax. These are not live containment proof.
+The Python tests pin strict config ownership/mode/schema, fixed-model and
+numeric-only endpoint selection, unsafe-model rejection, environment
+non-override, no CLI endpoint option, health success, and redirect/error
+rejection. The diary test validates the real unit's credentials, exactly one
+private writable state directory, read-only config/spool, filesystem/socket
+restrictions, boot-persistent no-`ExecStop` policy unit, rendered nftables
+syntax, UID return/allow/drop ordering, installer fixed paths, and
+`systemd-analyze verify` syntax. These are not live containment proof.
 
 ## Owner-controlled integration and live verification
 
@@ -101,30 +115,32 @@ separate diary and diary-scripts commits, the owner must:
 
 1. Confirm PIPE-01 is deployed and `/var/lib/diary/events` has the documented
    ownership/mode. Create `/etc/diary/pipeline.toml` from the approved example,
-   selecting the actual numeric model IPv4/port. Do not copy credentials into it.
+   selecting the actual fixed model identifier and numeric model IPv4/port. Do
+   not copy credentials into it.
 2. Review and run
    `sudo-ask /home/kek/diary-approved/systemd/install-pipeline-root`.
    The installer refuses missing approved files/spool/config, invalid config,
-   wrong primary group, and unsafe rendered policy before activation. It does
-   not start triage or install a pipeline timer/path trigger.
+   wrong primary group, unsafe state, and unsafe rendered policy before
+   activation. It does not start triage or install a pipeline timer/path trigger.
 3. Inspect the **loaded** unit and rule set, not only source files:
 
    ```bash
    systemctl show diary-pipeline.service \
      -p FragmentPath -p DropInPaths -p ExecStart -p User -p Group \
-     -p SupplementaryGroups -p ReadWritePaths -p ReadOnlyPaths \
-     -p InaccessiblePaths -p RestrictAddressFamilies \
-     -p IPAddressDeny -p IPAddressAllow
+     -p SupplementaryGroups -p StateDirectory -p StateDirectoryMode \
+     -p ReadWritePaths -p ReadOnlyPaths -p InaccessiblePaths \
+     -p RestrictAddressFamilies -p IPAddressDeny -p IPAddressAllow
    sudo nft list table inet diary_pipeline_egress
    stat -c '%U:%G:%a %n' /usr/local/sbin/diary-pipeline \
      /etc/diary/pipeline.toml /etc/nftables/diary-pipeline-egress.nft \
-     /etc/systemd/system/diary-pipeline.service
+     /etc/systemd/system/diary-pipeline.service /var/lib/diary/triage-state
    ```
 
    Require the exact installed executable, `diary-pipeline` user/group, empty
-   supplementary groups and write paths, only `AF_INET`, `IPAddressDeny=any`,
-   and only the configured model IP in both controls. All listed files must be
-   root-owned and not agent-writable.
+   supplementary groups, `diary/triage-state` mode `0750` as the only persistent
+   write path, only `AF_INET`, `IPAddressDeny=any`, and only the configured model
+   IP in both controls. The executable/config/policy files must be root-owned
+   and not agent-writable; triage state must be pipeline-owned mode `0750`.
 4. Prove the one allowed path and its API response:
 
    ```bash
@@ -152,10 +168,12 @@ separate diary and diary-scripts commits, the owner must:
    integration blocker, not a passing PIPE-02 test.
 7. As both `agent` and `diary-pipeline`, require failure to write the executable,
    unit/drop-ins, nftables file, or pipeline TOML. As `diary-pipeline`, require
-   failure to create/replace/unlink an event, read collector credentials or
+   success creating a harmless triage-state file but failure to
+   create/replace/unlink an event, read collector credentials or
    `/etc/diary/trusted.toml`, access collector state, connect to controller or
-   audit sockets, and write controller/policy/audit state. Use harmless scratch
-   target names and permission checks; do not damage real events or state.
+   audit sockets, and write controller/policy/audit state. As `agent`, require
+   no read/write access to triage state. Use harmless scratch target names and
+   permission checks; do not damage real events or state.
 8. Restart the egress unit and then reboot. After each, verify the exact table
    and UID are loaded before starting the health service, allowed health still
    succeeds, and denied DNS/other destinations still increase only the drop
