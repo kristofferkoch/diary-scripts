@@ -67,7 +67,7 @@ Per-tool detail and the triage SOPs live in `docs/`. This file is the index.
 | [`docs/event-spool.md`](docs/event-spool.md) | independent trusted collection, immutable event IDs, atomic spool writes, and pipeline read/agent denial permissions |
 | [`docs/legacy-state.md`](docs/legacy-state.md) | manual collector runtime state and safe migration out of tracked `memory/` |
 | [`docs/agent-merge.md`](docs/agent-merge.md) | `agent-merge-queue` / `agent-merge-approve`: separate automatic and approved trees, exact-OID owner publication |
-| [`docs/agent-merge-review.md`](docs/agent-merge-review.md) | advisory local-model scripts-queue review, allowlist redaction, owner-only reports |
+| [`docs/agent-merge-review.md`](docs/agent-merge-review.md) | advisory local-model scripts-queue review, pre-queue allowlist rejection, owner-readable reports |
 | [`docs/sudo-broker.md`](docs/sudo-broker.md) | `sudo-broker` / `sudo-ask`: per-command root approval from an open terminal, replacing standing `NOPASSWD` |
 | [`docs/audit.md`](docs/audit.md) | `diary-audit` / `diary-auditd`: trusted metadata-only journal writer, duplicate counters, baseline/review reports |
 | [`docs/retired-notes-shopping.md`](docs/retired-notes-shopping.md) | removed 2026-10: the `/notes/` and `/shopping/` pages |

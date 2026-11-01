@@ -30,6 +30,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
+if __package__:
+    from scripts.agent_merge_pii import DEFAULT_CONFIG, PiiError, prescan, read_config
+else:
+    from agent_merge_pii import DEFAULT_CONFIG, PiiError, prescan, read_config  # ty: ignore[unresolved-import]
+
 QUEUE_BRANCH = "queue/automatic"
 QUEUE_REF = f"refs/heads/{QUEUE_BRANCH}"
 BRANCH_RE = re.compile(r"^(dev|mem)/[a-z0-9][a-z0-9-]*$")
@@ -51,6 +56,10 @@ class ReviewRequired(QueueError):
     """A diary change contains paths that require explicit owner review."""
 
 
+class PiiRejected(QueueError):
+    """A scripts change contains an identity outside the explicit allowlist."""
+
+
 @dataclass(frozen=True)
 class QueuePaths:
     integration: Path
@@ -58,6 +67,7 @@ class QueuePaths:
     queue: Path
     worktrees: Path
     lock: Path = LOCK_PATH
+    review_config: Path = DEFAULT_CONFIG
 
 
 def default_paths() -> QueuePaths:
@@ -279,11 +289,30 @@ def request_advisory_review(paths: QueuePaths, reviewed: str) -> None:
             pass
 
 
+def enforce_scripts_pii(paths: QueuePaths, reviewed: str) -> None:
+    """Reject unapproved identities before a scripts commit enters the queue."""
+    try:
+        config = read_config(paths.review_config)
+    except PiiError as exc:
+        raise QueueError(f"cannot verify identity allowlist: {exc}") from exc
+    base = git(paths.queue, "rev-parse", "master").stdout.strip()
+    diff = git(paths.queue, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", f"{base}...{reviewed}").stdout
+    messages = git(paths.queue, "log", "--format=%B", f"{base}..{reviewed}").stdout
+    raw_paths = git(paths.queue, "diff", "--name-only", "-z", "--no-renames", f"{base}...{reviewed}").stdout
+    changed_paths = tuple(item for item in raw_paths.split("\0") if item)
+    findings = prescan(diff, messages, changed_paths, config.allowed_identities)
+    if findings:
+        locations = ", ".join(sorted({f"{item.path}:{item.kind}" for item in findings}))
+        raise PiiRejected(f"identity allowlist rejected change; fix and retry ({locations})")
+
+
 def queue_change(branch: str, expected: str, paths: QueuePaths, *, repo: str = "scripts") -> bool:
     """Merge one expected agent bundle into the isolated queue. Never push."""
     with queue_lock(paths):
         ensure_queue(paths)
         fetched = fetch_expected(paths.queue, paths, repo, branch, expected)
+        if repo == "scripts":
+            enforce_scripts_pii(paths, fetched)
         if git(paths.queue, "merge-base", "--is-ancestor", fetched, QUEUE_BRANCH, check=False).returncode == 0:
             if repo == "scripts":
                 current = git(paths.queue, "rev-parse", "HEAD").stdout.strip()
@@ -576,6 +605,9 @@ def queue_main(argv: list[str] | None = None) -> int:
     except ReviewRequired as exc:
         print(f"agent-merge: {exc}", file=sys.stderr)
         return 3
+    except PiiRejected as exc:
+        print(f"agent-merge: {exc}", file=sys.stderr)
+        return 4
     except QueueError as exc:
         print(f"agent-merge: {exc}", file=sys.stderr)
         return 1

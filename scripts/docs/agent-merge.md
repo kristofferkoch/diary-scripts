@@ -103,8 +103,14 @@ agent-merge-approve scripts <full-OID-from-rev-parse>
 For diary, use `/path/to/diary-automatic` and `agent-merge-approve diary <OID>`.
 The legacy `agent-merge-approve <OID>` form still means scripts.
 
-For scripts, queue-triggered `agent-merge-review` adds an advisory local-model
-report with allowlist-based accidental-PII redaction. It never approves or
+For scripts, an allowlist pre-scan rejects simple unapproved identities before
+queue acceptance. The request returns sanitized categories and paths to the
+producing agent, whose worktree remains available for fix-and-retry; matched
+values are not echoed. Queue operations and review-event writes are serialized
+by the queue lock, and trigger replacement is atomic.
+
+After acceptance, queue-triggered `agent-merge-review` adds an advisory local-model
+report without modifying the diff. It never approves or
 executes queued code. The report supplements the diff and tests; it does not
 replace them. See [`agent-merge-review.md`](agent-merge-review.md).
 

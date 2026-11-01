@@ -4,8 +4,9 @@
 
 `agent-merge-review` is the first, non-approving tier of automated review for
 the `diary-scripts` publication queue. It reads the isolated
-`queue/automatic` checkout, sends a redacted diff to the fixed local
-OpenAI-compatible chat endpoint in `hosts.vlm`, and writes an advisory report.
+`queue/automatic` checkout, sends the unchanged diff to the fixed local
+OpenAI-compatible chat endpoint in `hosts.vlm` only after the allowlist check
+passes, and writes an advisory report.
 It never executes queued code, approves a commit, merges, or pushes. Owner
 review and exact-OID approval remain mandatory.
 
@@ -57,17 +58,20 @@ such as `server`, `gpu-host`, documentation domains, loopback/unspecified
 addresses, and documentation IP ranges. An entry beginning with a dot allows
 that domain suffix.
 
-Before the model call, the reviewer scans added diff lines, filenames, and
-commit messages for simple email, URL, hostname/address assignment, and IPv4
-patterns. Non-allowlisted matches are replaced with fixed redaction markers;
-the matched value is not copied into the report. Context lines are also
-redacted before transmission, without creating new-change findings.
+Before queue acceptance, the merge service scans added diff lines, filenames,
+and commit messages for simple email, URL, hostname/address assignment, and
+IPv4 patterns. A non-allowlisted match rejects the request before it enters the
+queue or emits a review event. The producing agent receives only the finding
+category and path, never the matched value, and keeps its worktree for fixes.
+
+The reviewer rechecks the unchanged input before the model call. Any finding
+skips the model and produces an advisory error report instead. Clean input is
+sent exactly as committed; the reviewer never rewrites or redacts it.
 
 This is deliberately best-effort protection against simple accidental PII. It
 does not recognize every person's name, physical address, private identifier,
-or encoded value. Redaction is not a guarantee that only allowlisted PII
-reaches the model. The local model receives the remaining diff and can flag
-contextual PII, security, and correctness concerns.
+or encoded value. The local model can flag contextual PII, security, and
+correctness concerns, but its findings remain advisory.
 
 ## Model and report boundary
 

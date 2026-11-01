@@ -48,6 +48,8 @@ def paths(tmp_path: Path) -> amq.QueuePaths:
     run("git", "init", "--bare", str(remote))
     run("git", "remote", "set-url", "origin", str(remote), cwd=approved)
     run("git", "push", "-u", "origin", "master", cwd=approved)
+    review_config = tmp_path / "review.toml"
+    review_config.write_text('[review]\nmodel = "local-test"\n')
 
     return amq.QueuePaths(
         integration=integration,
@@ -55,6 +57,7 @@ def paths(tmp_path: Path) -> amq.QueuePaths:
         queue=tmp_path / "diary-scripts-automatic",
         worktrees=worktrees,
         lock=tmp_path / "queue.lock",
+        review_config=review_config,
     )
 
 
@@ -138,6 +141,31 @@ def test_bundle_queue_and_agent_cleanup_do_not_touch_integration(paths: amq.Queu
     )
     assert branch.returncode != 0, "agent cleanup deletes only the source branch"
     assert run("git", "rev-parse", "dev/change", cwd=paths.integration) == integration_head
+
+
+def test_pii_rejection_preserves_producer_work_and_allows_fix_and_retry(paths: amq.QueuePaths):
+    source = source_branch(paths)
+    commit(source, "private.py", 'host = "private-host"\n')
+    _, expected, bundle = make_bundle(paths, "dev/change")
+
+    with pytest.raises(amq.PiiRejected) as error:
+        amq.queue_change("dev/change", expected, paths)
+    assert "private-host" not in str(error.value)
+    assert "<diff>:identity" in str(error.value)
+    assert source.exists(), "rejection leaves the producing agent's worktree intact"
+    assert run("git", "rev-parse", "HEAD", cwd=paths.queue) == run("git", "rev-parse", "master", cwd=paths.queue)
+    assert not (paths.queue / "private.py").exists()
+    assert not (paths.lock.parent / "review-request").exists()
+    bundle.unlink()
+
+    commit(source, "private.py", 'host = "gpu-host"\n')
+    _, fixed, fixed_bundle = make_bundle(paths, "dev/change")
+    assert amq.queue_change("dev/change", fixed, paths) is True
+    assert (paths.queue / "private.py").read_text() == 'host = "gpu-host"\n'
+    assert (paths.lock.parent / "review-request").read_text() == reviewed(paths) + "\n"
+
+    amq.cleanup_agent_source(source_repo(paths), "dev/change", source)
+    fixed_bundle.unlink()
 
 
 def test_already_queued_request_reemits_review_event(paths: amq.QueuePaths):

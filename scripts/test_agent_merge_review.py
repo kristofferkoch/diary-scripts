@@ -107,7 +107,7 @@ def test_model_request_does_not_follow_redirects():
     assert target_requests == []
 
 
-def test_prescan_allowlists_fake_values_and_redacts_unapproved_values():
+def test_prescan_reports_unapproved_values_without_mutating_input():
     current = review.Snapshot(
         "a" * 40,
         "b" * 40,
@@ -124,26 +124,26 @@ def test_prescan_allowlists_fake_values_and_redacts_unapproved_values():
         "Contact person@private-commit.no\n",
         ("example.py",),
     )
-    findings, diff, messages = review.prescan(
-        current,
-        review.ReviewConfig("model", (*review.DEFAULT_FAKE_IDENTITIES, "Fake Person", ".example"), 120_000),
+    original = (current.diff, current.messages)
+    findings = review.prescan(
+        current.diff,
+        current.messages,
+        current.paths,
+        (*review.DEFAULT_FAKE_IDENTITIES, "Fake Person", ".example"),
     )
-    assert "private-host" not in diff
-    assert "person@private-mail.no" not in diff
-    assert "person@private.invalid" not in diff
-    assert "10.20.30.40" not in diff
-    assert "person@example.test" in diff
-    assert "Fake Person" in diff
-    assert "203.0.113.10" in diff
-    assert "person@private-commit.no" not in messages
+    assert (current.diff, current.messages) == original
+    assert "person@example.test" in current.diff
+    assert "Fake Person" in current.diff
+    assert "203.0.113.10" in current.diff
     assert {item.kind for item in findings} == {"identity", "email", "network-identity"}
     assert all("private-host" not in item.detail for item in findings)
+    assert all("person@private-mail.no" not in item.detail for item in findings)
 
 
 def test_review_once_calls_local_http_model_and_binds_exact_oid(tmp_path: Path):
     queue, base = make_queue(
         tmp_path,
-        'host = "private-host"\nrecipient = "person@private-mail.no"\n',
+        'host = "gpu-host"\nrecipient = "person@example.test"\n',
     )
     with model_server(completion(findings=[{
         "kind": "security", "path": "example.py", "detail": "Check outbound handling"
@@ -159,8 +159,8 @@ def test_review_once_calls_local_http_model_and_binds_exact_oid(tmp_path: Path):
     assert report["model_findings"][0]["kind"] == "security"
     assert stat.S_IMODE(path.stat().st_mode) == 0o640
     payload = json.dumps(requests[0])
-    assert "private-host" not in payload
-    assert "person@private-mail.no" not in payload
+    assert "gpu-host" in payload
+    assert "person@example.test" in payload
     assert requests[0]["model"] == "local-test-model"
     assert requests[0]["cache_prompt"] is False
     assert requests[0]["response_format"]["type"] == "json_schema"
@@ -169,6 +169,21 @@ def test_review_once_calls_local_http_model_and_binds_exact_oid(tmp_path: Path):
     rendered = review.render_report(report)
     assert "Owner review and exact-OID approval are still required" in rendered
     assert "Check outbound handling" in rendered
+
+
+def test_prescan_rejection_skips_model_without_echoing_value(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    queue, _ = make_queue(tmp_path, 'host = "private-host"\n')
+
+    def unexpected(*args: object, **kwargs: object) -> dict:
+        raise AssertionError("model must not be called")
+
+    monkeypatch.setattr(review, "call_model", unexpected)
+    path = review.review_once(queue, tmp_path / "reports", config(tmp_path))
+    assert path is not None
+    report = review.load_report(path)
+    assert report["model_status"] == "skipped"
+    assert report["prescan_findings"]
+    assert "private-host" not in json.dumps(report)
 
 
 def test_existing_report_is_not_recomputed_without_force(tmp_path: Path):
@@ -268,7 +283,7 @@ def test_model_schema_fails_closed(mutation):
 def test_config_rejects_unknown_keys_and_symlinks(tmp_path: Path):
     path = config(tmp_path)
     path.write_text(path.read_text() + "endpoint = \"https://example.com\"\n")
-    with pytest.raises(review.ReviewError):
+    with pytest.raises(review.PiiError):
         review.read_config(path)
     (tmp_path / "valid").mkdir()
     valid = config(tmp_path / "valid")
