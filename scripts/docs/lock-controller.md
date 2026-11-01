@@ -15,11 +15,19 @@ belong to their separate cards and general-agent lockdown remains disabled.
 adds only the local owner to that group and removes `agent` and
 `diary-pipeline`. Filesystem permissions are not the only check: every request
 uses kernel `SO_PEERCRED`, and the daemon accepts commands only from UID 0 or
-the configured owner's kernel UID. Client-supplied UIDs, names, sessions,
-reasons, expiry values, and other identity assertions are rejected. Unknown
-commands and extra request fields are rejected without changing state. In
-particular, an unauthorized caller cannot use a malformed request to force a
-transition or extend attendance.
+the configured owner's kernel UID. Peer authorization happens immediately after
+accept, before reading any request bytes, so an unauthorized partial frame is
+rejected without waiting for its timeout or invoking failsafe. Client-supplied
+UIDs, names, sessions, reasons, expiry values, and other identity assertions are
+rejected. Unknown commands and extra request fields are rejected without
+changing state. In particular, an unauthorized caller cannot use a malformed
+request to force a transition or extend attendance.
+
+The owner UID is itself the CTL-01 break-glass authorization. Any process with
+that UID may request or renew attendance noninteractively and without a renewal
+limit; each request is audited. The TTY confirmation described below is client
+convenience, not a trusted local-interaction boundary. Fresh human authentication
+and independent UI renewal controls belong to CTL-08/CTL-07.
 
 Requests are bounded newline-delimited JSON with exactly one `cmd` field:
 `status`, `lock`, or `break_glass`. `status` returns the daemon's authoritative
@@ -30,12 +38,14 @@ this card does not implement it.
 ## Durable state and fail-closed lifecycle
 
 State lives in root-only `/var/lib/diary-lock/state.json`. The parent must be
-owned by the daemon and not group/world writable. State is a bounded,
-mode-`0600`, non-symlink file written through a same-directory temporary file,
-file fsync, atomic rename, and directory fsync. It records a schema version,
-state, kernel boot ID, update time, and attendance expiry. Unknown fields,
-invalid types, loose permissions, symlinks, malformed JSON, and oversized state
-are unreadable and therefore unsafe.
+owned by the daemon and not group/world writable. State is opened nonblocking
+with `O_NOFOLLOW`, and `fstat` must prove a regular, owner-only mode-`0600` file
+before reading. FIFOs, directories, sockets, symlinks, foreign ownership, and
+loose modes are rejected without a blocking read. Writes use a same-directory
+temporary file, file fsync, atomic rename, and directory fsync. The bounded
+record contains a schema version, state, kernel boot ID, update time, and wall
+attendance expiry for display. Unknown fields, invalid types, malformed JSON,
+and oversized state are unreadable and therefore unsafe.
 
 Every controller start first activates `diary-locked.service`, including a
 same-boot restart after attended mode. A previous attended record never
@@ -47,10 +57,17 @@ startup fails and the failsafe remains responsible for locked mode.
 A lock request persists `LOCKING` before activating and verifying the locked
 unit, then persists `LOCKED`. A break-glass request emits its override audit,
 persists `LOCKING`, activates and verifies attended mode, and persists
-`ATTENDED` with a 15-minute expiry. The maintenance loop expires attendance
-without accepting agent activity as an extension. Audit health is checked with
-a fixed content-free AUD-01 `ping`; audit, state, mode, notification, or
-main-loop failure invokes the failsafe and terminates supervision failure.
+`ATTENDED` with a 15-minute expiry. Active attendance enforcement and remaining
+seconds use a monotonic deadline, so backward or forward wall-clock steps do not
+extend or prematurely expire the session. Audit health uses a fixed AUD-01
+journal heartbeat and exact emission read-back every 30 seconds.
+
+Failsafe first retains/persists `LOCKING`; it records `LOCKED` only after locked
+mode and conflict checks succeed. Mode, state, and audit errors are propagated.
+Any operational request-thread failure is latched as fatal, stops watchdog
+notifications, and exits nonzero so systemd's independent failsafe acts even if
+the daemon's own first failsafe also failed. The daemon never continues as a
+healthy `LOCKED` process after such a request failure.
 
 `diary-locked.service` and `diary-attended.service` conflict. Attended mode also
 conflicts with `diary-lock-failsafe.service`. The controller verifies both the
@@ -69,13 +86,14 @@ diary-lock break-glass
 ```
 
 The command requires the owner account and a TTY, displays a bypass warning,
-and requires typing `ATTENDED`. The daemon independently authorizes the kernel
-peer UID; the terminal check is not its identity mechanism. Break-glass does
-not require WebAuthn or report acknowledgement. It emits warning-priority
+and requires typing `ATTENDED` to reduce accidental activation. This TTY check
+is not a security boundary: the daemon authorizes only the kernel owner UID and
+accepts noninteractive renewal from that UID as documented above. Break-glass
+does not require WebAuthn or report acknowledgement. It emits warning-priority
 `controller.break_glass` request and allow events with trusted caller PID, UID,
 and GID before/after the attended transition. Failure of either audit or the
-transition returns to locked mode. Use `diary-lock lock` to end attendance
-immediately; otherwise it expires after 15 minutes.
+transition invokes fatal failsafe handling. Use `diary-lock lock` to end
+attendance immediately; otherwise it expires after 15 monotonic minutes.
 
 ## Approved installation and dark live verification
 
@@ -86,10 +104,20 @@ synchronized:
 sudo-ask /home/kek/diary-approved/systemd/install-controller-root
 ```
 
-The installer refreshes the AUD-01 installed client for the fixed health-check
+The installer refreshes the AUD-01 installed client for the journal heartbeat
 protocol, installs the root-owned controller and units, enables locked mode and
-the controller at boot, and restarts only the audit/controller services. It
-then verifies:
+the controller at boot, and restarts only the audit/controller services. Group
+changes do not alter existing process credentials: after installation, the
+owner must start a fresh login and verify `id -nG` includes
+`diary-lock-control` before using the CLI. The installer's fresh `runuser`
+checks do not prove that an older owner session has fresh credentials.
+
+An EXIT trap is armed before the unlock attempt and remains armed through the
+final locked verification. Every post-unlock failure attempts explicit relock,
+falls back to the failsafe unit, and verifies attended is inactive. The audit
+check captures a journal cursor before break-glass and accepts only a new
+`attended` event with the expected owner caller after that cursor. The
+installer then verifies:
 
 1. boot/restart state is locked and attended is inactive;
 2. the owner can read/lock state while agent and pipeline identities cannot use

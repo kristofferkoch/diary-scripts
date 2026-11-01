@@ -17,6 +17,7 @@ import pwd
 import signal
 import socket
 import socketserver
+import stat
 import struct
 import subprocess
 import sys
@@ -32,6 +33,7 @@ DEFAULT_AUDIT_SOCKET = "/run/diary-audit/socket"
 DEFAULT_GROUP = "diary-lock-control"
 DEFAULT_OWNER = "kek"
 DEFAULT_ATTENDED_SECONDS = 15 * 60
+AUDIT_HEALTH_INTERVAL = 30.0
 MAX_REQUEST_BYTES = 4096
 MAX_STATE_BYTES = 4096
 STATES = frozenset({"LOCKING", "LOCKED", "ATTENDED"})
@@ -139,7 +141,7 @@ class StateStore:
     def load(self) -> dict[str, Any]:
         self._check_parent()
         try:
-            fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
+            fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         except FileNotFoundError:
             raise
         except OSError as exc:
@@ -147,6 +149,8 @@ class StateStore:
         try:
             with os.fdopen(fd, "rb") as handle:
                 info = os.fstat(handle.fileno())
+                if not stat.S_ISREG(info.st_mode):
+                    raise LockError("lock state must be a regular file")
                 if info.st_uid != os.geteuid() or info.st_mode & 0o077:
                     raise LockError("lock state has unsafe ownership or mode")
                 raw = handle.read(MAX_STATE_BYTES + 1)
@@ -292,6 +296,7 @@ class Controller:
         self.monotonic = monotonic
         self.state = "LOCKING"
         self.expires_at: float | None = None
+        self.deadline_monotonic: float | None = None
         self.lock = threading.RLock()
         self.next_audit_check = 0.0
 
@@ -299,16 +304,20 @@ class Controller:
         self.store.save(state, self.clock(), expires_at)
         self.state = state
         self.expires_at = expires_at
+        if state != "ATTENDED":
+            self.deadline_monotonic = None
 
     def status(self) -> dict[str, Any]:
         with self.lock:
             remaining = None
-            if self.expires_at is not None:
-                remaining = max(0, math.ceil(self.expires_at - self.clock()))
+            expires_at = self.expires_at
+            if self.deadline_monotonic is not None:
+                remaining = max(0, math.ceil(self.deadline_monotonic - self.monotonic()))
+                expires_at = self.clock() + remaining
             return {
                 "ok": True,
                 "state": self.state,
-                "expires_at": self.expires_at,
+                "expires_at": expires_at,
                 "remaining_seconds": remaining,
                 "boot_id": self.store.boot_id,
             }
@@ -331,7 +340,7 @@ class Controller:
             self.modes.activate("locked")
             self._save("LOCKED")
             self.audit.emit("controller.transition", "lock", "observed", "LOCKED", reason)
-            self.next_audit_check = self.monotonic() + 2.0
+            self.next_audit_check = self.monotonic() + AUDIT_HEALTH_INTERVAL
 
     def break_glass(self, peer: dict[str, int]) -> dict[str, Any]:
         with self.lock:
@@ -341,39 +350,56 @@ class Controller:
             )
             self._save("LOCKING")
             self.modes.activate("attended")
+            self.deadline_monotonic = self.monotonic() + self.attended_seconds
             self._save("ATTENDED", self.clock() + self.attended_seconds)
             self.audit.emit(
                 "controller.break_glass", "attended", "allow", "ATTENDED",
                 "local_owner_override", peer,
             )
-            self.next_audit_check = self.monotonic() + 2.0
+            self.next_audit_check = self.monotonic() + AUDIT_HEALTH_INTERVAL
             return self.status()
 
     def maintenance(self) -> None:
         with self.lock:
-            if self.state == "ATTENDED" and self.expires_at is not None and self.clock() >= self.expires_at:
-                self.enter_locked("attendance_expired")
             now = self.monotonic()
+            if (
+                self.state == "ATTENDED" and self.deadline_monotonic is not None
+                and now >= self.deadline_monotonic
+            ):
+                self.enter_locked("attendance_expired")
             if now >= self.next_audit_check:
                 self.audit.ping()
-                self.next_audit_check = now + 2.0
+                self.next_audit_check = now + AUDIT_HEALTH_INTERVAL
 
     def failsafe(self, reason: str) -> None:
         with self.lock:
-            self.state = "LOCKED"
+            self.state = "LOCKING"
             self.expires_at = None
+            self.deadline_monotonic = None
+            errors: list[Exception] = []
+            try:
+                self.store.save("LOCKING", self.clock())
+            except (LockError, OSError) as exc:
+                errors.append(exc)
             try:
                 self.modes.activate("locked")
-            except Exception:
-                pass
+            except (LockError, OSError) as exc:
+                errors.append(exc)
+            else:
+                try:
+                    self.store.save("LOCKED", self.clock())
+                except (LockError, OSError) as exc:
+                    errors.append(exc)
+                else:
+                    self.state = "LOCKED"
             try:
-                self.store.save("LOCKED", self.clock())
-            except Exception:
-                pass
-            try:
-                self.audit.emit("controller.failsafe", "lock", "error", "LOCKED", reason)
-            except Exception:
-                pass
+                self.audit.emit("controller.failsafe", "lock", "error", self.state, reason)
+            except (LockError, OSError) as exc:
+                errors.append(exc)
+            if errors:
+                raise LockError(
+                    "failsafe could not prove locked mode: " + "; ".join(str(error) for error in errors)
+                ) from errors[0]
 
     def handle(self, value: object, peer: dict[str, int], owner_uid: int) -> dict[str, Any]:
         if peer["uid"] not in {0, owner_uid}:
@@ -398,6 +424,8 @@ class LockRequestHandler(socketserver.StreamRequestHandler):
         conn.settimeout(10.0)
         peer = peer_credentials(conn)
         try:
+            if not server.authorized(peer):
+                raise RequestRejected("caller is not authorized")
             line = conn.makefile("rb").readline(MAX_REQUEST_BYTES + 1)
             if not line or len(line) > MAX_REQUEST_BYTES or not line.endswith(b"\n"):
                 raise RequestRejected("controller request is missing, oversized, or incomplete")
@@ -409,8 +437,14 @@ class LockRequestHandler(socketserver.StreamRequestHandler):
         except RequestRejected as exc:
             reply = {"ok": False, "error": str(exc)}
         except (LockError, OSError) as exc:
-            server.controller.failsafe("request_failed")
-            reply = {"ok": False, "error": str(exc)}
+            try:
+                server.controller.failsafe("request_failed")
+            except Exception as failsafe_error:
+                server.latch_failure(failsafe_error)
+                reply = {"ok": False, "error": f"{exc}; {failsafe_error}"}
+            else:
+                server.latch_failure(exc)
+                reply = {"ok": False, "error": str(exc)}
         try:
             conn.sendall(json.dumps(reply, separators=(",", ":")).encode("ascii") + b"\n")
         except OSError:
@@ -424,6 +458,8 @@ class LockDaemon(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         self.path = path
         self.controller = controller
         self.owner_uid = owner_uid
+        self.fatal_error: Exception | None = None
+        self.fatal_lock = threading.Lock()
         parent = Path(path).parent.stat()
         if parent.st_uid != os.geteuid() or parent.st_mode & 0o022:
             raise LockError("controller socket directory must be private to root")
@@ -438,6 +474,14 @@ class LockDaemon(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         super().__init__(path, LockRequestHandler)
         os.chown(path, -1, grp.getgrnam(group).gr_gid)
         os.chmod(path, 0o660)
+
+    def authorized(self, peer: dict[str, int]) -> bool:
+        return peer["uid"] in {0, self.owner_uid}
+
+    def latch_failure(self, error: Exception) -> None:
+        with self.fatal_lock:
+            if self.fatal_error is None:
+                self.fatal_error = error
 
     def server_close(self) -> None:
         super().server_close()
@@ -515,7 +559,10 @@ def daemon_main(argv: list[str] | None = None) -> int:
         sd_notify("READY=1")
     except (KeyError, LockError, OSError) as exc:
         if controller is not None:
-            controller.failsafe("startup_failed")
+            try:
+                controller.failsafe("startup_failed")
+            except (LockError, OSError) as failsafe_error:
+                print(f"diary-lockd: {failsafe_error}", file=sys.stderr)
         if server is not None:
             server.server_close()
         print(f"diary-lockd: {exc}", file=sys.stderr)
@@ -529,12 +576,20 @@ def daemon_main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     try:
-        while not stopping:
+        while not stopping and server.fatal_error is None:
             server.handle_request()
+            if server.fatal_error is not None:
+                break
             controller.maintenance()
             sd_notify("WATCHDOG=1")
+        if server.fatal_error is not None:
+            raise server.fatal_error
     except (LockError, OSError) as exc:
-        controller.failsafe("supervision_failed")
+        if server.fatal_error is None:
+            try:
+                controller.failsafe("supervision_failed")
+            except (LockError, OSError) as failsafe_error:
+                print(f"diary-lockd: {failsafe_error}", file=sys.stderr)
         print(f"diary-lockd: {exc}", file=sys.stderr)
         return 1
     finally:

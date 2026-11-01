@@ -596,6 +596,46 @@ def read_journal(namespace: str, since: dt.datetime, until: dt.datetime, limit: 
     return entries
 
 
+def read_journal_emission(namespace: str, emission_id: str, since: dt.datetime) -> list[dict]:
+    if not EMISSION_ID_RE.fullmatch(emission_id):
+        raise AuditError("invalid heartbeat emission ID")
+    argv = [
+        "/usr/bin/journalctl",
+        f"--namespace={namespace}",
+        "--output=json",
+        "--no-pager",
+        "--reverse",
+        "--lines=1",
+        "--since",
+        f"@{int(since.timestamp())}",
+        f"DIARY_AUDIT_SCHEMA_VERSION={SCHEMA_VERSION}",
+        "DIARY_AUDIT_EVENT=audit.heartbeat",
+        f"DIARY_AUDIT_EMISSION_ID={emission_id}",
+    ]
+    try:
+        proc = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AuditError("heartbeat journal query failed") from exc
+    if proc.returncode != 0:
+        raise AuditError("heartbeat journal query failed")
+    entries = []
+    for line in proc.stdout.splitlines():
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
+
+
 def _report_counter(entry: dict, field: str, default: int = 0) -> int:
     value = entry.get(field, default)
     if isinstance(value, str) and value.isdigit():
@@ -612,6 +652,8 @@ def summarize(entries: list[dict], report: str, since: dt.datetime, until: dt.da
     duplicate_records = 0
     for entry in entries:
         if entry.get("DIARY_AUDIT_SCHEMA_VERSION") not in (str(SCHEMA_VERSION), SCHEMA_VERSION):
+            continue
+        if entry.get("DIARY_AUDIT_EVENT") == "audit.heartbeat":
             continue
         decision = entry.get("DIARY_AUDIT_DECISION")
         if report == "review" and decision not in ATTENTION_DECISIONS:
@@ -679,12 +721,14 @@ class AuditService:
         namespace: str = DEFAULT_NAMESPACE,
         journal_reader: Callable[[str, dt.datetime, dt.datetime, int], list[dict]] = read_journal,
         clock: Callable[[], int] = lambda: time.time_ns() // 1000,
+        heartbeat_reader: Callable[[str, str, dt.datetime], list[dict]] = read_journal_emission,
     ) -> None:
         self.store = store
         self.writer = writer
         self.namespace = namespace
         self.journal_reader = journal_reader
         self.clock = clock
+        self.heartbeat_reader = heartbeat_reader
 
     def write(self, value: object, peer: dict[str, int]) -> dict:
         event, redacted = normalize_event(value)
@@ -697,6 +741,43 @@ class AuditService:
         result["ok"] = True
         result["redacted"] = redacted
         return result
+
+    def heartbeat(self, peer: dict[str, int]) -> dict:
+        now_us = self.clock()
+        emission_id = uuid.uuid4().hex
+        event = {
+            "event": "audit.heartbeat",
+            "component": "diary-auditd",
+            "operation": "journal_write",
+            "decision": "observed",
+            "lock_state": "not_applicable",
+            "event_id": emission_id,
+        }
+        base = _journal_fields(event, peer, [])
+        fields = {
+            **base,
+            "DIARY_AUDIT_FINGERPRINT": event_fingerprint(event),
+            "DIARY_AUDIT_EMISSION_ID": emission_id,
+            "DIARY_AUDIT_COUNT": "1",
+            "DIARY_AUDIT_NEW_COUNT": "1",
+            "DIARY_AUDIT_SUPPRESSED_COUNT": "0",
+            "DIARY_AUDIT_FIRST_SEEN_US": str(now_us),
+            "DIARY_AUDIT_LAST_SEEN_US": str(now_us),
+        }
+        self.writer.send(fields)
+        since = dt.datetime.fromtimestamp(max(0, now_us / 1_000_000 - 15), dt.UTC)
+        for attempt in range(10):
+            entries = self.heartbeat_reader(self.namespace, emission_id, since)
+            if any(
+                entry.get("DIARY_AUDIT_SCHEMA_VERSION") in (str(SCHEMA_VERSION), SCHEMA_VERSION)
+                and entry.get("DIARY_AUDIT_EVENT") == "audit.heartbeat"
+                and entry.get("DIARY_AUDIT_EMISSION_ID") == emission_id
+                for entry in entries
+            ):
+                return {"ok": True, "pong": True, "emission_id": emission_id}
+            if attempt < 9:
+                time.sleep(0.05)
+        raise AuditError("journal heartbeat was not readable")
 
     def report(self, request: dict) -> dict:
         kind = request["cmd"]
@@ -724,7 +805,7 @@ class AuditService:
         if set(request) - allowed or (cmd == "write" and "event" not in request):
             raise AuditError("invalid audit request fields")
         if cmd == "ping":
-            return {"ok": True, "pong": True}
+            return self.heartbeat(peer)
         if cmd == "write":
             return self.write(request["event"], peer)
         result = self.report(request)

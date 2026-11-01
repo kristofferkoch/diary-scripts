@@ -29,9 +29,14 @@ restart only those services in a controlled window and rerun the installer; it
 never kills unrelated services.
 The API additionally checks account identity on every connection, so retained
 client-group credentials cannot make `agent` or `diary-pipeline` trusted. A
-fixed, content-free `ping` request lets `diary-lockd` supervise audit health
-without emitting records. `controller.break_glass` events are warning priority
-even when their decision is `allow`, so local recovery overrides are prominent.
+fixed `ping` request emits a metadata-only `audit.heartbeat` with a unique
+emission ID and requires journald read-back of that exact record. This checks
+the `JournalWriter`, journal socket, journald, and read path rather than merely
+answering from the daemon. Missing/unwritable sockets and accepted-but-unstored
+records fail the health check. Heartbeats bypass duplicate counters and are
+excluded from baseline/review groups. `controller.break_glass` events are
+warning priority even when their decision is `allow`, so local recovery
+overrides are prominent.
 
 Writer PID/UID/GID come from `SO_PEERCRED`. A broker may additionally supply a
 `caller` object only when it obtained PID/UID/GID from its own peer credentials
