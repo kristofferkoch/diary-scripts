@@ -70,12 +70,14 @@ cannot alter the executable, model, address, port, or firewall policy.
 ## Permanent UID egress
 
 `diary-pipeline-egress.service` is enabled at boot and atomically loads the
-rendered `inet diary_pipeline_egress` output base chain. Rules occur in this
-order:
+rendered `inet diary_pipeline_egress` output base chain with **`policy accept`**.
+Rules occur in this order:
 
-1. Every UID other than the numeric `diary-pipeline` UID returns immediately.
-2. That UID may make new and established TCP connections only to the exact
-   configured IPv4 address and port.
+1. Every UID other than the numeric `diary-pipeline` UID returns immediately;
+   return from a base chain uses its accept policy, preserving that UID's
+   ordinary connectivity rather than dropping all host output.
+2. The pipeline UID may make new and established TCP connections only to the
+   exact configured IPv4 address and port.
 3. Every other packet from that UID is dropped, including DNS on TCP or UDP port
    53, loopback, other model ports, IPv6, and every external destination.
 
@@ -84,15 +86,17 @@ the oneshot unit does not remove the chain. Host nftables/firewalld reloads also
 reload this unit; restarts leave the existing table in place until its atomic
 replacement. The pipeline service requires the egress unit, and a generated
 systemd `IPAddressDeny=any` plus exact-address allow rule provides a second
-boundary. The general agent neither matches the UID allowance nor joins the
-pipeline group. General-agent lock enforcement is still a separate control;
+boundary. The loaded-unit check accepts both legacy `any` and systemd 259's
+exact normalized `::/0 0.0.0.0/0`, as well as the model address with its `/32`
+normalization. The general agent neither matches the UID allowance nor joins
+the pipeline group. General-agent lock enforcement is still a separate control;
 this policy does not pretend to provide it.
 
 ## Isolated verification
 
-These checks use scratch files, an isolated user/network namespace, and loopback
-HTTP servers only. They do not load host firewall rules, create users, install
-units, or contact a real model:
+These checks use scratch files, disposable user/network namespaces, a veth pair,
+and loopback HTTP servers only. They do not change host networking or firewall
+rules, create users, install units, or contact a real model:
 
 ```bash
 uv run pytest scripts/test_diary_pipeline.py
@@ -105,8 +109,11 @@ non-override, no CLI endpoint option, health success, and redirect/error
 rejection. The diary test validates the real unit's credentials, exactly one
 private writable state directory, read-only config/spool, filesystem/socket
 restrictions, boot-persistent no-`ExecStop` policy unit, rendered nftables
-syntax, UID return/allow/drop ordering, installer fixed paths, and
-`systemd-analyze verify` syntax. These are not live containment proof.
+syntax, UID return/allow/drop ordering, installer fixed paths, normalized
+`systemctl show` values, and `systemd-analyze verify` syntax. Real nft verdict
+tests over the disposable veth pair prove that an unrelated UID retains ordinary
+connectivity while the pipeline UID reaches only the exact model IP/port and is
+dropped on a wrong IP or port. These are not host-live containment proof.
 
 ## Owner-controlled integration and live verification
 
