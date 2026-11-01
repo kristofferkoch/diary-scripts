@@ -32,6 +32,7 @@ import os
 import re
 import socket
 import subprocess
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -45,7 +46,17 @@ from .health import HEALTH
 
 log = logging.getLogger("kindle_dashboard")
 
-app = FastAPI(title="kindle_dashboard", docs_url=None, redoc_url=None)
+
+@asynccontextmanager
+async def _lifespan(_: FastAPI):
+    await _startup_selfcheck()
+    await _start_watcher()
+    yield
+    await _shutdown()
+
+
+app = FastAPI(title="kindle_dashboard", docs_url=None, redoc_url=None,
+              lifespan=_lifespan)
 
 # --- device control plane ---------------------------------------------------
 #
@@ -326,7 +337,6 @@ def _sd_notify(state: str) -> None:
         log.exception("sd_notify failed")
 
 
-@app.on_event("startup")
 async def _startup_selfcheck() -> None:
     """Exercise both hard dependencies at boot so restore gaps surface early.
 
@@ -382,7 +392,6 @@ async def _startup_selfcheck() -> None:
     _sd_notify(f"READY=1\nSTATUS=self-check {status}; serving")
 
 
-@app.on_event("startup")
 async def _start_watcher() -> None:
     """Kick off the precipitation watcher in the background."""
     from .watcher import precipitation_watcher
@@ -390,7 +399,6 @@ async def _start_watcher() -> None:
     asyncio.create_task(precipitation_watcher())
 
 
-@app.on_event("shutdown")
 async def _shutdown() -> None:
     await render.shutdown_browser()
 

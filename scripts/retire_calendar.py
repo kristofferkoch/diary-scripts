@@ -110,7 +110,10 @@ class MonthSection:
 
     def insert_event_sorted(self, line: str) -> None:
         """Insert `line` keeping event lines in ascending start-date order."""
-        new_start, _ = event_dates(line)  # type: ignore[misc]
+        dates = event_dates(line)
+        if dates is None:
+            raise ValueError("insert_event_sorted requires a parseable event line")
+        new_start, _ = dates
         # Find the position: after the last event whose start <= new_start.
         insert_at = None
         for i, ln in enumerate(self.lines):

@@ -41,7 +41,7 @@ def _ensure_kindle_format(img: Image.Image) -> Image.Image:
     if img.mode != "L":
         img = img.convert("L")
     if img.size != (KINDLE_W, KINDLE_H):
-        img = img.resize((KINDLE_W, KINDLE_H), Image.LANCZOS)
+        img = img.resize((KINDLE_W, KINDLE_H), Image.Resampling.LANCZOS)
     return img
 
 

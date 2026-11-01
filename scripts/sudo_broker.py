@@ -361,7 +361,8 @@ def handle(conn: socket.socket) -> None:
             send(conn, {"t": "state", "s": "error", "msg": "malformed request"})
             return
         cmd = req["cmd"]
-        cwd = req.get("cwd") if isinstance(req.get("cwd"), str) else "/"
+        requested_cwd = req.get("cwd")
+        cwd = requested_cwd if isinstance(requested_cwd, str) else "/"
         as_user = req.get("as", "root")
         if not cmd.strip():
             send(conn, {"t": "state", "s": "error", "msg": "empty command"})

@@ -51,7 +51,8 @@ def test_embed_messages_insert_replace_skip_and_cascade(
     with psycopg.connect(test_pg_dsn) as check:
         with check.cursor() as cur:
             cur.execute("SELECT count(*) FROM messages WHERE id = %s", (first_id,))
-            assert cur.fetchone()[0] == 1
+            row = cur.fetchone()
+            assert row is not None and row[0] == 1
 
     records[:] = [_event("acceptedIds")]
     assert em.process(writer_conn, "spond", None, False) == (1, 0, 0)

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from typing import Any
 
 import spond.spond
 
@@ -34,7 +35,9 @@ HANS = "H"
 
 
 def _event(rsvp_bucket: str | None = None, *, start: str = "2026-05-30T08:30:00Z") -> dict:
-    ev = {"id": "ev1", "heading": "Lørdagstrening", "startTimestamp": start}
+    ev: dict[str, object] = {
+        "id": "ev1", "heading": "Lørdagstrening", "startTimestamp": start,
+    }
     if rsvp_bucket:
         ev["responses"] = {rsvp_bucket: [HANS]}
     return ev
@@ -92,11 +95,13 @@ def test_rsvp_change_reemits_seen_event():
 
 def test_legacy_seen_event_ids_is_migrated():
     """Old id-only state is dropped and re-baselined under the new key."""
-    state = {"seen_event_ids": ["ev1"]}
+    state: dict[str, Any] = {"seen_event_ids": ["ev1"]}
     new, out = _run_fetch([_event("acceptedIds")], state, HANS)
     assert new == 1                          # re-emitted once to re-baseline
     assert "seen_event_ids" not in state     # legacy key gone
-    assert state["seen_event_activity"]["ev1"]
+    activity = state["seen_event_activity"]
+    assert isinstance(activity, dict)
+    assert activity["ev1"]
 
 
 def test_password_lookup_is_fixed_argv_not_a_shell(monkeypatch):

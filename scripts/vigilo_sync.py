@@ -62,7 +62,13 @@ import re
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
+
+
+class CheckInNotesApi(Protocol):
+    def check_in_notes(
+        self, child_id: str, *, from_date: str, to_date: str
+    ) -> list[dict[str, Any]]: ...
 
 from mail_reader.config import cfg, legacy_state_root
 
@@ -612,7 +618,7 @@ def _check_out_note_data(note: dict[str, Any], *, child_id: str, unit_names: dic
     }
 
 
-def fetch_check_out_notes(api: VigiloApi, state: dict[str, Any],
+def fetch_check_out_notes(api: CheckInNotesApi, state: dict[str, Any],
                           out: list[dict[str, Any]], child_ids: list[str],
                           units: list[tuple[str, str, str]]) -> dict[str, int]:
     """Hentemeldinger — the standing «går hjem selv» permission, and its expiry.

@@ -144,10 +144,10 @@ def run_command(argv: list[str] | tuple[str, ...],
     except subprocess.TimeoutExpired as exc:
         out = exc.stdout or ""
         err = exc.stderr or ""
-        for name, value in (("stdout", out), ("stderr", err)):
-            if isinstance(value, bytes):
-                out = out.decode("utf-8", "replace") if name == "stdout" else out
-                err = err.decode("utf-8", "replace") if name == "stderr" else err
+        if isinstance(out, bytes):
+            out = out.decode("utf-8", "replace")
+        if isinstance(err, bytes):
+            err = err.decode("utf-8", "replace")
         return {
             "ok": False,
             "exit_code": None,
@@ -356,7 +356,7 @@ def serve(listen: str, *, runner=run_command) -> int:
 # --- client ------------------------------------------------------------------
 
 
-def call(payload: dict, socket_path: str = DEFAULT_SOCKET,
+def call(payload: object, socket_path: str = DEFAULT_SOCKET,
          timeout: float = SYNC_TIMEOUT + 30) -> dict:
     """Send one request to the broker. Raises BrokerUnavailable when it is not
     reachable (missing socket, refused connection, no reply)."""

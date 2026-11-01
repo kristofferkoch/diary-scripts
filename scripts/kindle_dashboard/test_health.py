@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from scripts.kindle_dashboard import serve
@@ -103,3 +104,21 @@ def test_control_sh_unsigned_escape_hatch(tmp_path, monkeypatch):
     assert resp.status_code == 200
     assert resp.headers.get("X-Control-Unsigned") == "1"
     assert "X-Control-Sig" not in resp.headers
+
+
+def test_lifespan_preserves_startup_and_shutdown_order(monkeypatch):
+    calls = []
+
+    async def record(name):
+        calls.append(name)
+
+    monkeypatch.setattr(serve, "_startup_selfcheck", lambda: record("selfcheck"))
+    monkeypatch.setattr(serve, "_start_watcher", lambda: record("watcher"))
+    monkeypatch.setattr(serve, "_shutdown", lambda: record("shutdown"))
+
+    async def exercise():
+        async with serve._lifespan(serve.app):
+            pass
+
+    asyncio.run(exercise())
+    assert calls == ["selfcheck", "watcher", "shutdown"]

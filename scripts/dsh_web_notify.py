@@ -37,6 +37,8 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Callable
+from typing import TypedDict
 from urllib.parse import urlsplit, urlunsplit
 
 from mail_reader.config import dsh_web_url, kimi_web_url
@@ -44,8 +46,14 @@ from mail_reader.config import dsh_web_url, kimi_web_url
 DEFAULT_UNIT = "dsh-web"
 TOKEN_RE = re.compile(r"https?://\S*?token=\S+")
 
+
+class UnitDefaults(TypedDict):
+    base: Callable[[], str]
+    label: str
+
+
 # Per-unit defaults: public base + human label for the Signal message.
-UNIT_DEFAULTS = {
+UNIT_DEFAULTS: dict[str, UnitDefaults] = {
     "dsh-web": {"base": dsh_web_url, "label": "dsh web"},
     "kimi-web": {"base": kimi_web_url, "label": "kimi web"},
 }

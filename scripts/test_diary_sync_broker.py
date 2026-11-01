@@ -66,7 +66,9 @@ def test_sync_runs_fixed_argv_despite_agent_config(
         return {"ok": True, "output": "ok", "exit_code": 0}
 
     reply = _handle({"cmd": "sync", "target": "spond"}, runner=runner)
-    assert seen == [list(broker.sync_argv("spond"))]
+    argv = broker.sync_argv("spond")
+    assert argv is not None
+    assert seen == [list(argv)]
     assert seen[0][2:] == [
         "spond-sync", "--once",
         "--event-spool", "/var/lib/diary/events",
@@ -118,6 +120,7 @@ def test_fresh_boot_fallback_creates_owner_writable_lock_dir(isolated_runtime):
     lock_dir = isolated_runtime / "diary-collect"
     assert not lock_dir.exists()
     argv = broker.sync_argv("spond")
+    assert argv is not None
     assert lock_dir.is_dir()
     assert argv[1] == str(lock_dir / "spond.lock")
     assert lock_dir.stat().st_mode & 0o777 == 0o700

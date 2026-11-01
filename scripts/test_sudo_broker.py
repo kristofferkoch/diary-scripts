@@ -16,6 +16,7 @@ untouched.
 
 from __future__ import annotations
 
+import importlib
 import io
 import os
 import pty
@@ -26,11 +27,12 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from typing import Any, cast
 
 try:  # under pytest the repo root is on sys.path (`scripts` is a package)
     from scripts import sudo_broker
 except ImportError:  # running this file directly: scripts/ is sys.path[0]
-    import sudo_broker  # type: ignore[no-redef]
+    sudo_broker = cast(Any, importlib.import_module("sudo_broker"))  # type: ignore[no-redef]
 
 HERE = Path(__file__).resolve().parent
 DAEMON = HERE / "sudo_broker.py"

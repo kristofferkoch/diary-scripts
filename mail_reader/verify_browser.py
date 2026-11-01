@@ -278,7 +278,7 @@ def check_error_paths(page: Page, base: str, out: Path) -> Result:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("--base", default=DEFAULT_BASE,
                         help=f"base URL (default: {DEFAULT_BASE})")
     parser.add_argument("--out", type=Path, default=Path("/tmp/mr_shots"),

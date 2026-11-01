@@ -63,6 +63,7 @@ def _load_probe(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_PROBE_SRC)
     spec = importlib.util.spec_from_file_location(f"probe_{path.stem}", path)
+    assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod.ROOT
