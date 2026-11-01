@@ -51,40 +51,45 @@ failing completion hook exits successfully so a `Stop` hook can never ask the
 model to continue.
 
 Agent-owned hook configuration is not the containment boundary. On every
-`LOCKING` transition the controller requests both fixed web service stops
-without waiting, then repeatedly waits for service inactivity and rescans and
-stops **every active non-init scope in the dedicated agent user manager**. The
-user manager's `init.scope` is explicitly excluded. A scope created during
-cancellation is found by a later pass. Stopping services first prevents
-`Restart=on-failure` from resurrecting a model turn.
+`LOCKING` transition the controller repeatedly rediscovers and stops every
+active workload service and non-init scope in the dedicated agent user manager,
+then waits for inactivity. `init.scope` and the explicit
+`dbus-broker.service` infrastructure allowance are excluded; DSH/Kimi, token
+units, and arbitrary `app.slice/escape.service` workloads are not. A service or
+scope created during cancellation is found by a later pass. Services are
+stopped asynchronously before their scopes so `Restart=on-failure` cannot
+resurrect a model turn.
 
 Independently of the user manager, the controller enumerates `/proc`, pins
 process identities, and uses pidfds to SIGSTOP and SIGKILL workload candidates
 until none remain. UID matching alone is not eligibility. A process must also
 be under the real `user@<uid>.service` cgroup and either:
 
-- the `app.slice/dsh-web.service` or `app.slice/kimi-web.service` subtree; or
+- any `app.slice/*.service` subtree except `dbus-broker.service`, including
+  DSH/Kimi, token units, arbitrary services, and their children; or
 - a non-`init.scope` user scope, including controller and tool-created scopes.
 
-Thus the manager, `dbus-broker.service`, token units, and other infrastructure
-are preserved while workload children and respawns in eligible cgroups are
-contained. Zombies are not treated as running work. After PID quiescence the
-controller performs the service/non-init-scope loop again. A scope-stop or
-lingering-process failure retains durable `LOCKING`, never `LOCKED`. If the
-user manager itself is unavailable but PID containment proves no eligible
-workload remains, lock may complete in degraded mode.
+Thus the manager and explicitly allowed D-Bus infrastructure are preserved
+while workload children and respawns in eligible cgroups are contained. Zombies
+are not treated as running work. After PID quiescence the controller performs
+the workload-service/non-init-scope loop again. A stop or lingering-process
+failure retains durable `LOCKING`, never `LOCKED`. If the user manager itself
+is unavailable but PID containment proves no eligible workload remains, lock
+may complete in degraded mode.
 
 Before attended mode or its egress policy is activated, unlock explicitly
 checks and, if necessary, starts `user@<uid>.service` through the system
-manager; it never kills the manager to recover it. Unlock then requires every
-old workload service to be inactive, no active non-init scope, and no remaining
-eligible workload process. It starts each service and verifies a fresh
-supervisor PID, fresh runtime PID, and valid pinned parentage. Only after all
-services pass does the controller activate attended mode. A fresh service that
-accepts a prompt while durable state is still `LOCKING` follows the failsafe
-path above; there is no replay. The controller never opens or edits runtime
-conversation files. DSH persists an interrupted turn and requires a new user
-message to continue; the controlled verification below must prove the same
+manager; it never kills the manager to recover it. Manager startup may activate
+`default.target` and its enabled web services. The controller first quiesces
+all of those auto-started workload services and scopes and requires every
+workload to be inactive and every eligible process gone; it never attends the
+auto-started PIDs. Only then does it start each DSH/Kimi service and verify a
+fresh supervisor PID, fresh runtime PID, and valid pinned parentage. Only after
+all services pass does the controller activate attended mode. A fresh service
+that accepts a prompt while durable state is still `LOCKING` follows the
+failsafe path above; there is no replay. The controller never opens or edits
+runtime conversation files. DSH persists an interrupted turn and requires a new
+user message to continue; the controlled verification below must prove the same
 no-auto-resume behavior for the deployed DSH/Kimi versions.
 
 ## LATER-03 migration contract
@@ -133,21 +138,24 @@ DIARY_TEST_SYSTEMD_USER=1 uv run pytest \
 ```
 
 The opt-in probe creates a uniquely named synthetic service and scope with a
-supervised runtime, moves the runtime to the scope, spawns a `setsid` child,
-and stops only the synthetic units. It verifies both PIDs die, on-disk state
-remains, the real user-manager PID stays alive, fresh supervisor/runtime PIDs
-appear, and the fresh service does not recreate the old child. Its manager uses
-`contain_all_scopes=False`; production contains every non-init agent-user scope.
+supervised runtime plus an arbitrary `escape-*.service`, moves the runtime to
+the scope, spawns a `setsid` child, and stops only those synthetic units. It
+verifies the workload and arbitrary-service PIDs die, on-disk state remains,
+the real user-manager PID stays alive, fresh supervisor/runtime PIDs appear,
+and the fresh service does not recreate the old child. Its manager uses
+`contain_all_scopes=False` and a two-test-service lister; production contains
+every non-init scope and every non-D-Bus workload service.
 
 The ordinary suite performs a real PID-level user-manager-outage test with an
 allow-list containing only its two synthetic PIDs. It verifies the `/proc` and
 pidfd fallback kills the process tree without touching other processes. A
-fake-`/proc` regression includes the manager, D-Bus, and token infrastructure
-and proves they are ineligible, while service children and non-init scopes are
-eligible. Fake-systemd race tests inject a new scope during cancellation and
-require a later rescan to remove it; identity tests reject replacement before
-scope start and reattach. Ordinary lock→unlock also verifies manager recovery
-and fresh process startup separately from outage containment.
+fake-`/proc` regression proves only the manager and D-Bus are ineligible, while
+DSH/Kimi, token units, arbitrary `escape.service` children, and non-init scopes
+are eligible. Fake-systemd race tests inject a new scope during cancellation
+and require a later rescan to remove it; identity tests reject replacement
+before scope start and reattach. Outage lock→unlock separately models
+`default.target` auto-start and proves those PIDs are quiesced before fresh
+supervisor/runtime startup.
 
 ## Required controlled live verification
 
@@ -182,15 +190,17 @@ For each runtime:
    the controller must not report healthy attended/unscoped execution.
 8. Start a task/system-originated Kimi turn while locked. Observation-only
    `TurnStarted` must reach the root failsafe and kill the runtime rather than
-   continue. Create another tool scope during cancellation and verify a later
-   pass removes it before `LOCKED`.
+   continue. Create another tool scope and an arbitrary `escape.service` during
+   cancellation and verify later passes remove both before `LOCKED`; D-Bus and
+   the manager must remain active.
 
 Inject a scope-stop failure: it must retain `LOCKING` even when other scopes
 were stopped. Separately stop the user manager during an active test turn: the
 independent PID fallback must kill every recorded workload PID before degraded
-lock can complete. Attended mode must explicitly recover the manager and then
-start fresh supervisor/runtime processes; it must not kill the manager during
-recovery. Stop the controller during an active turn and verify its
+lock can complete. Attended mode must explicitly recover the manager, quiesce
+any `default.target` auto-started PIDs, and only then start fresh
+supervisor/runtime processes; it must not kill the manager or attend the
+auto-started PIDs. Stop the controller during an active turn and verify its
 stop/failsafe path also cancels the complete tree.
 
 After the controlled window, remove the turn-cancellation drop-in and custom

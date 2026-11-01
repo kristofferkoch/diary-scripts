@@ -33,11 +33,24 @@ class FakeSystemd:
         self.replaced_pids: set[int] = set()
         self.manager_available = True
         self.manager_recoveries = 0
+        self.auto_started_pids: list[tuple[int, int]] = []
+
+    def _require_manager(self) -> None:
+        if not self.manager_available:
+            raise lock.SystemdUnavailable("manager unavailable")
 
     def ensure_manager(self) -> None:
         if not self.manager_available:
             self.manager_available = True
             self.manager_recoveries += 1
+            for service in self.services:
+                if service == "dbus-broker.service" or self.services[service]:
+                    continue
+                self.services[service] = True
+                self.supervisor_pids[service] = self.supervisor_pids.get(service, 3000) + 1
+                self.pids[service] = self.pids.get(service, 3001) + 1
+                self.membership[service] = {self.pids[service]}
+                self.auto_started_pids.append((self.supervisor_pids[service], self.pids[service]))
 
     def identity(self, pid: int, ppid: int = 1) -> lock.ProcessIdentity:
         return lock.ProcessIdentity(pid, ppid, pid * 100, os.geteuid())
@@ -45,6 +58,7 @@ class FakeSystemd:
     def service_identities(
         self, service: str, wait: bool = False,
     ) -> tuple[lock.ProcessIdentity, lock.ProcessIdentity]:
+        self._require_manager()
         if not self.services[service]:
             raise lock.LockError("service is stopped")
         supervisor = self.supervisor_pids[service]
@@ -58,6 +72,7 @@ class FakeSystemd:
             raise lock.LockError("PID was replaced")
 
     def start_scope(self, scope: str, pid: int) -> None:
+        self._require_manager()
         self.calls.append(("start_scope", scope))
         for members in self.membership.values():
             members.discard(pid)
@@ -75,7 +90,12 @@ class FakeSystemd:
             members.discard(pid)
         self.membership[service] = {pid}
 
+    def workload_services(self) -> list[str]:
+        self._require_manager()
+        return sorted(service for service in self.services if service != "dbus-broker.service")
+
     def all_scopes(self) -> list[str]:
+        self._require_manager()
         return sorted(self.scopes_by_name)
 
     def scopes(self, runtime: str) -> list[str]:
@@ -83,11 +103,13 @@ class FakeSystemd:
         return sorted(scope for scope in self.scopes_by_name if scope.startswith(prefix))
 
     def active(self, unit: str) -> bool:
+        self._require_manager()
         if unit.endswith(".scope"):
             return unit in self.scopes_by_name and unit not in self.inactive_scopes
         return self.services[unit]
 
     def stop(self, unit: str, no_block: bool = False) -> None:
+        self._require_manager()
         self.calls.append(("stop", unit))
         if unit.endswith(".scope"):
             self.inactive_scopes.add(unit)
@@ -190,6 +212,22 @@ def test_lock_also_stops_tool_created_scopes_outside_controller_prefix() -> None
     assert "tool-created-escape.scope" in fake.inactive_scopes
 
 
+def test_arbitrary_service_and_token_are_workload_but_dbus_is_preserved() -> None:
+    fake = FakeSystemd()
+    fake.services.update({
+        "dsh-web-token.service": True,
+        "kimi-web-token.service": True,
+        "escape.service": True,
+        "dbus-broker.service": True,
+    })
+    svc = turns(fake)
+    svc.cancel()
+    assert not fake.services["dsh-web-token.service"]
+    assert not fake.services["kimi-web-token.service"]
+    assert not fake.services["escape.service"]
+    assert fake.services["dbus-broker.service"]
+
+
 def test_cancellation_attempts_every_scope_before_failing_closed() -> None:
     fake = FakeSystemd()
     svc = turns(fake)
@@ -234,15 +272,16 @@ def test_scope_created_during_cancellation_is_found_by_next_rescan() -> None:
     assert not any(fake.active(scope) for scope in fake.scopes_by_name)
 
 
-def test_attend_refuses_active_service_and_reused_fresh_pids() -> None:
+def test_attend_quiesces_stale_service_and_rejects_reused_fresh_pids() -> None:
     fake = FakeSystemd()
     svc = turns(fake)
     svc.cancel()
     fake.services["dsh-web.service"] = True
-    with pytest.raises(lock.LockError, match="refusing to resume active"):
-        svc.attend()
+    svc.attend()
+    assert fake.pids["dsh-web.service"] == 1101
+    assert fake.supervisor_pids["dsh-web.service"] == 1100
 
-    fake.services["dsh-web.service"] = False
+    svc.cancel()
     original = fake.start
 
     def reuse(service: str) -> None:
@@ -255,17 +294,22 @@ def test_attend_refuses_active_service_and_reused_fresh_pids() -> None:
         svc.attend()
 
 
-def test_ordinary_lock_unlock_recovers_manager_and_starts_fresh_processes() -> None:
+def test_outage_lock_unlock_quiesces_default_target_and_starts_fresh_processes() -> None:
     fake = FakeSystemd()
+    fake.manager_available = False
+    fake.services = {service: False for service in fake.services}
     svc = turns(fake)
     svc.cancel()
-    fake.manager_available = False
     svc.attend()
     assert fake.manager_available
     assert fake.manager_recoveries == 1
+    assert fake.auto_started_pids == [(1100, 1101), (2200, 2201)]
     assert all(fake.services.values())
-    assert fake.supervisor_pids == {"dsh-web.service": 1100, "kimi-web.service": 2200}
-    assert fake.pids == {"dsh-web.service": 1101, "kimi-web.service": 2201}
+    assert fake.supervisor_pids == {"dsh-web.service": 1101, "kimi-web.service": 2201}
+    assert fake.pids == {"dsh-web.service": 1102, "kimi-web.service": 2202}
+    for service in ("dsh-web.service", "kimi-web.service"):
+        current = (fake.supervisor_pids[service], fake.pids[service])
+        assert current not in fake.auto_started_pids
 
 
 def test_pid_replacement_is_rejected_before_scope_start_and_reattach() -> None:
@@ -419,6 +463,21 @@ def test_systemd_scope_cancellation_excludes_manager_init_scope() -> None:
     assert systemd.all_scopes() == ["tool-created.scope"]
 
 
+def test_systemd_workload_listing_includes_arbitrary_services_not_dbus() -> None:
+    def run(argv, **kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "dbus-broker.service loaded active running D-Bus\n"
+                "dsh-web-token.service loaded inactive dead Token notifier\n"
+                "escape.service loaded active running Adversarial service\n"
+            ),
+        )
+
+    systemd = lock.SystemdUser("agent", runner=run)
+    assert systemd.workload_services() == ["dsh-web-token.service", "escape.service"]
+
+
 def test_turn_socket_uses_kernel_agent_uid_and_preserves_protocol(tmp_path: Path) -> None:
     fake = FakeSystemd()
     svc = turns(fake)
@@ -506,11 +565,13 @@ def test_pid_fallback_preserves_manager_and_infrastructure_cgroups(tmp_path: Pat
     fake_process(tmp_path, 9004, f"{prefix}/app.slice/tool-created.scope")
     fake_process(tmp_path, 9005, f"{prefix}/app.slice/dbus-broker.service")
     fake_process(tmp_path, 9006, f"{prefix}/app.slice/kimi-web.service/tool-child")
+    fake_process(tmp_path, 9007, f"{prefix}/app.slice/escape.service")
     processes = lock.AgentProcesses(uid, proc_root=str(tmp_path))
     assert not processes.is_workload(9001)
-    assert not processes.is_workload(9003)
+    assert processes.is_workload(9003)
     assert not processes.is_workload(9005)
-    assert {identity.pid for identity in processes.processes()} == {9002, 9004, 9006}
+    assert processes.is_workload(9007)
+    assert {identity.pid for identity in processes.processes()} == {9002, 9003, 9004, 9006, 9007}
 
 
 def pid_running(pid: int) -> bool:
@@ -574,11 +635,13 @@ time.sleep(300)
 def test_real_control_group_kills_setsid_child_preserves_state_and_does_not_resume() -> None:
     tag = uuid.uuid4().hex
     service = f"diary-turn-probe-{tag}.service"
+    escape_service = f"escape-{tag}.service"
     state_dir = Path.cwd() / ".pytest-systemd" / tag
     state_dir.mkdir(parents=True)
     conversation = state_dir / "conversation.json"
     spawn = state_dir / "spawn"
     child_file = state_dir / "child.pid"
+    escape_pid_file = state_dir / "escape.pid"
     helper = r'''
 import json, os, pathlib, signal, subprocess, sys, time
 conversation = pathlib.Path(sys.argv[1])
@@ -601,11 +664,18 @@ signal.pause()
         sys.executable, "-c", helper, str(conversation), str(spawn), str(child_file),
     ]
     subprocess.run(command, check=True, capture_output=True, text=True, timeout=20)
+    subprocess.run([
+        "/usr/bin/systemd-run", "--user", "--unit", escape_service,
+        "--property=KillMode=control-group", "--property=Restart=no",
+        sys.executable, "-c",
+        "import os,pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(300)",
+        str(escape_pid_file),
+    ], check=True, capture_output=True, text=True, timeout=20)
     systemd = lock.SystemdUser(None)
+    cast(Any, systemd).workload_services = lambda: [service, escape_service]
     allowed: set[int] = set()
     processes = lock.AgentProcesses(
         os.geteuid(), eligible=lambda identity: identity.pid in allowed,
-        workload_services={service},
     )
     svc = lock.SystemdTurns(
         None, lambda: True, runtimes={"probe": service}, systemd=systemd,
@@ -637,7 +707,13 @@ signal.pause()
             time.sleep(0.05)
         old_child = int(child_file.read_text())
         assert old_child != old_pid and pid_running(old_child)
-        allowed.update({old_supervisor, old_pid, old_child})
+        for _attempt in range(200):
+            if escape_pid_file.exists():
+                break
+            time.sleep(0.05)
+        escape_pid = int(escape_pid_file.read_text())
+        assert pid_running(escape_pid)
+        allowed.update({old_supervisor, old_pid, old_child, escape_pid})
 
         assert svc.cancel() == 1
         for _attempt in range(100):
@@ -646,6 +722,8 @@ signal.pause()
             time.sleep(0.05)
         assert not pid_running(old_pid)
         assert not pid_running(old_child)
+        assert not pid_running(escape_pid)
+        assert not systemd.active(escape_service)
         assert json.loads(conversation.read_text())["turn"] == "working"
 
         spawn.unlink()
@@ -660,6 +738,7 @@ signal.pause()
         assert systemd.main_pid(service) != old_supervisor
         assert pid_running(manager_pid)
         assert manager_processes.processes() == []
+        assert not systemd.active(escape_service)
         allowed.update({current["pid"], systemd.main_pid(service)})
         time.sleep(0.2)
         assert child_file.read_text() == previous_child_record
@@ -670,5 +749,5 @@ signal.pause()
         try:
             svc.cancel()
         except lock.LockError:
-            subprocess.run(["/usr/bin/systemctl", "--user", "stop", service], check=False)
+            subprocess.run(["/usr/bin/systemctl", "--user", "stop", service, escape_service], check=False)
         shutil.rmtree(state_dir, ignore_errors=True)

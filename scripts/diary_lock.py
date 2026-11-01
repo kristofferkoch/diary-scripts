@@ -515,12 +515,12 @@ class AgentProcesses:
         uid: int,
         proc_root: str = "/proc",
         eligible: Callable[[ProcessIdentity], bool] | None = None,
-        workload_services: set[str] | None = None,
+        infrastructure_services: set[str] | None = None,
     ) -> None:
         self.uid = uid
         self.proc_root = proc_root
         self.eligible = eligible
-        self.workload_services = workload_services or {"dsh-web.service", "kimi-web.service"}
+        self.infrastructure_services = infrastructure_services or {"dbus-broker.service"}
         self.manager_prefix = f"/user.slice/user-{uid}.slice/user@{uid}.service/"
 
     def is_workload(self, pid: int) -> bool:
@@ -534,7 +534,7 @@ class AgentProcesses:
         if any(part.endswith(".scope") for part in parts):
             return True
         if len(parts) >= 2 and parts[0] == "app.slice":
-            return parts[1] in self.workload_services
+            return parts[1].endswith(".service") and parts[1] not in self.infrastructure_services
         return False
 
     def processes(self) -> list[ProcessIdentity]:
@@ -742,6 +742,18 @@ class SystemdUser:
             raise SystemdUnavailable(f"could not reattach PID {pid} to {service}")
         self.verify_membership(service, pid)
 
+    def workload_services(self) -> list[str]:
+        result = self._run("systemctl", [
+            "list-units", "--type=service", "--all", "--plain", "--no-legend",
+        ])
+        if result.returncode != 0:
+            raise SystemdUnavailable("cannot list agent workload services")
+        return [
+            parts[0]
+            for line in result.stdout.splitlines()
+            if (parts := line.split()) and parts[0] != "dbus-broker.service"
+        ]
+
     def all_scopes(self) -> list[str]:
         result = self._run("systemctl", [
             "list-units", "--type=scope", "--all", "--plain", "--no-legend",
@@ -880,12 +892,17 @@ class SystemdTurns:
 
     def _cancel_systemd(self) -> set[str]:
         self._capture_retired()
-        for service in self.runtimes.values():
-            self.systemd.stop(service, no_block=True)
         seen: set[str] = set()
         for _attempt in range(100):
             errors: list[str] = []
-            for service in self.runtimes.values():
+            services = set(self.systemd.workload_services())
+            active_services = {service for service in services if self.systemd.active(service)}
+            for service in sorted(active_services):
+                try:
+                    self.systemd.stop(service, no_block=True)
+                except LockError as exc:
+                    errors.append(str(exc))
+            for service in services:
                 try:
                     self.systemd.wait_inactive(service)
                 except LockError as exc:
@@ -899,9 +916,9 @@ class SystemdTurns:
                     errors.append(str(exc))
             if errors:
                 raise LockError("; ".join(errors))
-            if not active_scopes:
+            if not active_services and not active_scopes:
                 return seen
-        raise LockError("agent scopes could not be quiesced")
+        raise LockError("agent workloads could not be quiesced")
 
     def cancel(self) -> int:
         with self.lock:
@@ -923,14 +940,11 @@ class SystemdTurns:
     def attend(self) -> None:
         with self.lock:
             self.systemd.ensure_manager()
-            for service in self.runtimes.values():
-                if self.systemd.active(service):
-                    raise LockError(f"refusing to resume active {service}")
             self._cancel_systemd()
             self.processes.stop_and_kill()
             self.processes.require_empty()
             self._cancel_systemd()
-            for service in self.runtimes.values():
+            for service in self.systemd.workload_services():
                 if self.systemd.active(service):
                     raise LockError(f"refusing to resume active {service}")
             for service in self.runtimes.values():
