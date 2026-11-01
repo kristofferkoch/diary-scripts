@@ -18,7 +18,7 @@ Entry-point names: `mailshow`, `search-mail`, `embed-mail`, `embed-messages`,
 `dsh-web-notify`, `vigilo-api`, `vigilo-login`, `vigilo-sync`, `vigiloshown`,
 `skolemelding-api`, `skolemelding-login`, `skolemelding-sync`,
 `skolemeldingshow`, `diary-sync`, `diary-sync-broker`, `agent-merge-review`,
-`diary-audit`, `diary-auditd`, `diary-lock`, `diary-lockd`, `diary-network-auditd`. Server modules are invoked as `uv run python -m mail_reader.server` and
+`diary-audit`, `diary-auditd`, `diary-lock`, `diary-lockd`, `diary-network-auditd`, `diary-fresh-unlock`. Server modules are invoked as `uv run python -m mail_reader.server` and
 `uv run python -m scripts.kindle_dashboard.serve`.
 
 `uv run` creates/syncs `.venv/` on demand; you never need to activate
@@ -72,6 +72,7 @@ Per-tool detail and the triage SOPs live in `docs/`. This file is the index.
 | [`docs/audit.md`](docs/audit.md) | `diary-audit` / `diary-auditd`: trusted metadata-only journal writer, duplicate counters, baseline/review reports |
 | [`docs/lock-controller.md`](docs/lock-controller.md) | `diary-lock` / `diary-lockd`: durable peer-authenticated state, failsafe units, watchdog, and local break-glass |
 | [`docs/network-audit.md`](docs/network-audit.md) | `diary-network-auditd`: accept-only UID/NFLOG flow observation forwarded to the trusted audit writer |
+| [`docs/fresh-unlock.md`](docs/fresh-unlock.md) | `diary-fresh-unlock`: forced-login, browser-bound, single-use owner authorization boundary |
 | [`docs/retired-notes-shopping.md`](docs/retired-notes-shopping.md) | removed 2026-10: the `/notes/` and `/shopping/` pages |
 
 > **`scripts/` is a stopgap name.** Once we add scripts that aren't

@@ -66,6 +66,7 @@ diary-auditd      = "scripts.diary_audit:daemon_main"
 diary-lock        = "scripts.diary_lock:main"
 diary-lockd       = "scripts.diary_lock:daemon_main"
 diary-network-auditd = "scripts.diary_network_audit:daemon_main"
+diary-fresh-unlock = "scripts.diary_fresh_unlock:main"
 
 [build-system]
 requires = ["hatchling"]
