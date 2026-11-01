@@ -68,6 +68,7 @@ Per-tool detail and the triage SOPs live in `docs/`. This file is the index.
 | [`docs/event-spool.md`](docs/event-spool.md) | independent trusted collection, immutable event IDs, atomic spool writes, and pipeline read/agent denial permissions |
 | [`docs/pipeline-identity.md`](docs/pipeline-identity.md) | PIPE-02 fixed-purpose `diary-pipeline` identity, root-owned numeric model endpoint, permanent UID egress, and live verification gates |
 | [`docs/pipeline-triage.md`](docs/pipeline-triage.md) | PIPE-03 fixed-local-model triage, strict result validation, local review, and restart-safe state |
+| [`docs/pipeline-notifications.md`](docs/pipeline-notifications.md) | fixed-template safe rendering, local review/digests, durable per-event and aggregate rate limits |
 | [`docs/legacy-state.md`](docs/legacy-state.md) | manual collector runtime state and safe migration out of tracked `memory/` |
 | [`docs/agent-merge.md`](docs/agent-merge.md) | `agent-merge-queue` / `agent-merge-approve`: separate automatic and approved trees, exact-OID owner publication |
 | [`docs/agent-merge-review.md`](docs/agent-merge-review.md) | advisory local-model scripts-queue review, pre-queue allowlist rejection, owner-readable reports |
