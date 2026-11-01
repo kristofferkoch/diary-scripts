@@ -16,16 +16,24 @@ uv run diary-lockdown-acceptance verify --catalog /path/to/catalog.toml /path/to
 uv run pytest scripts/test_lockdown_acceptance.py
 ```
 
-`validate` checks schema, unique IDs/operations, the single reboot boundary,
-and mandatory source-design/ACT-01 coverage. `plan` only prints operations.
-`verify` only reads and authenticates the internal consistency of an existing
-run. None of these commands invokes an adapter or changes the host.
+`validate` checks the exact suite identity and ordered 47-case set, unique
+operations, semantic expectation/OID-predicate completeness, the single reboot
+boundary, and mandatory source-design/ACT-01 coverage. `plan` only prints
+operations. `verify` only reads and authenticates an existing run, including
+its cross-case OID binding and post-boot ID against the running kernel. None of
+these commands constructs an adapter or changes host enforcement.
 
 Live execution additionally requires both `--execute` and the exact
 acknowledgement exposed as `LIVE_ACKNOWLEDGEMENT` in
 `scripts/lockdown_acceptance.py`. The diary ACT-01 runbook is the operator
-entry point; do not run against a source checkout or an agent-writable adapter.
-The live catalog must also be root-owned and not group/other writable.
+entry point. Live run/resume accepts no catalog or adapter path override: it
+uses only `/usr/local/libexec/diary-lockdown-acceptance.toml` and
+`/usr/local/libexec/diary-lockdown-acceptance-adapter`. Each file and every
+ancestor must be root-owned, non-symlinked, and not group/other writable. The
+harness opens each final file with `O_NOFOLLOW`, validates it by descriptor,
+reads the catalog through that descriptor, and executes the adapter through
+`/proc/self/fd` with the descriptor inherited. Replacing a pathname after the
+check therefore cannot select a different inode.
 
 ## Adapter boundary
 
@@ -45,7 +53,7 @@ Request fields are exact:
 
 ```json
 {
-  "protocol": 1,
+  "protocol": 2,
   "suite_id": "act01-lockdown-acceptance",
   "run_id": "operator-selected-run-id",
   "case_id": "network.ipv4_tcp",
@@ -64,7 +72,7 @@ Response fields are exact except for the harness-added `_process` evidence:
 
 ```json
 {
-  "protocol": 1,
+  "protocol": 2,
   "status": "pass",
   "summary": "short non-private result summary",
   "evidence": {
@@ -78,18 +86,26 @@ Response fields are exact except for the harness-added `_process` evidence:
 
 Statuses are:
 
-- `pass`: every expected assertion held and every `required_evidence` key in
-  the catalog is present and nonempty. Numeric zero and boolean false are
-  valid measurements; they are not treated as missing. Owner acceptance, fresh
-  authorization, report acknowledgement, cleanup, and locked-state proofs must
-  be affirmative, and fields named `blocked_replay_count` or
-  `suppressed_replay_count` must be numeric zero.
+- `pass`: every `required_evidence` key is present and nonempty, and every
+  `[expect]` value matches exactly with the declared boolean/integer type.
+  Required boolean evidence without an expectation is rejected. Thus a response
+  cannot pass with `denied = false`, `all_rejected = false`, or
+  `passkey_user_verified = false`. `blocked_replay_count` and
+  `suppressed_replay_count` must both be numeric zero after
+  `replay.no_replay`, `owner.first_cycle`, and cleanup.
 - `fail`: an assertion failed. The harness stops and attempts cleanup/relock.
 - `blocked`: a dependency, adapter operation, or safe precondition is absent.
   This is not a pass and must never be converted to one.
 - `reboot_required`: valid only for the first `boot.locked` invocation. The
   adapter has verified locked state and staged its own trusted run state; the
   owner must reboot locally. The harness exits 3 without cleanup or unlock.
+
+`approved_commit_ids`, `deployed_commit_ids`, and `activated_commit_ids` are
+objects containing exactly `diary` and `scripts`, each a lowercase 40-character
+Git OID. `[oid_equal]` requires equality within preflight/activation, and the
+harness also binds all three across cases at execution time and again during
+verification. The bound object is persisted as `commit_oids` in `run.json`.
+Preflight-to-activation drift stops the run immediately.
 
 A pass with missing evidence, malformed JSON, extra response fields, a timeout,
 or an invalid boot transition is a failed case. Do not return credentials,
@@ -133,8 +149,10 @@ which concurrent outcome supplies each capability:
 - `replay.no_replay`: correlates every earlier blocked operation ID with a
   post-unlock observation window and trusted execution/audit records.
 - `boot.locked`: records the pre-reboot boot ID and locked proof, suspends, then
-  proves a different post-reboot boot ID, boot audit, agent denial, and pipeline
-  containment. The adapter does not reboot the host itself.
+  returns the same pre ID and a distinct post-reboot ID, boot audit, agent
+  denial, and pipeline containment. The post ID must equal the running kernel
+  at resume and final verification, and both records must agree on the pre ID.
+  The adapter does not reboot the host itself.
 - `owner.first_cycle`: the owner, not the adapter autonomously, reviews the live
   report, acknowledges findings, performs fresh user-verified passkey unlock,
   checks ordinary behavior and no replay, and records an explicit decision.
@@ -145,20 +163,26 @@ protocol violation and invalidates the run.
 ## Evidence layout
 
 A new run creates a mode-0700 directory below the operator-selected evidence
-root. Existing run IDs cannot be reused. The directory contains:
+root. Existing evidence-root, run, and cases directories must be root-owned
+non-symlink directories with exact mode 0700 during live run, resume, and
+verification; loose permissions are rejected rather than repaired. Existing
+run IDs cannot be reused. The directory contains:
 
 - `catalog.toml`: byte-for-byte catalog used for the run.
-- `run.json`: suite/run identity, catalog SHA-256, current status, next case,
-  record indexes and per-file SHA-256 digests, cleanup result, and harness
-  errors. Status is `running`, `reboot_required`, `failed`, or `passed`.
+- `run.json`: suite/run identity, catalog SHA-256, bound `commit_oids`, current
+  status, next case, record indexes and per-file SHA-256 digests, cleanup
+  result, and harness errors. Status is `running`, `reboot_required`, `failed`,
+  or `passed`.
 - `cases/NNN-<case>-attemptN.json`: exact public request and adapter response.
   The boot case has a pre-reboot and post-reboot record.
 - `cleanup.json`: terminal cleanup/relock response and its indexed digest.
 
-The harness writes files atomically with mode 0600 and rejects symlink or
-non-regular evidence files. Resume and verification require the unchanged
-catalog. Evidence digests detect accidental modification; they are not a
-signature or a substitute for trusted journal provenance. Treat the whole
+The harness writes files atomically with mode 0600, fsyncs each file and its
+containing directory around rename, and rejects symlink or non-regular
+evidence files. Resume and verification require the unchanged catalog, bound
+OIDs, and post-boot running-kernel match; perform final verification on the
+acceptance boot. Evidence digests detect accidental modification; they are not
+a signature or a substitute for trusted journal provenance. Treat the whole
 directory as sensitive, retain it under the owner-approved audit policy, and
 never commit it to either repository.
 
@@ -175,8 +199,9 @@ timeout, interruption, and internal harness failure. Cleanup must:
 4. If activation never occurred, preserve the verified dark state rather than
    enabling enforcement as a side effect of a failed preflight.
 5. Restore injected controller/audit/policy failures and cancel test turns.
-6. Return `cleanup_complete`, `locked_verified`, and `blocked_replay_count`.
-   Before activation, `locked_verified` means the expected dark/locked recovery
+6. Return `cleanup_complete`, `locked_verified`, and zero
+   `blocked_replay_count`/`suppressed_replay_count`. Before activation,
+   `locked_verified` means the expected dark/locked recovery
    state was verified without turning on general-agent enforcement.
 
 A failed cleanup makes the entire run failed and requires local owner recovery;

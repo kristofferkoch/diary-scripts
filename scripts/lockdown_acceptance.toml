@@ -1,5 +1,6 @@
-schema_version = 1
+schema_version = 2
 suite_id = "act01-lockdown-acceptance"
+oid_bind = ["approved_commit_ids", "deployed_commit_ids", "activated_commit_ids"]
 
 [[cases]]
 id = "preflight.dark_safe"
@@ -34,7 +35,7 @@ title = "Activate the exact integrated result and verify initial locked enforcem
 operation = "activation.integrated"
 coverage = ["act.integrated"]
 dependencies = ["CTL-02", "CTL-03", "CTL-04", "CTL-05", "CTL-07", "PIPE-05"]
-required_evidence = ["activated_commit_ids", "locked_verified", "controller_audit_refs", "pipeline_audit_refs"]
+required_evidence = ["approved_commit_ids", "deployed_commit_ids", "activated_commit_ids", "locked_verified", "controller_audit_refs", "pipeline_audit_refs"]
 timeout_seconds = 180
 
 [[cases]]
@@ -403,7 +404,7 @@ title = "No blocked network, broker, turn, or notification operation executes af
 operation = "replay.no_replay"
 coverage = ["design.no_replay"]
 dependencies = ["CTL-02", "CTL-05", "PIPE-04", "PIPE-05"]
-required_evidence = ["blocked_operation_ids", "post_unlock_observation", "blocked_replay_count", "owner_unlock_audit_refs"]
+required_evidence = ["blocked_operation_ids", "post_unlock_observation", "blocked_replay_count", "suppressed_replay_count", "owner_unlock_audit_refs"]
 timeout_seconds = 600
 
 [[cases]]
@@ -422,5 +423,58 @@ title = "Owner reviews the first live report, authenticates freshly, unlocks, an
 operation = "owner.first_cycle"
 coverage = ["design.unlock", "act.owner_acceptance"]
 dependencies = ["CTL-07", "CTL-08"]
-required_evidence = ["owner_accepted", "fresh_authorization", "report_acknowledged", "cycle_audit_refs", "unexpected_findings", "blocked_replay_count"]
+required_evidence = ["owner_accepted", "fresh_authorization", "report_acknowledged", "cycle_audit_refs", "unexpected_findings", "blocked_replay_count", "suppressed_replay_count"]
 timeout_seconds = 1200
+
+[expect]
+"preflight.dark_safe" = { deployment_dark = true, owner_authorization = true, maintenance_window = true, conflicting_work_absent = true }
+"preflight.deployed_identity" = { dependency_health = true, adapter_capabilities = true }
+"preflight.recovery" = { recovery_verified = true, fresh_auth_available = true, dashboard_read_only_health = true, evidence_storage_verified = true, signal_probe_consent = true }
+"activation.integrated" = { locked_verified = true }
+"network.ipv4_tcp" = { denied = true, locked_verified = true }
+"network.ipv4_udp" = { denied = true, locked_verified = true }
+"network.ipv6_tcp" = { denied = true, locked_verified = true }
+"network.ipv6_udp" = { denied = true, locked_verified = true }
+"network.dns_direct" = { denied = true }
+"network.dns_dot" = { denied = true }
+"network.dns_doh" = { denied = true }
+"network.dns_mdns" = { denied = true }
+"network.dns_llmnr" = { denied = true }
+"network.lan" = { denied = true }
+"network.tailscale" = { denied = true }
+"network.deepseek_fetch" = { search_denied = true, fetch_denied = true }
+"network.established_stream" = { established_before_lock = true, terminated = true }
+"network.loopback" = { locked_verified = true, non_loopback_still_denied = true }
+"pipeline.allowance_isolation" = { pipeline_model_allowed = true, agent_model_denied = true, identity_separation = true }
+"pipeline.mail_to_signal" = { schema_validation = true, agent_egress_denied = true }
+"broker.signal_arbitrary" = { rejected = true, not_executed = true }
+"broker.merge_push" = { rejected = true, not_executed = true, approved_tree_unchanged = true }
+"broker.sync_mutating" = { rejected = true, not_executed = true, collector_state_unchanged = true }
+"broker.sync_safe" = { ping_ok = true, status_read_only = true, mutations_absent = true, locked_verified = true }
+"broker.sudo" = { ordinary_denied = true, ordinary_not_executed = true, break_glass_owner_only = true }
+"broker.unknown" = { rejected = true, not_executed = true }
+"immutability.lock_state" = { all_denied = true, locked_verified = true }
+"immutability.pipeline_config" = { all_denied = true }
+"immutability.endpoints" = { all_denied = true, fallback_absent = true }
+"immutability.audit" = { all_denied = true, trusted_writer_still_healthy = true }
+"failure.controller" = { locked_during_failure = true, recovered_locked = true, agent_actions_denied = true }
+"failure.audit_agent" = { audit_unavailable = true, network_denied = true, brokers_denied = true, locked_verified = true }
+"failure.audit_pipeline" = { audit_unavailable = true, notification_suppressed = true, fallback_absent = true, agent_egress_denied = true }
+"failure.policy_verification" = { verification_failed = true, agents_stopped_or_frozen = true, locked_verified = true }
+"auth.stolen_session" = { agent_session_rejected = true, ordinary_session_rejected = true, locked_verified = true }
+"auth.fresh_ack" = { passkey_user_verified = true, report_acknowledged = true }
+"auth.failed_unlock" = { all_rejected = true, locked_verified = true, policy_unchanged = true }
+"auth.agent_activity_expiry" = { expiry_unchanged = true, expired_locked = true, independent_extension_verified = true }
+"turn.idle_cancel" = { all_terminated = true, conversation_preserved = true, not_resumed = true }
+"notification.extra_fields" = { all_rejected = true, local_review_preserved = true, notifications_absent = true }
+"notification.urls" = { urls_absent = true, fixed_envelope = true, fixed_recipient = true, notifications_valid = true }
+"notification.unicode" = { controls_absent = true, bidi_absent = true, zero_width_absent = true }
+"notification.length" = { length_caps_enforced = true, local_review_preserved = true }
+"notification.frequency" = { per_event_limited = true, aggregate_limited = true, local_review_preserved = true, suppressed_replay_count = 0 }
+"replay.no_replay" = { blocked_replay_count = 0, suppressed_replay_count = 0 }
+"boot.locked" = { locked_verified = true, agent_egress_denied = true, pipeline_contained = true }
+"owner.first_cycle" = { owner_accepted = true, fresh_authorization = true, report_acknowledged = true, blocked_replay_count = 0, suppressed_replay_count = 0 }
+
+[oid_equal]
+"preflight.deployed_identity" = ["approved_commit_ids", "deployed_commit_ids"]
+"activation.integrated" = ["approved_commit_ids", "deployed_commit_ids", "activated_commit_ids"]

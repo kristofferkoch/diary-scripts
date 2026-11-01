@@ -17,8 +17,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, cast
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
+SUITE_ID = "act01-lockdown-acceptance"
 DEFAULT_CATALOG = Path(__file__).with_name("lockdown_acceptance.toml")
+LIVE_CATALOG = Path("/usr/local/libexec/diary-lockdown-acceptance.toml")
+LIVE_ADAPTER = Path("/usr/local/libexec/diary-lockdown-acceptance-adapter")
 LIVE_ACKNOWLEDGEMENT = "ACT-01 LIVE LOCKDOWN, FAILURE INJECTION, REBOOT, AND SIGNAL"
 CLEANUP_OPERATION = "suite.relock_cleanup"
 MAX_CATALOG_BYTES = 1024 * 1024
@@ -26,6 +29,26 @@ MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_RUN_BYTES = 8 * 1024 * 1024
 NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,79}")
 RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}")
+OID_RE = re.compile(r"[0-9a-f]{40}")
+BOOT_ID_RE = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
+EXPECTED_CASE_IDS = (
+    "preflight.dark_safe", "preflight.deployed_identity", "preflight.recovery",
+    "activation.integrated", "network.ipv4_tcp", "network.ipv4_udp",
+    "network.ipv6_tcp", "network.ipv6_udp", "network.dns_direct",
+    "network.dns_dot", "network.dns_doh", "network.dns_mdns",
+    "network.dns_llmnr", "network.lan", "network.tailscale",
+    "network.deepseek_fetch", "network.established_stream", "network.loopback",
+    "pipeline.allowance_isolation", "pipeline.mail_to_signal",
+    "broker.signal_arbitrary", "broker.merge_push", "broker.sync_mutating",
+    "broker.sync_safe", "broker.sudo", "broker.unknown",
+    "immutability.lock_state", "immutability.pipeline_config",
+    "immutability.endpoints", "immutability.audit", "failure.controller",
+    "failure.audit_agent", "failure.audit_pipeline", "failure.policy_verification",
+    "auth.stolen_session", "auth.fresh_ack", "auth.failed_unlock",
+    "auth.agent_activity_expiry", "turn.idle_cancel", "notification.extra_fields",
+    "notification.urls", "notification.unicode", "notification.length",
+    "notification.frequency", "replay.no_replay", "boot.locked", "owner.first_cycle",
+)
 REQUIRED_COVERAGE = frozenset({
     "design.network",
     "design.pipeline_isolation",
@@ -56,6 +79,8 @@ class Case:
     coverage: tuple[str, ...]
     dependencies: tuple[str, ...]
     required_evidence: tuple[str, ...]
+    expected: dict[str, bool | int]
+    oid_equal: tuple[str, ...]
     timeout_seconds: int
     reboot: bool = False
 
@@ -64,6 +89,7 @@ class Case:
 class Catalog:
     suite_id: str
     cases: tuple[Case, ...]
+    oid_bind: tuple[str, ...]
     raw: bytes
 
     @property
@@ -89,33 +115,30 @@ def _string_list(value: object, description: str) -> tuple[str, ...]:
     return tuple(cast(list[str], value))
 
 
-def load_catalog(path: str | Path = DEFAULT_CATALOG) -> Catalog:
-    catalog_path = Path(path)
-    try:
-        info = catalog_path.lstat()
-        if not stat.S_ISREG(info.st_mode):
-            raise AcceptanceError("catalog must be a regular non-symlink file")
-        raw = catalog_path.read_bytes()
-    except OSError as exc:
-        raise AcceptanceError(f"cannot read catalog: {exc}") from exc
+def _parse_catalog(raw: bytes) -> Catalog:
     if not raw or len(raw) > MAX_CATALOG_BYTES:
         raise AcceptanceError("catalog is empty or oversized")
     try:
         document = _object(tomllib.loads(raw.decode("utf-8")), "catalog")
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise AcceptanceError("catalog is not valid UTF-8 TOML") from exc
-    if set(document) != {"schema_version", "suite_id", "cases"}:
+    if set(document) != {"schema_version", "suite_id", "oid_bind", "cases", "expect", "oid_equal"}:
         raise AcceptanceError("catalog has unknown or missing top-level fields")
     if document["schema_version"] != PROTOCOL_VERSION or isinstance(document["schema_version"], bool):
         raise AcceptanceError("unsupported catalog schema")
-    suite_id = document["suite_id"]
-    if not isinstance(suite_id, str) or not NAME_RE.fullmatch(suite_id):
-        raise AcceptanceError("invalid suite ID")
+    if document["suite_id"] != SUITE_ID:
+        raise AcceptanceError("catalog suite identity mismatch")
+    oid_bind = _string_list(document["oid_bind"], "OID binding fields")
+    if oid_bind != ("approved_commit_ids", "deployed_commit_ids", "activated_commit_ids"):
+        raise AcceptanceError("catalog OID binding contract mismatch")
+    expected_table = _object(document["expect"], "expectation table")
+    oid_table = _object(document["oid_equal"], "OID equality table")
+    if set(expected_table) != set(EXPECTED_CASE_IDS) or not set(oid_table) <= set(EXPECTED_CASE_IDS):
+        raise AcceptanceError("expectation or OID predicate case set mismatch")
     raw_cases = document["cases"]
-    if not isinstance(raw_cases, list) or not raw_cases:
-        raise AcceptanceError("catalog must contain cases")
+    if not isinstance(raw_cases, list) or len(raw_cases) != len(EXPECTED_CASE_IDS):
+        raise AcceptanceError("catalog must contain exactly the 47 acceptance cases")
     cases: list[Case] = []
-    seen_ids: set[str] = set()
     seen_operations: set[str] = set()
     coverage: set[str] = set()
     reboot_cases = 0
@@ -131,18 +154,18 @@ def load_catalog(path: str | Path = DEFAULT_CATALOG) -> Catalog:
         } <= set(raw_case):
             raise AcceptanceError(f"case {index} has unknown or missing fields")
         case_id = raw_case["id"]
+        if case_id != EXPECTED_CASE_IDS[index]:
+            raise AcceptanceError(f"case {index} identity or order mismatch")
         operation = raw_case["operation"]
         title = raw_case["title"]
-        if not isinstance(case_id, str) or not NAME_RE.fullmatch(case_id):
-            raise AcceptanceError(f"case {index} has an invalid ID")
         if not isinstance(operation, str) or not NAME_RE.fullmatch(operation) or "." not in operation:
             raise AcceptanceError(f"case {case_id} has an invalid adapter operation")
         if operation == CLEANUP_OPERATION:
             raise AcceptanceError("cleanup operation cannot be an acceptance case")
         if not isinstance(title, str) or not title.strip() or len(title) > 300:
             raise AcceptanceError(f"case {case_id} has an invalid title")
-        if case_id in seen_ids or operation in seen_operations:
-            raise AcceptanceError("case IDs and adapter operations must be unique")
+        if operation in seen_operations:
+            raise AcceptanceError("adapter operations must be unique")
         timeout = raw_case["timeout_seconds"]
         if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 1800:
             raise AcceptanceError(f"case {case_id} has an invalid timeout")
@@ -150,31 +173,62 @@ def load_catalog(path: str | Path = DEFAULT_CATALOG) -> Catalog:
         if not isinstance(reboot, bool):
             raise AcceptanceError(f"case {case_id} has an invalid reboot flag")
         reboot_cases += int(reboot)
-        case_coverage = _string_list(raw_case["coverage"], f"case {case_id} coverage")
+        required = _string_list(raw_case["required_evidence"], f"case {case_id} required evidence")
+        raw_expected = _object(expected_table[case_id], f"case {case_id} expectations")
+        if not raw_expected or not set(raw_expected) <= set(required):
+            raise AcceptanceError(f"case {case_id} has empty or unknown expectations")
+        expected: dict[str, bool | int] = {}
+        for key, value in raw_expected.items():
+            if isinstance(value, bool):
+                expected[key] = value
+            elif isinstance(value, int):
+                expected[key] = value
+            else:
+                raise AcceptanceError(f"case {case_id} expectation {key} must be boolean or integer")
+        oid_equal = (
+            _string_list(oid_table[case_id], f"case {case_id} OID equality")
+            if case_id in oid_table else ()
+        )
+        if oid_equal and (len(oid_equal) < 2 or not set(oid_equal) <= set(required) or not set(oid_equal) <= set(oid_bind)):
+            raise AcceptanceError(f"case {case_id} has invalid OID equality predicates")
         case = Case(
             case_id=case_id,
             title=title,
             operation=operation,
-            coverage=case_coverage,
-            dependencies=_string_list(
-                raw_case["dependencies"], f"case {case_id} dependencies",
-            ),
-            required_evidence=_string_list(
-                raw_case["required_evidence"], f"case {case_id} required evidence",
-            ),
+            coverage=_string_list(raw_case["coverage"], f"case {case_id} coverage"),
+            dependencies=_string_list(raw_case["dependencies"], f"case {case_id} dependencies"),
+            required_evidence=required,
+            expected=expected,
+            oid_equal=oid_equal,
             timeout_seconds=timeout,
             reboot=reboot,
         )
         cases.append(case)
-        seen_ids.add(case_id)
         seen_operations.add(operation)
-        coverage.update(case_coverage)
+        coverage.update(case.coverage)
     if reboot_cases != 1:
         raise AcceptanceError("catalog must contain exactly one reboot case")
+    if dict((case.case_id, case.oid_equal) for case in cases if case.oid_equal) != {
+        "preflight.deployed_identity": ("approved_commit_ids", "deployed_commit_ids"),
+        "activation.integrated": ("approved_commit_ids", "deployed_commit_ids", "activated_commit_ids"),
+    }:
+        raise AcceptanceError("required OID equality predicates are missing or changed")
     missing = REQUIRED_COVERAGE - coverage
     if missing:
         raise AcceptanceError(f"catalog is missing acceptance coverage: {', '.join(sorted(missing))}")
-    return Catalog(suite_id=suite_id, cases=tuple(cases), raw=raw)
+    return Catalog(suite_id=SUITE_ID, cases=tuple(cases), oid_bind=oid_bind, raw=raw)
+
+
+def load_catalog(path: str | Path = DEFAULT_CATALOG) -> Catalog:
+    catalog_path = Path(path)
+    try:
+        info = catalog_path.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            raise AcceptanceError("catalog must be a regular non-symlink file")
+        raw = catalog_path.read_bytes()
+    except OSError as exc:
+        raise AcceptanceError(f"cannot read catalog: {exc}") from exc
+    return _parse_catalog(raw)
 
 
 def _now() -> str:
@@ -183,6 +237,14 @@ def _now() -> str:
 
 def _json_bytes(value: object) -> bytes:
     return (json.dumps(value, sort_keys=True, indent=2, ensure_ascii=True) + "\n").encode("ascii")
+
+
+def _fsync_directory(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _atomic_write(path: Path, raw: bytes) -> None:
@@ -194,11 +256,25 @@ def _atomic_write(path: Path, raw: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        _fsync_directory(path.parent)
     finally:
         try:
             temporary.unlink()
         except FileNotFoundError:
             pass
+
+
+def _check_evidence_directory(path: Path, description: str, require_root_owned: bool) -> None:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise AcceptanceError(f"cannot stat {description}: {exc}") from exc
+    if not stat.S_ISDIR(info.st_mode):
+        raise AcceptanceError(f"{description} must be a non-symlink directory")
+    if stat.S_IMODE(info.st_mode) != 0o700:
+        raise AcceptanceError(f"{description} must have mode 0700")
+    if require_root_owned and info.st_uid != 0:
+        raise AcceptanceError(f"{description} must be root-owned")
 
 
 def _read_regular(path: Path, maximum: int) -> bytes:
@@ -214,7 +290,28 @@ def _read_regular(path: Path, maximum: int) -> bytes:
     return raw
 
 
-def validate_response(case: Case, response: object, resume: bool = False) -> dict[str, Any]:
+def _oid_map(value: object) -> dict[str, str]:
+    mapping = _object(value, "commit OID map")
+    if set(mapping) != {"diary", "scripts"}:
+        raise AcceptanceError("commit OID map must contain exactly diary and scripts")
+    if any(not isinstance(mapping[key], str) or not OID_RE.fullmatch(mapping[key]) for key in mapping):
+        raise AcceptanceError("commit OIDs must be exact lowercase 40-character Git object IDs")
+    return cast(dict[str, str], mapping)
+
+
+def current_boot_id(path: str | Path = "/proc/sys/kernel/random/boot_id") -> str:
+    try:
+        value = Path(path).read_text(encoding="ascii").strip()
+    except OSError as exc:
+        raise AcceptanceError(f"cannot read running kernel boot ID: {exc}") from exc
+    if not BOOT_ID_RE.fullmatch(value):
+        raise AcceptanceError("running kernel boot ID is invalid")
+    return value
+
+
+def validate_response(
+    case: Case, response: object, resume: bool = False, running_boot_id: str | None = None,
+) -> dict[str, Any]:
     reply = _object(response, "adapter response")
     if set(reply) - {"protocol", "status", "summary", "evidence", "_process"}:
         raise AcceptanceError("adapter response has unknown fields")
@@ -236,32 +333,36 @@ def validate_response(case: Case, response: object, resume: bool = False) -> dic
                 or evidence[key] == "" or evidence[key] == [] or evidence[key] == {}
             ):
                 raise AcceptanceError(f"successful adapter response lacks evidence field {key}")
-    if reply["status"] == "pass":
-        true_proofs = {
-            "cleanup_complete", "locked_verified", "owner_accepted",
-            "fresh_authorization", "report_acknowledged",
-        }
-        for key in true_proofs & set(case.required_evidence):
-            if evidence.get(key) is not True:
-                raise AcceptanceError(f"pass requires affirmative evidence field {key}")
-        for key in {"blocked_replay_count", "suppressed_replay_count"} & set(case.required_evidence):
-            value = evidence.get(key)
-            if isinstance(value, bool) or not isinstance(value, int) or value != 0:
-                raise AcceptanceError(f"pass requires zero evidence field {key}")
+        for key, expected in case.expected.items():
+            actual = evidence.get(key)
+            if type(actual) is not type(expected) or actual != expected:
+                raise AcceptanceError(
+                    f"evidence field {key} must be exactly {expected!r}, got {actual!r}",
+                )
+        for key in case.required_evidence:
+            if isinstance(evidence[key], bool) and key not in case.expected:
+                raise AcceptanceError(f"boolean evidence field {key} has no catalog expectation")
+        oid_maps = [_oid_map(evidence[key]) for key in case.oid_equal]
+        if oid_maps and any(mapping != oid_maps[0] for mapping in oid_maps[1:]):
+            raise AcceptanceError(f"case {case.case_id} has mismatched commit OID maps")
     if reply["status"] == "reboot_required":
         if not case.reboot or resume:
             raise AcceptanceError("unexpected reboot suspension")
-        if evidence.get("locked_verified") is not True or not isinstance(
-            evidence.get("pre_reboot_boot_id"), str,
+        if not isinstance(evidence.get("pre_reboot_boot_id"), str) or not BOOT_ID_RE.fullmatch(
+            evidence["pre_reboot_boot_id"],
         ):
-            raise AcceptanceError("reboot suspension lacks locked pre-boot evidence")
+            raise AcceptanceError("reboot suspension lacks a valid pre-boot kernel ID")
     if case.reboot and resume and reply["status"] == "pass":
+        pre = evidence.get("pre_reboot_boot_id")
+        post = evidence.get("post_reboot_boot_id")
         if (
-            evidence.get("locked_verified") is not True
-            or evidence.get("boot_changed") is not True
-            or not isinstance(evidence.get("post_reboot_boot_id"), str)
+            not isinstance(pre, str) or not BOOT_ID_RE.fullmatch(pre)
+            or not isinstance(post, str) or not BOOT_ID_RE.fullmatch(post)
+            or pre == post or evidence.get("boot_changed") is not True
         ):
-            raise AcceptanceError("boot verification lacks changed-boot locked evidence")
+            raise AcceptanceError("boot verification requires distinct valid pre/post kernel IDs")
+        if running_boot_id is None or post != running_boot_id:
+            raise AcceptanceError("post-reboot evidence does not match the running kernel boot ID")
     if reply["status"] == "pass" and case.reboot and not resume:
         raise AcceptanceError("boot case must suspend before verification")
     process = reply.get("_process")
@@ -272,27 +373,82 @@ def validate_response(case: Case, response: object, resume: bool = False) -> dic
     return reply
 
 
-class SubprocessAdapter:
-    def __init__(self, executable: str | Path, require_root_owned: bool = True):
-        self.executable = Path(executable)
+def _check_trusted_ancestors(path: Path) -> None:
+    parent = path.parent
+    while True:
         try:
-            info = self.executable.lstat()
+            info = parent.lstat()
         except OSError as exc:
-            raise AcceptanceError(f"cannot stat adapter: {exc}") from exc
-        if not info.st_mode & stat.S_IXUSR or not stat.S_ISREG(info.st_mode):
-            raise AcceptanceError("adapter must be an executable regular non-symlink file")
-        if require_root_owned and (info.st_uid != 0 or info.st_mode & 0o022):
-            raise AcceptanceError("live adapter must be root-owned and not group/other writable")
+            raise AcceptanceError(f"cannot stat trusted ancestor {parent}: {exc}") from exc
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise AcceptanceError(f"trusted path ancestor is unsafe: {parent}")
+        if parent == parent.parent:
+            break
+        parent = parent.parent
+
+
+def _open_trusted_file(path: Path, executable: bool = False) -> int:
+    _check_trusted_ancestors(path)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        raise AcceptanceError(f"cannot open trusted file {path}: {exc}") from exc
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022
+            or (executable and not info.st_mode & stat.S_IXUSR)
+        ):
+            raise AcceptanceError(f"trusted file has unsafe type, ownership, or mode: {path}")
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def load_live_catalog() -> Catalog:
+    fd = _open_trusted_file(LIVE_CATALOG)
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            raw = handle.read(MAX_CATALOG_BYTES + 1)
+    except OSError as exc:
+        raise AcceptanceError(f"cannot read live catalog: {exc}") from exc
+    return _parse_catalog(raw)
+
+
+class SubprocessAdapter:
+    def __init__(self, executable: str | Path = LIVE_ADAPTER, require_root_owned: bool = True):
+        self.executable = Path(executable)
+        self._fd: int | None = None
+        if require_root_owned:
+            if self.executable != LIVE_ADAPTER:
+                raise AcceptanceError(f"live adapter must be the fixed installed path {LIVE_ADAPTER}")
+            self._fd = _open_trusted_file(self.executable, executable=True)
+        else:
+            try:
+                info = self.executable.lstat()
+            except OSError as exc:
+                raise AcceptanceError(f"cannot stat adapter: {exc}") from exc
+            if not info.st_mode & stat.S_IXUSR or not stat.S_ISREG(info.st_mode):
+                raise AcceptanceError("adapter must be an executable regular non-symlink file")
+
+    def close(self) -> None:
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None
 
     def call(self, request: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
+        executable = f"/proc/self/fd/{self._fd}" if self._fd is not None else str(self.executable)
+        pass_fds = (self._fd,) if self._fd is not None else ()
         try:
             result = subprocess.run(
-                [str(self.executable)],
+                [executable],
                 input=_json_bytes(request),
                 capture_output=True,
                 timeout=timeout_seconds,
                 check=False,
                 env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+                pass_fds=pass_fds,
             )
         except subprocess.TimeoutExpired:
             return {
@@ -331,6 +487,7 @@ class EvidenceStore:
     @classmethod
     def create(
         cls, root: str | Path, catalog: Catalog, run_id: str | None = None,
+        require_root_owned: bool = True,
     ) -> EvidenceStore:
         selected = run_id or f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(4)}"
         if not RUN_ID_RE.fullmatch(selected) or ".." in selected:
@@ -338,18 +495,24 @@ class EvidenceStore:
         root_path = Path(root)
         try:
             root_path.mkdir(parents=True, exist_ok=True, mode=0o700)
-            root_info = root_path.lstat()
-            if not stat.S_ISDIR(root_info.st_mode):
-                raise AcceptanceError("evidence root must be a non-symlink directory")
-            path = root_path / selected
+        except OSError as exc:
+            raise AcceptanceError(f"cannot create evidence root: {exc}") from exc
+        _check_evidence_directory(root_path, "evidence root", require_root_owned)
+        path = root_path / selected
+        try:
             path.mkdir(mode=0o700)
             (path / "cases").mkdir(mode=0o700)
+            _fsync_directory(root_path)
+            _fsync_directory(path)
         except OSError as exc:
             raise AcceptanceError(f"cannot create evidence directory: {exc}") from exc
+        _check_evidence_directory(path, "evidence run", require_root_owned)
+        _check_evidence_directory(path / "cases", "evidence cases directory", require_root_owned)
         metadata: dict[str, Any] = {
             "protocol": PROTOCOL_VERSION,
             "suite_id": catalog.suite_id,
             "catalog_sha256": catalog.digest,
+            "commit_oids": None,
             "run_id": selected,
             "status": "running",
             "created_at": _now(),
@@ -365,25 +528,27 @@ class EvidenceStore:
         return store
 
     @classmethod
-    def load(cls, path: str | Path, catalog: Catalog) -> EvidenceStore:
+    def load(
+        cls, path: str | Path, catalog: Catalog, require_root_owned: bool = True,
+    ) -> EvidenceStore:
         run_path = Path(path)
-        try:
-            if not stat.S_ISDIR(run_path.lstat().st_mode):
-                raise AcceptanceError("evidence run must be a non-symlink directory")
-        except OSError as exc:
-            raise AcceptanceError(f"cannot stat evidence run: {exc}") from exc
+        _check_evidence_directory(run_path.parent, "evidence root", require_root_owned)
+        _check_evidence_directory(run_path, "evidence run", require_root_owned)
+        _check_evidence_directory(run_path / "cases", "evidence cases directory", require_root_owned)
         raw = _read_regular(run_path / "run.json", MAX_RUN_BYTES)
         try:
             metadata = _object(json.loads(raw), "run metadata")
-        except json.JSONDecodeError as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise AcceptanceError("run metadata is invalid JSON") from exc
         required = {
-            "protocol", "suite_id", "catalog_sha256", "run_id", "status",
+            "protocol", "suite_id", "catalog_sha256", "commit_oids", "run_id", "status",
             "created_at", "completed_at", "next_case_index", "records", "cleanup",
             "harness_errors",
         }
         if set(metadata) != required or metadata["protocol"] != PROTOCOL_VERSION:
             raise AcceptanceError("run metadata schema mismatch")
+        if metadata["run_id"] != run_path.name:
+            raise AcceptanceError("evidence run directory and run ID differ")
         if metadata["suite_id"] != catalog.suite_id or metadata["catalog_sha256"] != catalog.digest:
             raise AcceptanceError("catalog changed between run and resume/verify")
         if _read_regular(run_path / "catalog.toml", MAX_CATALOG_BYTES) != catalog.raw:
@@ -394,6 +559,20 @@ class EvidenceStore:
 
     def save(self) -> None:
         _atomic_write(self.path / "run.json", _json_bytes(self.metadata))
+
+    def bind_oids(self, catalog: Catalog, evidence: dict[str, Any]) -> None:
+        bound = self.metadata["commit_oids"]
+        if bound is not None:
+            bound = _oid_map(bound)
+        for field in catalog.oid_bind:
+            if field not in evidence:
+                continue
+            current = _oid_map(evidence[field])
+            if bound is None:
+                bound = current
+            elif current != bound:
+                raise AcceptanceError(f"cross-case OID binding mismatch in {field}")
+        self.metadata["commit_oids"] = bound
 
     def record(self, case: Case, request: dict[str, Any], response: dict[str, Any], attempt: int) -> None:
         record = {
@@ -475,7 +654,14 @@ def _cleanup_case() -> Case:
         operation=CLEANUP_OPERATION,
         coverage=("act.cleanup",),
         dependencies=("ACT-01",),
-        required_evidence=("cleanup_complete", "locked_verified", "blocked_replay_count"),
+        required_evidence=(
+            "cleanup_complete", "locked_verified", "blocked_replay_count", "suppressed_replay_count",
+        ),
+        expected={
+            "cleanup_complete": True, "locked_verified": True,
+            "blocked_replay_count": 0, "suppressed_replay_count": 0,
+        },
+        oid_equal=(),
         timeout_seconds=300,
     )
 
@@ -504,8 +690,12 @@ def execute_suite(
             request = _request(catalog, store, case, phase)
             try:
                 response = validate_response(
-                    case, adapter.call(request, case.timeout_seconds), resume=phase == "verify",
+                    case,
+                    adapter.call(request, case.timeout_seconds),
+                    resume=phase == "verify",
+                    running_boot_id=current_boot_id() if phase == "verify" else None,
                 )
+                store.bind_oids(catalog, _object(response["evidence"], "case evidence fields"))
             except (AcceptanceError, OSError) as exc:
                 response = _protocol_failure(exc)
             attempt = 1 + sum(
@@ -542,14 +732,20 @@ def execute_suite(
     return 0 if cleanup["status"] == "pass" else 1
 
 
-def verify_evidence(catalog: Catalog, store: EvidenceStore) -> dict[str, Any]:
+def verify_evidence(
+    catalog: Catalog, store: EvidenceStore, running_boot_id: str | None = None,
+) -> dict[str, Any]:
     if store.metadata["status"] != "passed":
         raise AcceptanceError("run is not marked passed")
     if store.metadata["next_case_index"] != len(catalog.cases):
         raise AcceptanceError("run does not include every acceptance case")
+    running_boot = running_boot_id or current_boot_id()
     cases = {case.case_id: case for case in catalog.cases}
     latest: dict[str, dict[str, Any]] = {}
-    boot_suspended = False
+    bound_oids: dict[str, str] | None = None
+    seen_oid_fields: set[str] = set()
+    pre_boot: str | None = None
+    post_boot: str | None = None
     for item in store.metadata["records"]:
         item = _object(item, "case record index")
         if set(item) != {"case_id", "path", "sha256", "status"}:
@@ -588,19 +784,41 @@ def verify_evidence(catalog: Catalog, store: EvidenceStore) -> dict[str, Any]:
         ):
             raise AcceptanceError("case request identity or phase mismatch")
         response = _object(record["response"], "case response")
-        validate_response(case, response, resume=request["phase"] == "verify")
+        validate_response(
+            case,
+            response,
+            resume=request["phase"] == "verify",
+            running_boot_id=running_boot if request["phase"] == "verify" else None,
+        )
         if item["status"] != response["status"]:
             raise AcceptanceError("case record status mismatch")
+        evidence = _object(response["evidence"], "case evidence fields")
+        for field in catalog.oid_bind:
+            if field in evidence:
+                current_oids = _oid_map(evidence[field])
+                seen_oid_fields.add(field)
+                if bound_oids is None:
+                    bound_oids = current_oids
+                elif current_oids != bound_oids:
+                    raise AcceptanceError(f"cross-case OID binding mismatch in {field}")
         if response["status"] == "reboot_required":
-            boot_suspended = True
+            pre_boot = evidence["pre_reboot_boot_id"]
+        if case.reboot and response["status"] == "pass":
+            if pre_boot is None or evidence["pre_reboot_boot_id"] != pre_boot:
+                raise AcceptanceError("pre/post reboot records have inconsistent pre-boot IDs")
+            post_boot = evidence["post_reboot_boot_id"]
         latest[case.case_id] = response
     for case in catalog.cases:
         if case.case_id not in latest:
             raise AcceptanceError(f"missing final evidence for {case.case_id}")
         if latest[case.case_id]["status"] != "pass":
             raise AcceptanceError(f"case did not pass: {case.case_id}")
-    if not boot_suspended:
-        raise AcceptanceError("passed run lacks the pre-reboot suspension evidence")
+    if seen_oid_fields != set(catalog.oid_bind) or bound_oids is None:
+        raise AcceptanceError("passed run lacks complete approved/deployed/activated OID binding")
+    if store.metadata["commit_oids"] != bound_oids:
+        raise AcceptanceError("run metadata OID binding differs from case evidence")
+    if pre_boot is None or post_boot is None or pre_boot == post_boot or post_boot != running_boot:
+        raise AcceptanceError("passed run lacks distinct pre/post IDs bound to the running kernel")
     cleanup_index = _object(store.metadata["cleanup"], "cleanup index")
     if set(cleanup_index) != {"path", "sha256", "status"} or cleanup_index["path"] != "cleanup.json":
         raise AcceptanceError("cleanup index has invalid fields")
@@ -632,7 +850,6 @@ def _catalog_argument(parser: argparse.ArgumentParser) -> None:
 
 
 def _live_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--adapter", required=True)
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--acknowledge-live", default="")
 
@@ -642,12 +859,6 @@ def _require_live(args: argparse.Namespace) -> None:
         raise AcceptanceError(
             "live execution requires --execute and --acknowledge-live with the exact documented acknowledgement",
         )
-    try:
-        info = Path(args.catalog).lstat()
-    except OSError as exc:
-        raise AcceptanceError(f"cannot stat live catalog: {exc}") from exc
-    if info.st_uid != 0 or info.st_mode & 0o022:
-        raise AcceptanceError("live catalog must be root-owned and not group/other writable")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -658,12 +869,10 @@ def _parser() -> argparse.ArgumentParser:
     plan = sub.add_parser("plan", help="print ordered cases without executing anything")
     _catalog_argument(plan)
     run = sub.add_parser("run", help="start a new live acceptance run")
-    _catalog_argument(run)
     _live_arguments(run)
     run.add_argument("--evidence-root", required=True)
     run.add_argument("--run-id")
     resume = sub.add_parser("resume", help="resume the one reboot-suspended case")
-    _catalog_argument(resume)
     _live_arguments(resume)
     resume.add_argument("evidence_run")
     verify = sub.add_parser("verify", help="verify a complete evidence run without executing anything")
@@ -675,7 +884,10 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        catalog = load_catalog(args.catalog)
+        live = args.command in {"run", "resume"}
+        if live:
+            _require_live(args)
+        catalog = load_live_catalog() if live else load_catalog(args.catalog)
         if args.command == "validate":
             print(f"catalog valid: {catalog.suite_id}, {len(catalog.cases)} cases, sha256={catalog.digest}")
             return 0
@@ -689,14 +901,16 @@ def main(argv: list[str] | None = None) -> int:
             store = EvidenceStore.load(args.evidence_run, catalog)
             print(json.dumps(verify_evidence(catalog, store), sort_keys=True))
             return 0
-        _require_live(args)
-        adapter = SubprocessAdapter(args.adapter)
-        if args.command == "run":
-            store = EvidenceStore.create(args.evidence_root, catalog, args.run_id)
-            result = execute_suite(catalog, store, adapter)
-        else:
-            store = EvidenceStore.load(args.evidence_run, catalog)
-            result = execute_suite(catalog, store, adapter, resume=True)
+        adapter = SubprocessAdapter()
+        try:
+            if args.command == "run":
+                store = EvidenceStore.create(args.evidence_root, catalog, args.run_id)
+                result = execute_suite(catalog, store, adapter)
+            else:
+                store = EvidenceStore.load(args.evidence_run, catalog)
+                result = execute_suite(catalog, store, adapter, resume=True)
+        finally:
+            adapter.close()
         print(f"evidence: {store.path}")
         if result == 3:
             print("reboot required: keep the host locked, reboot locally, then resume this exact run")
