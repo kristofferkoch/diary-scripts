@@ -355,17 +355,17 @@ def request(socket_path: str, event: dict[str, Any]) -> dict[str, Any]:
 
 
 def sd_notify(message: str) -> bool:
-    address = os.environ.get("NOTIFY_SOCKET")
-    if not address:
+    notify_path = os.environ.get("NOTIFY_SOCKET")
+    if not notify_path:
         return False
-    if address.startswith("@"):
-        address = "\0" + address[1:]
-    elif not address.startswith("/"):
+    if notify_path.startswith("@"):
+        notify_path = "\0" + notify_path[1:]
+    elif not notify_path.startswith("/"):
         raise NetworkAuditError("NOTIFY_SOCKET must be an absolute path or abstract socket")
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
     try:
         sock.settimeout(2.0)
-        sock.sendto(message.encode("ascii"), address)
+        sock.sendto(message.encode("ascii"), notify_path)
     except OSError as exc:
         raise NetworkAuditError("could not send systemd readiness notification") from exc
     finally:
