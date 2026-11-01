@@ -80,6 +80,7 @@ Per-tool detail and the triage SOPs live in `docs/`. This file is the index.
 | [`docs/production-baseline.md`](docs/production-baseline.md) | `diary-production-baseline`: AUD-05 coverage, duration, finding classification, and owner-review evidence |
 | [`docs/lock-controller.md`](docs/lock-controller.md) | `diary-lock` / `diary-lockd`: durable peer-authenticated state, failsafe units, watchdog, and local break-glass |
 | [`docs/lock-dashboard.md`](docs/lock-dashboard.md) | `diary-lock-dashboard`: unprivileged read-only owner UI/API and least-privilege status/report access |
+| [`docs/turn-cancellation.md`](docs/turn-cancellation.md) | `diary-agent-turn` / `diary-agent-supervisor`: opt-in per-turn scopes and complete process-tree cancellation |
 | [`docs/network-audit.md`](docs/network-audit.md) | `diary-network-auditd`: accept-only UID/NFLOG flow observation forwarded to the trusted audit writer |
 | [`docs/dns-audit.md`](docs/dns-audit.md) | `diary-dns-auditd`: audit-only per-identity DNS forwarding and direct/alternate-resolution observation |
 | [`docs/network-policy.md`](docs/network-policy.md) | `diary-network-policy`: controller-owned dark/locked/attended UID rules, structural verification, and fail-closed live tests |

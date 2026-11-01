@@ -4,12 +4,14 @@
 It is a root-owned stdlib-only installed file, not code executed from a
 worktree or uv environment. Its clients are the local `diary-lock` command,
 the CTL-09 read-only dashboard, and the independently authenticated
-`diary-lock-ui` service.
+`diary-lock-ui` service. The optional, separately authenticated agent turn
+socket is documented in [`turn-cancellation.md`](turn-cancellation.md).
 
 CTL-01 installs the mode lifecycle. With CTL-03, the mode units also own the
 network policy described in [`network-policy.md`](network-policy.md); until its
 root-only arm file exists, every transition retains accept-only dark observation.
-DNS, broker, Signal, and active-turn enforcement remain separate cards.
+Turn cancellation stays dark unless its separate CTL-02 drop-in is installed;
+DNS, broker, and Signal enforcement remain separate cards.
 
 The prepared LATER-03 controller revision additionally verifies cgroup network
 identity. It requires active `agent.slice`, `dsh-web.service`, and

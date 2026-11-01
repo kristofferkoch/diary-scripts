@@ -4,8 +4,8 @@
 The daemon derives caller identity from SO_PEERCRED, persists LOCKING, LOCKED,
 and ATTENDED states, verifies conflicting systemd mode units, and fails locked
 when state, audit, cgroup identity, or supervision is unavailable. Mode units
-own their approved enforcement hooks; DNS, broker, and turn enforcement belong
-to separate changes.
+own their approved enforcement hooks; optional turn enforcement uses per-turn
+systemd scopes, and DNS and broker enforcement stay separate.
 """
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ import json
 import math
 import os
 import pwd
+import re
 import signal
 import socket
 import socketserver
@@ -24,6 +25,8 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol, cast
 
@@ -267,6 +270,7 @@ CgroupSet = tuple[str, str, str]
 DEFAULT_CGROUP_SETS: tuple[CgroupSet, ...] = (("inet", "diary_agent_audit", "agent_egress"),)
 AGENT_SLICE = "agent.slice"
 AGENT_SERVICES = ("dsh-web.service", "kimi-web.service")
+TURN_SCOPE_PREFIXES = ("dsh-turn-", "kimi-turn-", "diary-dsh-turn-", "diary-kimi-turn-")
 
 
 def cgroup_set(value: str) -> CgroupSet:
@@ -404,7 +408,7 @@ class NftCgroupIdentity:
 
     def _validate_scope_name(self, unit: str) -> None:
         if not (
-            (unit.startswith("dsh-turn-") or unit.startswith("kimi-turn-"))
+            unit.startswith(TURN_SCOPE_PREFIXES)
             and unit.endswith(".scope")
             and all(character in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-" for character in unit)
         ):
@@ -423,7 +427,7 @@ class NftCgroupIdentity:
             if len(fields) < 4:
                 raise LockError("systemd returned malformed scope data")
             unit = fields[0]
-            if unit.startswith(("dsh-turn-", "kimi-turn-")):
+            if unit.startswith(TURN_SCOPE_PREFIXES):
                 self._validate_scope_name(unit)
                 scopes.append(unit)
         return scopes
@@ -439,6 +443,266 @@ class NftCgroupIdentity:
         self._validate_scope_name(unit)
         slice_cgroup = self._verify_slice()
         self._verify_descendant(unit, slice_cgroup)
+
+
+class SystemdUser:
+    def __init__(self, user: str | None, runner: Callable[..., Any] = subprocess.run) -> None:
+        if user is not None and re.fullmatch(r"[a-z_][a-z0-9_-]*", user) is None:
+            raise LockError("invalid agent user")
+        self.user = user
+        self.runner = runner
+
+    def _run(self, tool: str, args: list[str]) -> Any:
+        if tool not in {"systemctl", "busctl"}:
+            raise LockError("unsupported systemd tool")
+        argv = [f"/usr/bin/{tool}", "--user"]
+        if self.user is not None:
+            argv.append(f"--machine={self.user}@")
+        argv.extend(args)
+        env = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
+        if self.user is None:
+            env["XDG_RUNTIME_DIR"] = f"/run/user/{os.geteuid()}"
+        try:
+            return self.runner(
+                argv,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=20,
+                env=env,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise LockError("systemd user operation failed") from exc
+
+    def active(self, unit: str) -> bool:
+        result = self._run("systemctl", ["is-active", "--quiet", unit])
+        if result.returncode == 0:
+            return True
+        if result.returncode in {3, 4}:
+            return False
+        raise LockError(f"cannot verify {unit}")
+
+    def main_pid(self, service: str) -> int:
+        result = self._run("systemctl", ["show", service, "--property=MainPID", "--value"])
+        try:
+            pid = int(result.stdout.strip())
+        except (AttributeError, ValueError) as exc:
+            raise LockError(f"cannot read {service} main PID") from exc
+        if result.returncode != 0 or pid <= 0:
+            raise LockError(f"{service} has no running main PID")
+        return pid
+
+    def runtime_pid(self, service: str) -> int:
+        supervisor = self.main_pid(service)
+        try:
+            children = Path(f"/proc/{supervisor}/task/{supervisor}/children").read_text(
+                encoding="ascii"
+            ).split()
+            pids = [int(value) for value in children]
+        except (OSError, ValueError) as exc:
+            raise LockError(f"cannot identify {service} runtime child") from exc
+        if len(pids) != 1 or pids[0] <= 0:
+            raise LockError(f"{service} must have exactly one runtime child")
+        return pids[0]
+
+    def unit_path(self, unit: str) -> str:
+        result = self._run("busctl", [
+            "call", "org.freedesktop.systemd1", "/org/freedesktop/systemd1",
+            "org.freedesktop.systemd1.Manager", "GetUnit", "s", unit,
+        ])
+        if result.returncode != 0:
+            raise LockError(f"cannot resolve {unit}")
+        return result.stdout.strip()
+
+    def pid_unit_path(self, pid: int) -> str:
+        result = self._run("busctl", [
+            "call", "org.freedesktop.systemd1", "/org/freedesktop/systemd1",
+            "org.freedesktop.systemd1.Manager", "GetUnitByPID", "u", str(pid),
+        ])
+        if result.returncode != 0:
+            raise LockError(f"cannot resolve PID {pid}")
+        return result.stdout.strip()
+
+    def verify_membership(self, unit: str, pid: int) -> None:
+        expected = self.unit_path(unit)
+        if self.pid_unit_path(pid) != expected:
+            raise LockError(f"PID {pid} is not in {unit}")
+
+    def start_scope(self, scope: str, pid: int) -> None:
+        result = self._run("busctl", [
+            "call", "org.freedesktop.systemd1", "/org/freedesktop/systemd1",
+            "org.freedesktop.systemd1.Manager", "StartTransientUnit",
+            "ssa(sv)a(sa(sv))", scope, "fail", "4",
+            "PIDs", "au", "1", str(pid),
+            "KillMode", "s", "control-group",
+            "SendSIGKILL", "b", "1",
+            "TimeoutStopUSec", "t", "10000000",
+            "0",
+        ])
+        if result.returncode != 0:
+            raise LockError(f"could not create {scope}")
+        for _attempt in range(100):
+            if self.active(scope):
+                self.verify_membership(scope, pid)
+                return
+            time.sleep(0.05)
+        raise LockError(f"{scope} did not become active")
+
+    def attach(self, service: str, pid: int) -> None:
+        result = self._run("busctl", [
+            "call", "org.freedesktop.systemd1", "/org/freedesktop/systemd1",
+            "org.freedesktop.systemd1.Manager", "AttachProcessesToUnit",
+            "ssau", service, "", "1", str(pid),
+        ])
+        if result.returncode != 0:
+            raise LockError(f"could not reattach PID {pid} to {service}")
+        self.verify_membership(service, pid)
+
+    def all_scopes(self) -> list[str]:
+        result = self._run("systemctl", [
+            "list-units", "--type=scope", "--all", "--plain", "--no-legend",
+        ])
+        if result.returncode != 0:
+            raise LockError("cannot list agent scopes")
+        return [parts[0] for line in result.stdout.splitlines() if (parts := line.split())]
+
+    def scopes(self, runtime: str) -> list[str]:
+        prefix = f"diary-{runtime}-turn-"
+        return [
+            scope for scope in self.all_scopes()
+            if scope.startswith(prefix) and scope.endswith(".scope")
+        ]
+
+    def stop(self, unit: str, no_block: bool = False) -> None:
+        args = ["stop"]
+        if no_block:
+            args.append("--no-block")
+        self._run("systemctl", [*args, unit])
+        if not no_block and self.active(unit):
+            raise LockError(f"could not stop {unit}")
+
+    def wait_inactive(self, unit: str) -> None:
+        for _attempt in range(100):
+            if not self.active(unit):
+                return
+            time.sleep(0.05)
+        raise LockError(f"{unit} remains active after cancellation")
+
+    def start(self, service: str) -> None:
+        result = self._run("systemctl", ["start", service])
+        if result.returncode != 0 or not self.active(service):
+            raise LockError(f"could not start {service}")
+
+
+@dataclass(frozen=True)
+class Turn:
+    runtime: str
+    session: str
+    scope: str
+    pid: int
+
+
+class SystemdTurns:
+    def __init__(
+        self,
+        agent_user: str | None,
+        attended: Callable[[], bool],
+        runtimes: dict[str, str] | None = None,
+        systemd: Any = None,
+        contain_all_scopes: bool = True,
+    ) -> None:
+        self.runtimes = runtimes or {"dsh": "dsh-web.service", "kimi": "kimi-web.service"}
+        for runtime, service in self.runtimes.items():
+            if re.fullmatch(r"[a-z][a-z0-9-]*", runtime) is None:
+                raise LockError("invalid agent runtime")
+            if re.fullmatch(r"[a-z][a-z0-9-]*\.service", service) is None:
+                raise LockError("invalid agent service")
+        self.attended = attended
+        self.systemd = systemd or SystemdUser(agent_user)
+        self.contain_all_scopes = contain_all_scopes
+        self.current: dict[str, Turn] = {}
+        self.lock = threading.RLock()
+
+    def managed_scopes(self) -> set[str]:
+        if self.contain_all_scopes:
+            return set(self.systemd.all_scopes())
+        return {
+            scope
+            for runtime in self.runtimes
+            for scope in self.systemd.scopes(runtime)
+        }
+
+    def start(self, runtime: str, session: str) -> dict[str, Any]:
+        with self.lock:
+            if not self.attended():
+                raise RequestRejected("agent turns are not attended")
+            if runtime not in self.runtimes:
+                raise RequestRejected("unknown agent runtime")
+            existing = self.current.get(runtime)
+            if existing is not None:
+                if existing.session != session:
+                    raise LockError("concurrent in-process turns cannot have separate scopes")
+                self.systemd.verify_membership(existing.scope, existing.pid)
+                return {"ok": True, "scope": existing.scope}
+            service = self.runtimes[runtime]
+            pid = self.systemd.runtime_pid(service)
+            scope = f"diary-{runtime}-turn-{uuid.uuid4().hex}.scope"
+            self.systemd.start_scope(scope, pid)
+            turn = Turn(runtime, session, scope, pid)
+            self.current[runtime] = turn
+            return {"ok": True, "scope": scope}
+
+    def finish(self, runtime: str, session: str) -> dict[str, Any]:
+        with self.lock:
+            if runtime not in self.runtimes:
+                raise RequestRejected("unknown agent runtime")
+            turn = self.current.get(runtime)
+            if turn is None:
+                return {"ok": True, "scope": None}
+            if turn.session != session:
+                raise LockError("turn completion does not match the active session")
+            self.systemd.attach(self.runtimes[runtime], turn.pid)
+            del self.current[runtime]
+            return {"ok": True, "scope": turn.scope}
+
+    def cancel(self) -> int:
+        with self.lock:
+            scopes = self.managed_scopes()
+            errors: list[str] = []
+            for service in self.runtimes.values():
+                try:
+                    self.systemd.stop(service, no_block=True)
+                except (LockError, OSError) as exc:
+                    errors.append(str(exc))
+            for scope in sorted(scopes):
+                try:
+                    self.systemd.stop(scope)
+                except (LockError, OSError) as exc:
+                    errors.append(str(exc))
+            for service in self.runtimes.values():
+                try:
+                    self.systemd.wait_inactive(service)
+                except (LockError, OSError) as exc:
+                    errors.append(str(exc))
+            if errors:
+                raise LockError("turn cancellation failed: " + "; ".join(errors))
+            self.current.clear()
+            return len(scopes)
+
+    def attend(self) -> None:
+        with self.lock:
+            for scope in self.managed_scopes():
+                if self.systemd.active(scope):
+                    raise LockError("cancelled turn scope is still active")
+            for service in self.runtimes.values():
+                self.systemd.start(service)
+            self.current.clear()
+
+
+class TurnLifecycle(Protocol):
+    def cancel(self) -> int: ...
+
+    def attend(self) -> None: ...
 
 
 class ModeManager(Protocol):
@@ -493,6 +757,7 @@ class Controller:
         self.review_since = clock()
         self.lock = threading.RLock()
         self.next_audit_check = 0.0
+        self.turns: TurnLifecycle | None = None
 
     def _activate(self, mode: str) -> None:
         self.modes.activate(mode)
@@ -539,9 +804,15 @@ class Controller:
             if self.state != "LOCKED":
                 self.review_since = self.clock()
             self._save("LOCKING")
+            cancelled = self.turns.cancel() if self.turns is not None else 0
             self._activate("locked")
             self.modes.verify_network_audit()
             self._save("LOCKED")
+            if self.turns is not None:
+                self.audit.emit(
+                    "controller.turn_cancellation", "cancel", "observed", "LOCKED",
+                    f"{reason}_scopes_{cancelled}",
+                )
             self.audit.emit("controller.transition", "lock", "observed", "LOCKED", reason)
             self.next_audit_check = self.monotonic() + AUDIT_HEALTH_INTERVAL
 
@@ -553,6 +824,8 @@ class Controller:
         self.modes.verify_network_audit()
         self.deadline_monotonic = self.monotonic() + self.attended_seconds
         self._save("ATTENDED", self.clock() + self.attended_seconds)
+        if self.turns is not None:
+            self.turns.attend()
         self.audit.emit(event, "attended", "allow", "ATTENDED", reason, peer)
         self.next_audit_check = self.monotonic() + AUDIT_HEALTH_INTERVAL
         return self.status()
@@ -611,6 +884,11 @@ class Controller:
                 self.store.save("LOCKING", self.clock())
             except (LockError, OSError) as exc:
                 errors.append(exc)
+            if self.turns is not None:
+                try:
+                    self.turns.cancel()
+                except (LockError, OSError) as exc:
+                    errors.append(exc)
             try:
                 self._activate("locked")
             except (LockError, OSError) as exc:
@@ -620,7 +898,7 @@ class Controller:
                     self.modes.verify_network_audit()
                 except (LockError, OSError) as exc:
                     errors.append(exc)
-                else:
+                if not errors:
                     try:
                         self.store.save("LOCKED", self.clock())
                     except (LockError, OSError) as exc:
@@ -766,6 +1044,91 @@ class LockDaemon(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
             pass
 
 
+class TurnRequestHandler(socketserver.StreamRequestHandler):
+    def handle(self) -> None:
+        conn = self.request
+        server = cast(TurnDaemon, self.server)
+        conn.settimeout(10.0)
+        peer = peer_credentials(conn)
+        try:
+            if peer["uid"] != server.agent_uid:
+                raise RequestRejected("turn caller is not the agent identity")
+            line = conn.makefile("rb").readline(MAX_REQUEST_BYTES + 1)
+            if not line or len(line) > MAX_REQUEST_BYTES or not line.endswith(b"\n"):
+                raise RequestRejected("turn request is missing, oversized, or incomplete")
+            try:
+                value = json.loads(line)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise RequestRejected("turn request is not valid JSON") from exc
+            if not isinstance(value, dict):
+                raise RequestRejected("invalid turn request")
+            value = cast(dict[str, Any], value)
+            cmd = value.get("cmd")
+            expected = {"cmd", "runtime", "session"}
+            if set(value) != expected or cmd not in {"start", "finish"}:
+                raise RequestRejected("invalid turn request fields")
+            runtime = value["runtime"]
+            session = value["session"]
+            if (
+                not isinstance(runtime, str)
+                or re.fullmatch(r"[a-z][a-z0-9-]*", runtime) is None
+                or not isinstance(session, str)
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", session) is None
+            ):
+                raise RequestRejected("invalid turn identity")
+            if cmd == "start":
+                reply = server.turns.start(runtime, session)
+            else:
+                reply = server.turns.finish(runtime, session)
+        except RequestRejected as exc:
+            reply = {"ok": False, "error": str(exc)}
+        except (LockError, OSError) as exc:
+            server.fail(exc)
+            reply = {"ok": False, "error": str(exc)}
+        try:
+            conn.sendall(json.dumps(reply, separators=(",", ":")).encode("ascii") + b"\n")
+        except OSError:
+            pass
+
+
+class TurnDaemon(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+
+    def __init__(
+        self,
+        path: str,
+        turns: SystemdTurns,
+        agent_uid: int,
+        group: str,
+        fail: Callable[[Exception], None],
+    ) -> None:
+        self.path = path
+        self.turns = turns
+        self.agent_uid = agent_uid
+        self.fail = fail
+        parent = Path(path).parent.stat()
+        if parent.st_uid != os.geteuid() or parent.st_mode & 0o022:
+            raise LockError("turn socket directory must be private to root")
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            pass
+        else:
+            if info.st_mode & 0o170000 != 0o140000 or info.st_uid != os.geteuid():
+                raise LockError("refusing to replace a non-socket or foreign turn socket")
+            os.unlink(path)
+        super().__init__(path, TurnRequestHandler)
+        os.chown(path, -1, grp.getgrnam(group).gr_gid)
+        os.chmod(path, 0o660)
+
+    def server_close(self) -> None:
+        super().server_close()
+        try:
+            os.unlink(self.path)
+        except FileNotFoundError:
+            pass
+
+
 def boot_id(path: str = "/proc/sys/kernel/random/boot_id") -> str:
     try:
         value = Path(path).read_text(encoding="ascii").strip()
@@ -823,10 +1186,14 @@ def daemon_main(argv: list[str] | None = None) -> int:
         help="required FAMILY:TABLE:SET agent identity; repeat for audit and enforcement sets",
     )
     parser.add_argument("--cgroup-root", default="/sys/fs/cgroup")
+    parser.add_argument("--agent-user", help="enable cancellation for this user's DSH/Kimi services")
+    parser.add_argument("--turn-socket", default="/run/diary-lock/turns.sock")
     args = parser.parse_args(argv)
     if os.geteuid() != 0:
         parser.error("diary-lockd must run as root")
     server: LockDaemon | None = None
+    turn_server: TurnDaemon | None = None
+    turn_thread: threading.Thread | None = None
     controller: Controller | None = None
     try:
         controller = Controller(
@@ -838,6 +1205,10 @@ def daemon_main(argv: list[str] | None = None) -> int:
                 tuple(args.cgroup_set or DEFAULT_CGROUP_SETS), args.cgroup_root,
             ),
         )
+        turns: SystemdTurns | None = None
+        if args.agent_user is not None:
+            turns = SystemdTurns(args.agent_user, lambda: controller.state == "ATTENDED")
+            controller.turns = turns
         controller.startup()
         ui_uid = pwd.getpwnam(args.ui_user).pw_uid if args.ui_user else None
         server = LockDaemon(
@@ -849,6 +1220,21 @@ def daemon_main(argv: list[str] | None = None) -> int:
             ui_uid,
         )
         server.timeout = 1.0
+        if turns is not None:
+            agent = pwd.getpwnam(args.agent_user)
+            agent_group = grp.getgrgid(agent.pw_gid).gr_name
+
+            def turn_failed(error: Exception) -> None:
+                try:
+                    controller.failsafe("turn_request_failed")
+                except Exception as failsafe_error:
+                    server.latch_failure(failsafe_error)
+                else:
+                    server.latch_failure(error)
+
+            turn_server = TurnDaemon(args.turn_socket, turns, agent.pw_uid, agent_group, turn_failed)
+            turn_thread = threading.Thread(target=turn_server.serve_forever, daemon=True)
+            turn_thread.start()
         sd_notify("READY=1")
     except (KeyError, LockError, OSError) as exc:
         if controller is not None:
@@ -856,6 +1242,8 @@ def daemon_main(argv: list[str] | None = None) -> int:
                 controller.failsafe("startup_failed")
             except (LockError, OSError) as failsafe_error:
                 print(f"diary-lockd: {failsafe_error}", file=sys.stderr)
+        if turn_server is not None:
+            turn_server.server_close()
         if server is not None:
             server.server_close()
         print(f"diary-lockd: {exc}", file=sys.stderr)
@@ -886,6 +1274,16 @@ def daemon_main(argv: list[str] | None = None) -> int:
         print(f"diary-lockd: {exc}", file=sys.stderr)
         return 1
     finally:
+        if turn_server is not None:
+            turn_server.shutdown()
+            turn_server.server_close()
+        if turn_thread is not None:
+            turn_thread.join(timeout=5)
+        if controller.turns is not None:
+            try:
+                controller.failsafe("controller_stopped")
+            except (LockError, OSError) as failsafe_error:
+                print(f"diary-lockd: {failsafe_error}", file=sys.stderr)
         server.server_close()
     return 0
 
