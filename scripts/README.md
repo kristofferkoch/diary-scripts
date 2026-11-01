@@ -18,7 +18,7 @@ Entry-point names: `mailshow`, `search-mail`, `embed-mail`, `embed-messages`,
 `dsh-web-notify`, `vigilo-api`, `vigilo-login`, `vigilo-sync`, `vigiloshown`,
 `skolemelding-api`, `skolemelding-login`, `skolemelding-sync`,
 `skolemeldingshow`, `diary-sync`, `diary-sync-broker`, `diary-pipeline-triage`,
-`agent-merge-review`, `diary-audit`, `diary-auditd`, `diary-production-baseline`, `diary-lock`, `diary-lockd`, `diary-network-auditd`, `diary-dns-auditd`, `diary-network-policy`, `diary-dns-policy`, `diary-dns-policyd`, `diary-fresh-unlock`, `diary-lock-dashboard`, `diary-lock-ui`, `diary-lockdown-acceptance`. Server modules are invoked as `uv run python -m mail_reader.server` and
+`agent-merge-review`, `diary-audit`, `diary-auditd`, `diary-production-baseline`, `diary-lock`, `diary-lockd`, `diary-network-auditd`, `diary-dns-auditd`, `diary-network-policy`, `diary-dns-policy`, `diary-dns-policyd`, `diary-fresh-unlock`, `diary-lock-dashboard`, `diary-lock-ui`, `diary-lockdown-acceptance`, `diary-mac-link`. Server modules are invoked as `uv run python -m mail_reader.server` and
 `uv run python -m scripts.kindle_dashboard.serve`.
 
 `uv run` creates/syncs `.venv/` on demand; you never need to activate
@@ -85,6 +85,7 @@ Per-tool detail and the triage SOPs live in `docs/`. This file is the index.
 | [`docs/fresh-unlock.md`](docs/fresh-unlock.md) | `diary-fresh-unlock`: forced-login, browser-bound, single-use owner authorization boundary |
 | [`docs/owner-ui.md`](docs/owner-ui.md) | `diary-lock-ui`: independent grouped review, fresh unlock, lock-now, and explicit attendance extension |
 | [`docs/lockdown-acceptance.md`](docs/lockdown-acceptance.md) | offline-safe ACT-01 catalog runner, adapter protocol, reboot/resume, evidence, and fail-closed cleanup |
+| [`docs/mac-link.md`](docs/mac-link.md) | `diary-mac-link`: blocked LATER-02 dedicated-link rendering, contained staging/finalization, verification, and rollback |
 | [`docs/retired-notes-shopping.md`](docs/retired-notes-shopping.md) | removed 2026-10: the `/notes/` and `/shopping/` pages |
 
 > **`scripts/` is a stopgap name.** Once we add scripts that aren't
