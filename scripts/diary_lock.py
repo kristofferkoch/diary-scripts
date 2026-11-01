@@ -323,10 +323,15 @@ class NftCgroupIdentity:
             raise LockError(f"systemd omitted cgroup properties for {unit}")
         return values
 
-    def _cgroup_id(self, control_group: str) -> int:
-        path = Path(control_group)
-        if not path.is_absolute() or ".." in path.parts:
+    def _cgroup_path(self, control_group: str) -> Path:
+        if not control_group.startswith("/") or any(
+            part in {"", ".", ".."} for part in control_group.split("/")[1:]
+        ):
             raise LockError("systemd returned an unsafe cgroup path")
+        return Path(control_group)
+
+    def _cgroup_id(self, control_group: str) -> int:
+        path = self._cgroup_path(control_group)
         try:
             info = (self.cgroup_root / path.relative_to("/")).stat()
         except OSError as exc:
@@ -381,24 +386,59 @@ class NftCgroupIdentity:
                 raise LockError(f"{AGENT_SLICE} is missing from {family}:{table}:{name}")
         return control_group
 
-    def verify(self) -> None:
-        slice_cgroup = self._verify_slice()
-        for unit in AGENT_SERVICES:
-            control_group = self._active_cgroup(unit)
-            if not control_group.startswith(slice_cgroup + "/"):
-                raise LockError(f"{unit} escaped {AGENT_SLICE}")
+    def _verify_descendant(
+        self, unit: str, slice_cgroup: str, allow_inactive: bool = False,
+    ) -> None:
+        properties = self._properties(unit)
+        if allow_inactive and properties["ActiveState"] == "inactive":
+            return
+        if properties["ActiveState"] != "active":
+            raise LockError(f"{unit} is not active")
+        control_group = properties["ControlGroup"]
+        if not control_group:
+            raise LockError(f"{unit} has no control group")
+        self._cgroup_path(control_group)
+        if not control_group.startswith(slice_cgroup + "/"):
+            raise LockError(f"{unit} escaped {AGENT_SLICE}")
+        self._cgroup_id(control_group)
 
-    def verify_scope(self, unit: str) -> None:
+    def _validate_scope_name(self, unit: str) -> None:
         if not (
             (unit.startswith("dsh-turn-") or unit.startswith("kimi-turn-"))
             and unit.endswith(".scope")
             and all(character in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-" for character in unit)
         ):
             raise LockError("invalid agent turn scope")
+
+    def _turn_scopes(self) -> list[str]:
+        result = self._run([
+            "/usr/bin/systemctl", "list-units", "--type=scope", "--state=active",
+            "--no-legend", "--no-pager", "--plain",
+        ])
+        if result.returncode != 0:
+            raise LockError("cannot list active agent turn scopes")
+        scopes: list[str] = []
+        for line in result.stdout.splitlines():
+            fields = line.split()
+            if len(fields) < 4:
+                raise LockError("systemd returned malformed scope data")
+            unit = fields[0]
+            if unit.startswith(("dsh-turn-", "kimi-turn-")):
+                self._validate_scope_name(unit)
+                scopes.append(unit)
+        return scopes
+
+    def verify(self) -> None:
         slice_cgroup = self._verify_slice()
-        control_group = self._active_cgroup(unit)
-        if not control_group.startswith(slice_cgroup + "/"):
-            raise LockError(f"{unit} escaped {AGENT_SLICE}")
+        for unit in AGENT_SERVICES:
+            self._verify_descendant(unit, slice_cgroup)
+        for unit in self._turn_scopes():
+            self._verify_descendant(unit, slice_cgroup, allow_inactive=True)
+
+    def verify_scope(self, unit: str) -> None:
+        self._validate_scope_name(unit)
+        slice_cgroup = self._verify_slice()
+        self._verify_descendant(unit, slice_cgroup)
 
 
 class ModeManager(Protocol):
@@ -554,6 +594,8 @@ class Controller:
                 and now >= self.deadline_monotonic
             ):
                 self.enter_locked("attendance_expired")
+            if self.identity is not None:
+                self.identity.verify()
             if now >= self.next_audit_check:
                 self.audit.ping()
                 self.modes.verify_network_audit()

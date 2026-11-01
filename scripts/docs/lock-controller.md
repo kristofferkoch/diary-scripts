@@ -15,19 +15,30 @@ The prepared LATER-03 controller revision additionally verifies cgroup network
 identity. It requires active `agent.slice`, `dsh-web.service`, and
 `kimi-web.service`; stats the slice's real cgroup inode; and requires that
 inode in every `--cgroup-set FAMILY:TABLE:SET` nftables `cgroupv2` set. Both web
-services must be descendants of the slice. `verify_scope()` applies the same
-ancestor check to CTL-02 `dsh-turn-*.scope` and `kimi-turn-*.scope` units.
-Missing/wrong-type sets, inactive services, escaped cgroups, malformed command
-output, and nft/systemctl uncertainty fail the transition and failsafe. Repeat
-`--cgroup-set` for every ACT-01 audit and enforcement set. This verification
-does not itself install or prove locked packet rules; CTL-03/ACT-01 retains
-that responsibility.
+services must be active descendants with canonical paths and real cgroup
+directories. `verify_scope()` applies the same check to CTL-02
+`dsh-turn-*.scope` and `kimi-turn-*.scope` units. Every maintenance pass repeats
+slice/web verification and discovers active turn scopes, so post-transition
+membership removal or scope escape enters the existing fatal supervision and
+watchdog failsafe rather than leaving a healthy-looking controller. A scope
+that became inactive after listing is ignored; an active escaped scope,
+traversal/malformed path, missing cgroup, wrong-type set, or command uncertainty
+fails closed. Repeat `--cgroup-set` for every ACT-01 audit and enforcement set.
+This verification does not itself install or prove locked packet rules;
+CTL-03/ACT-01 retains that responsibility.
 
 Do not deploy this controller revision alone with the older CTL-01 installer:
 its new unit intentionally orders after and wants the LATER-03 agents and needs
 `CAP_NET_ADMIN` plus `AF_NETLINK` for nftables verification. Use the integrated
 LATER-03 migration only after ACT-01 and CTL-02 pass their gates. The current
 live CTL-01 controller and UID/user-unit baseline are unchanged by preparation.
+
+`later03_activation.py` is the install-time guard for that integrated migration.
+It accepts only root-owned mode-`0600` evidence with explicit ACT-01 acceptance
+and CTL-02 live-verification flags, exact prerequisite/integrated repository
+OIDs, and fixed scope prefixes. Approved HEADs and prerequisite ancestry are
+checked with fixed Git argv. Every declared enforcement set must be integrated
+into both `agent.slice` and the controller command before activation can proceed.
 
 ## Trust boundary and requests
 

@@ -20,6 +20,10 @@ class IdentityCommands:
             "dsh-turn-test.scope": "/agent.slice/dsh-turn-test.scope",
         }
         self.active = {unit: "active" for unit in self.cgroups}
+        self.scopes = [
+            "dsh-turn-test.scope LOAD ACTIVE SUB running",
+            "session-1.scope LOAD ACTIVE SUB running",
+        ]
         self.members: dict[tuple[str, str, str], set[int]] = {}
         self.set_type = "cgroupv2"
         self.calls: list[list[str]] = []
@@ -40,6 +44,8 @@ class IdentityCommands:
                 returncode=0,
                 stdout=f"ActiveState={self.active[unit]}\nControlGroup={self.cgroups[unit]}\n",
             )
+        if argv[:2] == ["/usr/bin/systemctl", "list-units"]:
+            return SimpleNamespace(returncode=0, stdout="\n".join(self.scopes) + "\n")
         if argv[:4] == ["/usr/bin/nft", "--json", "list", "set"]:
             selector = (argv[4], argv[5], argv[6])
             if selector not in self.members:
@@ -113,6 +119,46 @@ def test_turn_scope_cannot_escape_agent_slice(tmp_path: Path) -> None:
         checker.verify_scope("other.scope")
 
 
+def test_supervision_discovers_scope_escape_after_successful_transition(tmp_path: Path) -> None:
+    checker, commands = identity(tmp_path)
+    checker.verify()
+    commands.cgroups["dsh-turn-test.scope"] = "/system.slice/dsh-turn-test.scope"
+    with pytest.raises(lock.LockError, match="escaped agent.slice"):
+        checker.verify()
+
+
+def test_scope_that_exits_after_listing_does_not_cause_false_failure(tmp_path: Path) -> None:
+    checker, commands = identity(tmp_path)
+    commands.active["dsh-turn-test.scope"] = "inactive"
+    commands.cgroups["dsh-turn-test.scope"] = ""
+    checker.verify()
+    with pytest.raises(lock.LockError, match="not active"):
+        checker.verify_scope("dsh-turn-test.scope")
+
+
+@pytest.mark.parametrize("unit", ["dsh-web.service", "dsh-turn-test.scope"])
+@pytest.mark.parametrize("control_group", [
+    "/agent.slice/../system.slice/escaped",
+    "/agent.slice//nested",
+    "/agent.slice/./nested",
+    "agent.slice/relative",
+])
+def test_descendant_control_group_must_be_canonical(
+    tmp_path: Path, unit: str, control_group: str,
+) -> None:
+    checker, commands = identity(tmp_path)
+    commands.cgroups[unit] = control_group
+    with pytest.raises(lock.LockError, match="unsafe cgroup path"):
+        checker.verify()
+
+
+def test_descendant_control_group_must_exist(tmp_path: Path) -> None:
+    checker, commands = identity(tmp_path)
+    (tmp_path / "agent.slice/dsh-web.service").rmdir()
+    with pytest.raises(lock.LockError, match="cannot stat cgroup"):
+        checker.verify()
+
+
 def test_missing_or_malformed_kernel_state_is_uncertainty(tmp_path: Path) -> None:
     checker, commands = identity(tmp_path)
     (tmp_path / "agent.slice").rename(tmp_path / "missing.slice")
@@ -153,3 +199,52 @@ def test_controller_does_not_declare_mode_when_identity_is_missing(tmp_path: Pat
     with pytest.raises(lock.LockError, match="could not prove locked"):
         controller.failsafe("identity_test")
     assert controller.status()["state"] == "LOCKING"
+
+
+@pytest.mark.parametrize("attended", [False, True])
+def test_maintenance_rechecks_identity_after_transition(
+    tmp_path: Path, attended: bool,
+) -> None:
+    class Modes:
+        def activate(self, mode: str) -> None:
+            pass
+
+    class Audit:
+        def emit(
+            self, event: str, operation: str, decision: str, state: str,
+            reason: str, caller: dict[str, int] | None = None,
+        ) -> None:
+            pass
+
+        def ping(self) -> None:
+            pass
+
+    class SupervisedIdentity:
+        def __init__(self) -> None:
+            self.error: str | None = None
+            self.calls = 0
+
+        def verify(self) -> None:
+            self.calls += 1
+            if self.error is not None:
+                raise lock.LockError(self.error)
+
+        def verify_scope(self, unit: str) -> None:
+            self.verify()
+
+    identity = SupervisedIdentity()
+    controller = lock.Controller(
+        lock.StateStore(str(tmp_path / "state.json"), "boot-test"),
+        Modes(), Audit(), identity=identity,
+    )
+    controller.startup()
+    if attended:
+        controller.break_glass({"pid": 1, "uid": 1000, "gid": 1000})
+    assert controller.status()["state"] == ("ATTENDED" if attended else "LOCKED")
+    identity.error = "post-transition membership lost"
+    with pytest.raises(lock.LockError, match="post-transition membership lost"):
+        controller.maintenance()
+    assert identity.calls >= 2
+    identity.error = None
+    controller.failsafe("supervision_failed")
+    assert controller.status()["state"] == "LOCKED"
