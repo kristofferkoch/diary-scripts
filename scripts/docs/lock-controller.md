@@ -2,8 +2,9 @@
 
 `diary-lockd` owns the authoritative `LOCKING`, `LOCKED`, and `ATTENDED` state.
 It is a root-owned stdlib-only installed file, not code executed from a
-worktree or uv environment. Its only clients are the local `diary-lock` command
-and, after later cards, independently authenticated trusted services.
+worktree or uv environment. Its clients are the local `diary-lock` command and
+the CTL-09 read-only dashboard. Later state-changing trusted services remain a
+separate trust path.
 
 The CTL-01 mode units are deliberately dark markers. They do not change
 network, DNS, broker, Signal, or active-turn behavior. Those enforcement paths
@@ -12,10 +13,13 @@ belong to their separate cards and general-agent lockdown remains disabled.
 ## Trust boundary and requests
 
 `/run/diary-lock/socket` is `root:diary-lock-control` mode `0660`. The installer
-adds only the local owner to that group and removes `agent` and
-`diary-pipeline`. Filesystem permissions are not the only check: every request
-uses kernel `SO_PEERCRED`, and the daemon accepts commands only from UID 0 or
-the configured owner's kernel UID. Peer authorization happens immediately after
+adds only the local owner and the CTL-09 dashboard reader to that group and
+removes `agent` and `diary-pipeline`. Filesystem permissions are not the only
+check: every request uses kernel `SO_PEERCRED`, and the daemon accepts state
+changes only from UID 0 or the configured owner's kernel UID. When configured
+with `--dashboard-user diary-lock-dashboard`, that account receives only the
+exact `status` request; `lock`, `break_glass`, extra fields, and attendance
+changes are rejected. Peer authorization happens immediately after
 accept, before reading any request bytes, so an unauthorized partial frame is
 rejected without waiting for its timeout or invoking failsafe. Client-supplied
 UIDs, names, sessions, reasons, expiry values, and other identity assertions are

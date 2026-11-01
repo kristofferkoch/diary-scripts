@@ -28,7 +28,10 @@ with real UID 0 that dropped to a nonzero effective UID. The owner must stop or
 restart only those services in a controlled window and rerun the installer; it
 never kills unrelated services.
 The API additionally checks account identity on every connection, so retained
-client-group credentials cannot make `agent` or `diary-pipeline` trusted. A
+client-group credentials cannot make `agent` or `diary-pipeline` trusted. The
+CTL-09 `diary-lock-dashboard` account may connect through the same group socket,
+but the daemon recognizes its kernel UID and permits only `baseline` and `review`;
+`write` and `ping` are rejected even though it is a group member. A
 fixed `ping` request emits a metadata-only `audit.heartbeat` with a unique
 emission ID and requires journald read-back of that exact record. This checks
 the `JournalWriter`, journal socket, journald, and read path rather than merely
@@ -167,12 +170,16 @@ duplicate limiter is the audit rate boundary. Native journal delivery is
 datagram-based: socket/write errors fail the request, but journald does not
 return an fsync acknowledgement.
 
-## Reports
+## Reports and health
 
 ```bash
 diary-audit baseline --since 24h
 diary-audit review --since 24h --json
+diary-audit ping
 ```
+
+`ping` performs the journal heartbeat/read-back health check and is denied to the
+read-only dashboard identity.
 
 `baseline` groups all validated records by fingerprint and reports occurrence
 and stored-record counts. `review` includes only `deny`, `would_deny`, and

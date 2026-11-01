@@ -433,7 +433,12 @@ class LockRequestHandler(socketserver.StreamRequestHandler):
                 value = json.loads(line)
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise RequestRejected("controller request is not valid JSON") from exc
-            reply = server.controller.handle(value, peer, server.owner_uid)
+            if server.read_only(peer):
+                if not isinstance(value, dict) or set(value) != {"cmd"} or value.get("cmd") != "status":
+                    raise RequestRejected("read-only caller may only request controller status")
+                reply = server.controller.status()
+            else:
+                reply = server.controller.handle(value, peer, server.owner_uid)
         except RequestRejected as exc:
             reply = {"ok": False, "error": str(exc)}
         except (LockError, OSError) as exc:
@@ -454,10 +459,19 @@ class LockRequestHandler(socketserver.StreamRequestHandler):
 class LockDaemon(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
 
-    def __init__(self, path: str, controller: Controller, group: str, owner_uid: int) -> None:
+    def __init__(
+        self,
+        path: str,
+        controller: Controller,
+        group: str,
+        owner_uid: int,
+        dashboard_user: str | None = None,
+    ) -> None:
         self.path = path
         self.controller = controller
+        self.group = group
         self.owner_uid = owner_uid
+        self.dashboard_user = dashboard_user
         self.fatal_error: Exception | None = None
         self.fatal_lock = threading.Lock()
         parent = Path(path).parent.stat()
@@ -475,8 +489,26 @@ class LockDaemon(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         os.chown(path, -1, grp.getgrnam(group).gr_gid)
         os.chmod(path, 0o660)
 
+    def read_only(self, peer: dict[str, int]) -> bool:
+        if self.dashboard_user is None or peer["uid"] in {0, self.owner_uid}:
+            return False
+        try:
+            name = pwd.getpwuid(peer["uid"]).pw_name
+        except KeyError:
+            return False
+        return name == self.dashboard_user and name not in {"agent", "diary-pipeline"}
+
     def authorized(self, peer: dict[str, int]) -> bool:
-        return peer["uid"] in {0, self.owner_uid}
+        if peer["uid"] in {0, self.owner_uid}:
+            return True
+        if not self.read_only(peer):
+            return False
+        try:
+            group = grp.getgrnam(self.group)
+            name = pwd.getpwuid(peer["uid"]).pw_name
+        except KeyError:
+            return False
+        return peer["gid"] == group.gr_gid or name in group.gr_mem
 
     def latch_failure(self, error: Exception) -> None:
         with self.fatal_lock:
@@ -539,6 +571,7 @@ def daemon_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--audit-socket", default=DEFAULT_AUDIT_SOCKET)
     parser.add_argument("--group", default=DEFAULT_GROUP)
     parser.add_argument("--owner", default=DEFAULT_OWNER)
+    parser.add_argument("--dashboard-user")
     parser.add_argument("--attended-seconds", type=int, default=DEFAULT_ATTENDED_SECONDS)
     parser.add_argument("--boot-id-file", default="/proc/sys/kernel/random/boot_id")
     args = parser.parse_args(argv)
@@ -554,7 +587,13 @@ def daemon_main(argv: list[str] | None = None) -> int:
             args.attended_seconds,
         )
         controller.startup()
-        server = LockDaemon(args.listen, controller, args.group, pwd.getpwnam(args.owner).pw_uid)
+        server = LockDaemon(
+            args.listen,
+            controller,
+            args.group,
+            pwd.getpwnam(args.owner).pw_uid,
+            args.dashboard_user,
+        )
         server.timeout = 1.0
         sd_notify("READY=1")
     except (KeyError, LockError, OSError) as exc:

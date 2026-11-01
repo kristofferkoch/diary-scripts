@@ -830,6 +830,9 @@ class AuditRequestHandler(socketserver.StreamRequestHandler):
                 request = json.loads(line)
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise AuditError("audit request is not valid JSON") from exc
+            if server.read_only(peer):
+                if not isinstance(request, dict) or request.get("cmd") not in {"baseline", "review"}:
+                    raise AuditError("read-only caller may only request audit reports")
             reply = server.service.handle(request, peer)
         except (AuditError, OSError) as exc:
             reply = {"ok": False, "error": str(exc)}
@@ -842,10 +845,17 @@ class AuditRequestHandler(socketserver.StreamRequestHandler):
 class AuditDaemon(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
 
-    def __init__(self, path: str, service: AuditService, group: str = DEFAULT_GROUP) -> None:
+    def __init__(
+        self,
+        path: str,
+        service: AuditService,
+        group: str = DEFAULT_GROUP,
+        dashboard_user: str | None = None,
+    ) -> None:
         self.path = path
         self.service = service
         self.group = group
+        self.dashboard_user = dashboard_user
         parent = Path(path).parent.stat()
         if parent.st_uid != os.geteuid() or parent.st_mode & 0o022:
             raise AuditError("audit socket directory must be private to the daemon")
@@ -861,6 +871,15 @@ class AuditDaemon(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         gid = grp.getgrnam(group).gr_gid
         os.chown(path, -1, gid)
         os.chmod(path, 0o660)
+
+    def read_only(self, peer: dict[str, int]) -> bool:
+        if self.dashboard_user is None or peer["uid"] == 0:
+            return False
+        try:
+            name = pwd.getpwuid(peer["uid"]).pw_name
+        except KeyError:
+            return False
+        return name == self.dashboard_user and name not in {"agent", "diary-pipeline"}
 
     def authorized(self, peer: dict[str, int]) -> bool:
         if peer["uid"] == 0:
@@ -931,6 +950,7 @@ def _client_parser() -> argparse.ArgumentParser:
     write.add_argument("--json", required=True, help="event object, or - to read stdin")
     revocation = sub.add_parser("revocation-check", help="fail if non-root processes retain the journal group")
     revocation.add_argument("--group", default=DEFAULT_JOURNAL_GROUP)
+    sub.add_parser("ping", help="verify journal write and exact heartbeat read-back")
     for name in ("baseline", "review"):
         report = sub.add_parser(name, help=f"produce a fixed {name} report")
         report.add_argument("--since", default="24h")
@@ -962,6 +982,9 @@ def main(argv: list[str] | None = None) -> int:
                 raise AuditError("event is not valid JSON") from exc
             reply = request(args.socket, {"cmd": "write", "event": event})
             print(json.dumps(reply, indent=2, sort_keys=True))
+        elif args.cmd == "ping":
+            reply = request(args.socket, {"cmd": "ping"})
+            print(json.dumps(reply, indent=2, sort_keys=True))
         else:
             reply = request(args.socket, {
                 "cmd": args.cmd,
@@ -985,13 +1008,14 @@ def daemon_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--journal-socket", default=DEFAULT_JOURNAL_SOCKET)
     parser.add_argument("--state", default=DEFAULT_STATE)
     parser.add_argument("--group", default=DEFAULT_GROUP)
+    parser.add_argument("--dashboard-user")
     args = parser.parse_args(argv)
     if os.geteuid() != 0:
         parser.error("diary-auditd must run as root")
     server: AuditDaemon | None = None
     try:
         service = AuditService(DedupStore(args.state), JournalWriter(args.journal_socket))
-        server = AuditDaemon(args.listen, service, args.group)
+        server = AuditDaemon(args.listen, service, args.group, args.dashboard_user)
         sd_notify("READY=1")
     except (AuditError, KeyError, OSError) as exc:
         if server is not None:
