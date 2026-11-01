@@ -35,10 +35,21 @@ class FakeSystemd:
         self.manager_recoveries = 0
         self.current_manager_pid = 9001
         self.auto_started_pids: list[tuple[int, int]] = []
+        self.socket_active = True
+        self.socket_unit = "dbus.socket"
+        self.broker_unit = "dbus-broker.service"
+        self.bus_quiesced = False
+        self.reactivated_after_quiesce = False
+        self.ensure_calls: list[str] = []
 
     def _require_manager(self) -> None:
         if not self.manager_available:
             raise lock.SystemdUnavailable("manager unavailable")
+        if self.bus_quiesced:
+            self.bus_quiesced = False
+            self.socket_active = True
+            self.services["dbus-broker.service"] = True
+            self.reactivated_after_quiesce = True
 
     def manager_pid(self) -> int:
         return self.current_manager_pid
@@ -109,6 +120,8 @@ class FakeSystemd:
 
     def active(self, unit: str) -> bool:
         self._require_manager()
+        if unit == "dbus.socket":
+            return self.socket_active
         if unit.endswith(".scope"):
             return unit in self.scopes_by_name and unit not in self.inactive_scopes
         return self.services.get(unit, False)
@@ -116,7 +129,9 @@ class FakeSystemd:
     def stop(self, unit: str, no_block: bool = False) -> None:
         self._require_manager()
         self.calls.append(("stop", unit))
-        if unit.endswith(".scope"):
+        if unit == "dbus.socket":
+            self.socket_active = False
+        elif unit.endswith(".scope"):
             self.inactive_scopes.add(unit)
             self.membership[unit] = set()
         else:
@@ -129,6 +144,9 @@ class FakeSystemd:
 
     def start(self, service: str) -> None:
         self.calls.append(("start", service))
+        if service == "dbus.socket":
+            self.socket_active = True
+            return
         if self.services.get(service, False):
             raise lock.LockError("old service was not stopped")
         self.services[service] = True
@@ -137,8 +155,17 @@ class FakeSystemd:
         self.membership[service] = {self.pids[service]}
 
     def ensure_service(self, service: str) -> None:
+        self.ensure_calls.append(service)
+        if service in {"dbus.socket", "dbus-broker.service"}:
+            self.bus_quiesced = False
+            self.reactivated_after_quiesce = False
         if not self.active(service):
             self.start(service)
+
+    def quiesce_user_bus(self) -> None:
+        self.services["dbus-broker.service"] = False
+        self.socket_active = False
+        self.bus_quiesced = True
 
 
 class FakeProcesses:
@@ -306,6 +333,22 @@ def test_attend_quiesces_stale_service_and_rejects_reused_fresh_pids() -> None:
     cast(Any, fake).start = reuse
     with pytest.raises(lock.LockError, match="reused a supervisor or runtime PID"):
         svc.attend()
+
+
+def test_socket_is_stopped_after_last_bus_call_and_restored_before_broker() -> None:
+    fake = FakeSystemd()
+    fake.services["dbus-broker.service"] = True
+    svc = turns(fake)
+    svc.cancel()
+    assert fake.bus_quiesced
+    assert not fake.reactivated_after_quiesce
+    assert not fake.socket_active
+    assert not fake.services["dbus-broker.service"]
+
+    svc.attend()
+    assert fake.socket_active
+    assert fake.services["dbus-broker.service"]
+    assert fake.ensure_calls[-2:] == ["dbus.socket", "dbus-broker.service"]
 
 
 def test_outage_lock_unlock_quiesces_default_target_and_starts_fresh_processes() -> None:
@@ -595,6 +638,9 @@ def test_pid_fallback_preserves_only_manager_pid_and_contains_attached_workload(
     fake_process(tmp_path, 9007, f"{prefix}/app.slice/escape.service")
     fake_process(tmp_path, 9008, f"{prefix}/session.slice/dbus-broker.service/attached-workload")
     fake_process(tmp_path, 9009, f"{prefix}/init.scope/attached-workload")
+    fake_process(tmp_path, 9010, f"{prefix}/session.slice/dbus.socket")
+    fake_process(tmp_path, 9011, f"{prefix}/custom.slice/escape.service")
+    fake_process(tmp_path, 9012, "/unrelated.slice/unknown-unit")
     processes = lock.AgentProcesses(uid, proc_root=str(tmp_path), manager_pid=9001)
     assert not processes.is_workload(9001)
     assert processes.is_workload(9003)
@@ -602,8 +648,11 @@ def test_pid_fallback_preserves_only_manager_pid_and_contains_attached_workload(
     assert processes.is_workload(9007)
     assert processes.is_workload(9008)
     assert processes.is_workload(9009)
+    assert processes.is_workload(9010)
+    assert processes.is_workload(9011)
+    assert processes.is_workload(9012)
     assert {identity.pid for identity in processes.processes()} == {
-        9002, 9003, 9004, 9005, 9006, 9007, 9008, 9009,
+        9002, 9003, 9004, 9005, 9006, 9007, 9008, 9009, 9010, 9011, 9012,
     }
 
 
@@ -632,6 +681,9 @@ def pid_running(pid: int) -> bool:
 
 class OutageSystemd:
     def manager_pid(self) -> None:
+        return None
+
+    def quiesce_user_bus(self) -> None:
         return None
 
     def __getattr__(self, _name: str):
@@ -724,6 +776,7 @@ signal.pause()
     ], check=True, capture_output=True, text=True, timeout=20)
     systemd = lock.SystemdUser(None)
     cast(Any, systemd).workload_services = lambda: [service, escape_service]
+    cast(Any, systemd).quiesce_user_bus = lambda: None
     uid = os.geteuid()
     manager_pid = int(subprocess.check_output([
         "/usr/bin/systemctl", "show", f"user@{uid}.service", "--property=MainPID", "--value",
@@ -817,4 +870,50 @@ signal.pause()
             svc.cancel()
         except lock.LockError:
             subprocess.run(["/usr/bin/systemctl", "--user", "stop", service, escape_service], check=False)
+        shutil.rmtree(state_dir, ignore_errors=True)
+
+
+@pytest.mark.skipif(os.environ.get("DIARY_TEST_SYSTEMD_USER") != "1", reason="opt-in synthetic user units")
+def test_real_user_bus_quiesce_stops_synthetic_broker_and_listener() -> None:
+    tag = uuid.uuid4().hex
+    service = f"diary-bus-probe-{tag}.service"
+    state_dir = Path.cwd() / ".pytest-systemd" / tag
+    state_dir.mkdir(parents=True)
+    socket_path = Path(f"/tmp/diary-bus-{tag}.sock")
+    pid_file = state_dir / "broker.pid"
+    helper = r'''
+import os, pathlib, socket, sys, time
+path = sys.argv[1]
+try:
+    os.unlink(path)
+except FileNotFoundError:
+    pass
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+listener.bind(path)
+listener.listen()
+pathlib.Path(sys.argv[2]).write_text(str(os.getpid()))
+time.sleep(300)
+'''
+    subprocess.run([
+        "/usr/bin/systemd-run", "--user", "--unit", service,
+        "--property=KillMode=control-group", "--property=Restart=no",
+        sys.executable, "-c", helper, str(socket_path), str(pid_file),
+    ], check=True, capture_output=True, text=True, timeout=20)
+    systemd = lock.SystemdUser(
+        None, broker_unit=service, socket_unit=None, socket_path=str(socket_path),
+    )
+    try:
+        for _attempt in range(200):
+            if pid_file.exists() and socket_path.exists():
+                break
+            time.sleep(0.05)
+        pid = int(pid_file.read_text())
+        assert pid_running(pid)
+        assert str(socket_path) in Path("/proc/net/unix").read_text()
+        systemd.quiesce_user_bus()
+        assert not pid_running(pid)
+        assert str(socket_path) not in Path("/proc/net/unix").read_text()
+    finally:
+        subprocess.run(["/usr/bin/systemctl", "--user", "stop", service], check=False)
+        socket_path.unlink(missing_ok=True)
         shutil.rmtree(state_dir, ignore_errors=True)

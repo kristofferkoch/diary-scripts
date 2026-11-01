@@ -522,7 +522,6 @@ class AgentProcesses:
         self.eligible = eligible
         self.manager_pid = manager_pid
         self.manager_identity: ProcessIdentity | None = None
-        self.manager_prefix = f"/user.slice/user-{uid}.slice/user@{uid}.service/"
         self.pin_manager(manager_pid)
 
     def pin_manager(self, pid: int | None) -> None:
@@ -537,18 +536,7 @@ class AgentProcesses:
         self.manager_identity = identity
 
     def is_workload(self, pid: int) -> bool:
-        cgroup = process_cgroup(pid, self.proc_root)
-        if not cgroup.startswith(self.manager_prefix):
-            return False
-        relative = cgroup[len(self.manager_prefix):]
-        parts = relative.split("/")
-        if parts[0] == "init.scope":
-            return self.manager_identity is None or process_identity(pid, self.proc_root) != self.manager_identity
-        if any(part.endswith(".scope") for part in parts):
-            return True
-        if len(parts) >= 2 and parts[0] in {"app.slice", "session.slice"}:
-            return parts[1].endswith(".service")
-        return False
+        return self.manager_identity is None or process_identity(pid, self.proc_root) != self.manager_identity
 
     def processes(self) -> list[ProcessIdentity]:
         result: list[ProcessIdentity] = []
@@ -595,11 +583,21 @@ class AgentProcesses:
 
 
 class SystemdUser:
-    def __init__(self, user: str | None, runner: Callable[..., Any] = subprocess.run) -> None:
+    def __init__(
+        self,
+        user: str | None,
+        runner: Callable[..., Any] = subprocess.run,
+        broker_unit: str = "dbus-broker.service",
+        socket_unit: str | None = "dbus.socket",
+        socket_path: str | None = None,
+    ) -> None:
         if user is not None and re.fullmatch(r"[a-z_][a-z0-9_-]*", user) is None:
             raise LockError("invalid agent user")
         self.user = user
         self.runner = runner
+        self.broker_unit = broker_unit
+        self.socket_unit = socket_unit
+        self.socket_path = socket_path
 
     def _run(self, tool: str, args: list[str]) -> Any:
         if tool not in {"systemctl", "busctl"}:
@@ -664,6 +662,48 @@ class SystemdUser:
         if result.returncode != 0:
             raise SystemdUnavailable("cannot identify the agent user manager")
         return pid if pid > 0 else None
+
+    def _bus_socket_path(self) -> str:
+        if self.socket_path is not None:
+            return self.socket_path
+        uid = os.geteuid() if self.user is None else pwd.getpwnam(self.user).pw_uid
+        return f"/run/user/{uid}/bus"
+
+    def _verify_bus_quiesced(self, broker: ProcessIdentity | None) -> None:
+        socket_path = self._bus_socket_path()
+        for _attempt in range(100):
+            broker_alive = False
+            if broker is not None:
+                try:
+                    broker_alive = process_state(broker.pid) not in {"X", "Z"}
+                except LockError:
+                    if Path(f"/proc/{broker.pid}").exists():
+                        raise
+            try:
+                listeners = Path("/proc/net/unix").read_text(encoding="ascii")
+            except OSError as exc:
+                raise LockError("cannot verify the user bus socket") from exc
+            if not broker_alive and socket_path not in listeners:
+                return
+            time.sleep(0.05)
+        raise LockError("user bus broker or socket remains active")
+
+    def quiesce_user_bus(self) -> None:
+        broker: ProcessIdentity | None = None
+        try:
+            broker = process_identity(self.main_pid(self.broker_unit))
+        except LockError:
+            pass
+        units = [self.broker_unit]
+        if self.socket_unit is not None:
+            units.append(self.socket_unit)
+        try:
+            result = self._run("systemctl", ["stop", *units])
+            if result.returncode != 0:
+                raise LockError("could not stop the user bus")
+        except SystemdUnavailable:
+            pass
+        self._verify_bus_quiesced(broker)
 
     def active(self, unit: str) -> bool:
         result = self._run("systemctl", ["is-active", "--quiet", unit])
@@ -958,12 +998,18 @@ class SystemdTurns:
                 seen = set()
             self.processes.stop_and_kill()
             self.processes.require_empty()
+            cancellation_error: LockError | None = None
             try:
                 seen = self._cancel_systemd() | seen
             except SystemdUnavailable:
                 pass
             except LockError as exc:
-                raise LockError(f"turn cancellation failed: {exc}") from exc
+                cancellation_error = exc
+            self.systemd.quiesce_user_bus()
+            self.processes.stop_and_kill()
+            self.processes.require_empty()
+            if cancellation_error is not None:
+                raise LockError(f"turn cancellation failed: {cancellation_error}") from cancellation_error
             self.current.clear()
             return len(seen)
 
@@ -978,7 +1024,9 @@ class SystemdTurns:
             for service in self.systemd.workload_services():
                 if self.systemd.active(service):
                     raise LockError(f"refusing to resume active {service}")
-            self.systemd.ensure_service("dbus-broker.service")
+            if self.systemd.socket_unit is not None:
+                self.systemd.ensure_service(self.systemd.socket_unit)
+            self.systemd.ensure_service(self.systemd.broker_unit)
             for service in self.runtimes.values():
                 self.systemd.start(service)
                 fresh = self.systemd.service_identities(service, wait=True)

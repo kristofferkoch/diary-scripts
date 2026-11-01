@@ -51,35 +51,30 @@ failing completion hook exits successfully so a `Stop` hook can never ask the
 model to continue.
 
 Agent-owned hook configuration is not the containment boundary. On every
-`LOCKING` transition the controller repeatedly rediscovers and stops every
-active service and non-init scope in the dedicated agent user manager, then
-waits for inactivity. DSH/Kimi, token units, `dbus-broker.service`, and
-arbitrary `app.slice/escape.service` workloads are all included. Only
+`LOCKING` transition the controller finishes necessary user-bus operations
+first: it repeatedly rediscovers and stops every active service and non-init
+scope in the dedicated agent user manager, then waits for inactivity.
+DSH/Kimi, token units, D-Bus, and arbitrary services are all included. Only
 `init.scope` is excluded from systemd unit stops; its attached processes are
 still handled by the independent PID fallback. A service or scope created
 during cancellation is found by a later pass. Services are stopped
 asynchronously before their scopes so `Restart=on-failure` cannot resurrect a
 model turn.
 
-Independently of the user manager, the controller enumerates `/proc`, pins
-process identities, and uses pidfds to SIGSTOP and SIGKILL workload candidates
-until none remain. UID matching alone is not eligibility. A process must also
-be under the real `user@<uid>.service` cgroup and either:
+After the first PID quiescence, the controller performs the service/scope
+verification loop again, then stops `dbus-broker.service` and `dbus.socket` in
+one final user-bus operation. It does not call `is-active`, `busctl`, or any
+other user-bus operation afterward: broker death and absence of the bus
+listener are verified through `/proc` and `/proc/net/unix`, followed by a final
+PID quiescence. This prevents verification itself from reactivating D-Bus.
 
-- any `app.slice/*.service` or `session.slice/*.service` subtree, including
-  D-Bus, DSH/Kimi, token units, arbitrary services, attached workloads, and
-  their children;
-- a non-`init.scope` user scope, including controller and tool-created scopes;
-- `init.scope` when the complete PID/parent/start-time/UID identity does not
-  match the current user manager pinned through the system manager.
-
-Thus only the current manager process identity is preserved. D-Bus and any
-workload attached to D-Bus or `init.scope` are contained; there is no
-cgroup-level infrastructure bypass. Manager identity is refreshed at lock and
-immediately after manager recovery, before any PID quiescence, so a replacement
-manager cannot be killed because of a stale PID or start time. Zombies are not
-treated as running work. After PID quiescence the controller performs the
-service/non-init-scope loop again. A stop or lingering-process failure retains
+PID eligibility has no unit, slice, cgroup, or type allowlist. **Every process
+with the agent UID is workload**, including D-Bus, sockets, custom slices,
+unknown units, and attached processes. The sole exception is the exact current
+user-manager identity (PID, parent, start time, and UID), refreshed at lock and
+immediately after manager recovery before PID quiescence. Thus a replacement
+manager is preserved safely without creating an attachment bypass. Zombies are
+not treated as running work. A stop or lingering-process failure retains
 durable `LOCKING`, never `LOCKED`. If the user manager itself is unavailable
 but PID containment proves no eligible workload remains, lock may complete in
 degraded mode.
@@ -91,20 +86,22 @@ re-pins and verifies the replacement manager's identity. Manager startup may
 activate `default.target` and its enabled web services. The controller first
 quiesces all auto-started services and scopes and requires every workload to
 be inactive and every eligible process gone; it never attends the auto-started
-PIDs. It then explicitly starts and verifies `dbus-broker.service` before
-starting each DSH/Kimi service and verifying a fresh supervisor PID, fresh
-runtime PID, and valid pinned parentage. Only after all services pass does the
-controller activate attended mode. A fresh service that accepts a prompt while
-durable state is still `LOCKING` follows the failsafe path above; there is no
-replay. The controller never opens or edits runtime conversation files. DSH
-persists an interrupted turn and requires a new user message to continue; the
-controlled verification below must prove the same no-auto-resume behavior for
-the deployed DSH/Kimi versions.
+PIDs. It then explicitly restores `dbus.socket` followed by
+`dbus-broker.service`, verifying both before starting each DSH/Kimi service
+and verifying a fresh supervisor PID, fresh runtime PID, and valid pinned
+parentage. Only after all services pass does the controller activate attended
+mode. A fresh service that accepts a prompt while durable state is still
+`LOCKING` follows the failsafe path above; there is no replay. The controller
+never opens or edits runtime conversation files. DSH persists an interrupted
+turn and requires a new user message to continue; the controlled verification
+below must prove the same no-auto-resume behavior for the deployed DSH/Kimi
+versions.
 
 ## LATER-03 migration contract
 
 CTL-02 deliberately uses the existing agent user manager, transient user
-scopes, and workload-cgroup filtering for its independent PID fallback. It does not
+scopes, and UID-wide process selection with a manager-only identity exception
+for its independent PID fallback. It does not
 create `agent.slice`, attach `NFTSet=`, or change network identity. LATER-03
 owns the move to root-owned system services and system slices, including any
 per-scope `NFTSet=` identity and the corresponding SELinux/executable changes.
@@ -152,25 +149,31 @@ the scope, spawns a `setsid` child, and stops only those synthetic units. It
 verifies the workload and arbitrary-service PIDs die, on-disk state remains,
 the real user-manager PID stays alive, fresh supervisor/runtime PIDs appear,
 and the fresh service does not recreate the old child. Its manager uses
-`contain_all_scopes=False` and a two-test-service lister; production contains
-every non-init scope and every app.slice/session.slice service, including
-D-Bus. The probe verifies the deployed D-Bus path is
-`session.slice/dbus-broker.service` and attempts D-Bus and `init.scope`
-attachment. On systemd 259 in the current environment both API attempts are
-denied; if policy changes, the fake-`/proc` attached-workload regressions
-require those PIDs to remain eligible.
+`contain_all_scopes=False`, a two-test-service lister, and an isolated final-bus
+hook; production contains every non-init scope and every service. The probe
+verifies the deployed D-Bus path is `session.slice/dbus-broker.service` and
+attempts D-Bus and `init.scope` attachment. On systemd 259 in the current
+environment both API attempts are denied; if policy changes, the fake-`/proc`
+attached-workload regressions require those PIDs to remain eligible.
+
+A second opt-in probe starts only a uniquely named synthetic broker with a Unix
+listener. Final quiescence kills its PID and removes the listener from
+`/proc/net/unix` without any subsequent user-bus call. It never touches the
+live D-Bus service or socket.
 
 The ordinary suite performs a real PID-level user-manager-outage test with an
 allow-list containing only its two synthetic PIDs. It verifies the `/proc` and
 pidfd fallback kills the process tree without touching other processes.
-Fake-`/proc` regressions prove only the current manager identity is ineligible,
-cover D-Bus/session.slice attachments, and re-pin a replacement manager by PID
-and start time. Fake-systemd race tests inject a new scope during cancellation
-and require a later rescan to remove it; identity tests reject replacement
-before scope start and reattach. Outage lock→unlock separately models manager
-replacement and `default.target` auto-start, proves the new manager is pinned
-before PID quiescence and auto-started PIDs are quiesced, restores D-Bus, and
-only then starts fresh supervisor/runtime processes.
+Fake-`/proc` regressions prove every same-UID process except the current manager
+identity is eligible, including D-Bus sockets, custom slices, and unknown
+units, and re-pin a replacement manager by PID and start time. Fake-systemd
+race tests inject a new scope during cancellation and require a later rescan to
+remove it; identity tests reject replacement before scope start and reattach.
+A socket-reactivation regression forbids user-bus calls after final quiescence.
+Outage lock→unlock separately models manager replacement and `default.target`
+auto-start, proves the new manager is pinned before PID quiescence and
+auto-started PIDs are quiesced, restores socket then broker, and only then
+starts fresh supervisor/runtime processes.
 
 ## Required controlled live verification
 
@@ -194,9 +197,10 @@ For each runtime:
 4. Verify the conversation checksum/history remains and records at most an
    interrupted turn, not successful completion of the cancelled tool.
 5. Confirm ordinary lock preserved the manager while D-Bus and all workload
-   services stopped. Before attended egress opens, confirm old services are
-   inactive and no stale scope/process survives. Confirm D-Bus is restored
-   first, then fresh supervisor/runtime PIDs and a working web UI. Wait for
+   services stopped. Verify no subsequent call reactivates broker or socket.
+   Before attended egress opens, confirm old services are inactive and no stale
+   scope/process survives. Confirm socket then broker are restored first,
+   followed by fresh supervisor/runtime PIDs and a working web UI. Wait for
    background completion and verify no cancelled tool or model turn resumes
    and no blocked operation is replayed.
 6. Start a new explicit turn and verify it receives a new scope and finishes
@@ -208,15 +212,17 @@ For each runtime:
    `TurnStarted` must reach the root failsafe and kill the runtime rather than
    continue. Create another tool scope and an arbitrary `escape.service` during
    cancellation and verify later passes remove both before `LOCKED`. Attempt
-   D-Bus and `init.scope` attachment: the API must reject it or the attached PID
-   must be killed. Only the current manager identity remains untouched.
+   D-Bus, `dbus.socket`, custom-slice, unknown-unit, and `init.scope`
+   attachment: the API must reject it or the attached PID must be killed. Only
+   the current manager identity remains untouched.
 
 Inject a scope-stop failure: it must retain `LOCKING` even when other scopes
 were stopped. Separately stop the user manager during an active test turn: the
 independent PID fallback must kill every recorded workload PID before degraded
 lock can complete. Attended mode must explicitly recover and re-pin the
 replacement manager before PID quiescence, quiesce any `default.target`
-auto-started PIDs, restore and verify D-Bus under `session.slice`, and only then
+auto-started PIDs, restore and verify `dbus.socket` followed by D-Bus under
+`session.slice`, and only then
 start fresh supervisor/runtime processes; it must not kill the manager or
 attend the auto-started PIDs. Stop the controller during an active turn and verify its
 stop/failsafe path also cancels the complete tree.
