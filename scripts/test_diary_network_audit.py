@@ -161,6 +161,28 @@ def test_established_flow_is_would_block_without_changing_lock_state() -> None:
     assert event["lock_state"] == "not_applicable"
 
 
+@pytest.mark.parametrize(
+    ("prefix", "operation", "decision", "state", "reason"),
+    [
+        (b"diary-dark-new\0", "connect", "would_deny", "not_applicable", "audit_only"),
+        (b"diary-dark-established\0", "flow", "would_deny", "not_applicable", "audit_only"),
+        (b"diary-locked-new\0", "connect", "deny", "locked", "non_loopback"),
+        (b"diary-locked-established\0", "flow", "deny", "locked", "non_loopback"),
+        (b"diary-attended-new\0", "connect", "allow", "attended", "attended_destination"),
+    ],
+)
+def test_policy_prefixes_produce_real_mode_decisions(
+    prefix: bytes, operation: str, decision: str, state: str, reason: str,
+) -> None:
+    event = network.events_from_datagram(packet_message(ipv4(), prefix=prefix), GROUP, UID, GID)[0]
+    assert event["operation"] == operation
+    assert event["decision"] == decision
+    assert event["lock_state"] == state
+    assert event["reason"] == reason
+    normalized, redacted = audit.normalize_event(event)
+    assert normalized == event and redacted == []
+
+
 def test_one_datagram_can_contain_multiple_packet_messages() -> None:
     data = packet_message(ipv4()) + packet_message(ipv6(), socket.AF_INET6)
     events = network.events_from_datagram(data, GROUP, UID, GID)

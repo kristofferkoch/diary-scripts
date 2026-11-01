@@ -45,14 +45,19 @@ NFULA_GID = 14
 NFULA_CFG_CMD = 1
 NFULA_CFG_MODE = 2
 NFULA_CFG_FLAGS = 6
-PREFIX_OPERATIONS = {
-    "diary-audit-new": "connect",
-    "diary-audit-established": "flow",
-    "diary-dns-direct": "direct",
-    "diary-dns-dot": "dot",
-    "diary-dns-doh": "doh_path",
-    "diary-dns-mdns": "mdns",
-    "diary-dns-llmnr": "llmnr",
+PREFIX_POLICIES = {
+    "diary-audit-new": ("connect", "would_deny", "not_applicable", "audit_only"),
+    "diary-audit-established": ("flow", "would_deny", "not_applicable", "audit_only"),
+    "diary-dns-direct": ("direct", "would_deny", "not_applicable", "audit_only"),
+    "diary-dns-dot": ("dot", "would_deny", "not_applicable", "audit_only"),
+    "diary-dns-doh": ("doh_path", "would_deny", "not_applicable", "audit_only"),
+    "diary-dns-mdns": ("mdns", "would_deny", "not_applicable", "audit_only"),
+    "diary-dns-llmnr": ("llmnr", "would_deny", "not_applicable", "audit_only"),
+    "diary-dark-new": ("connect", "would_deny", "not_applicable", "audit_only"),
+    "diary-dark-established": ("flow", "would_deny", "not_applicable", "audit_only"),
+    "diary-locked-new": ("connect", "deny", "locked", "non_loopback"),
+    "diary-locked-established": ("flow", "deny", "locked", "non_loopback"),
+    "diary-attended-new": ("connect", "allow", "attended", "attended_destination"),
 }
 DNS_PREFIXES = frozenset({
     "diary-dns-direct", "diary-dns-dot", "diary-dns-doh", "diary-dns-mdns", "diary-dns-llmnr",
@@ -339,9 +344,10 @@ def event_from_packet_message(
         prefix = attributes[NFULA_PREFIX].rstrip(b"\0").decode("ascii")
     except UnicodeDecodeError as exc:
         raise NetworkAuditError("NFLOG prefix is not ASCII") from exc
-    operation = PREFIX_OPERATIONS.get(prefix)
-    if operation is None:
+    policy = PREFIX_POLICIES.get(prefix)
+    if policy is None:
         raise NetworkAuditError("NFLOG packet has an unexpected prefix")
+    operation, decision, lock_state, reason = policy
     if any(field in attributes and len(attributes[field]) != 4 for field in (NFULA_UID, NFULA_GID, NFULA_SEQ)):
         raise NetworkAuditError("invalid NFLOG identity or sequence attribute")
     uid = struct.unpack("!I", attributes[NFULA_UID])[0] if NFULA_UID in attributes else expected_uid
@@ -356,9 +362,9 @@ def event_from_packet_message(
         "event": "dns.alternate" if prefix in DNS_PREFIXES else "network.flow",
         "component": "nftables",
         "operation": operation,
-        "decision": "would_deny",
-        "lock_state": "not_applicable",
-        "reason": "audit_only",
+        "decision": decision,
+        "lock_state": lock_state,
+        "reason": reason,
         "destination_ip": destination,
         "destination_port": port,
         "protocol": protocol,

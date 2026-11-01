@@ -6,9 +6,10 @@ worktree or uv environment. Its clients are the local `diary-lock` command and
 the CTL-09 read-only dashboard. Later state-changing trusted services remain a
 separate trust path.
 
-The CTL-01 mode units are deliberately dark markers. They do not change
-network, DNS, broker, Signal, or active-turn behavior. Those enforcement paths
-belong to their separate cards and general-agent lockdown remains disabled.
+CTL-01 installs the mode lifecycle. With CTL-03, the mode units also own the
+network policy described in [`network-policy.md`](network-policy.md); until its
+root-only arm file exists, every transition retains accept-only dark observation.
+DNS, broker, Signal, and active-turn enforcement remain separate cards.
 
 ## Trust boundary and requests
 
@@ -109,8 +110,10 @@ sudo-ask /home/kek/diary-approved/systemd/install-controller-root
 ```
 
 The installer refreshes the AUD-01 installed client for the journal heartbeat
-protocol, installs the root-owned controller and units, enables locked mode and
-the controller at boot, and restarts only the audit/controller services. Group
+protocol, installs the root-owned controller, units, and dark CTL-03 policy hook,
+enables locked mode and the controller at boot, and restarts only the
+audit/controller services. Run the separate CTL-03 installer after AUD-05 to
+retire the legacy AUD-02 rules unit. Group
 changes do not alter existing process credentials: after installation, the
 owner must start a fresh login and verify `id -nG` includes
 `diary-lock-control` before using the CLI. The installer's fresh `runuser`

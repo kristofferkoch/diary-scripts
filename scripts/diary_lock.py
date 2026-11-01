@@ -3,8 +3,8 @@
 
 The daemon derives caller identity from SO_PEERCRED, persists LOCKING, LOCKED,
 and ATTENDED states, verifies conflicting systemd mode units, and fails locked
-when state, audit, or supervision is unavailable. Mode units are markers only;
-network, DNS, broker, and turn enforcement belong to separate changes.
+when state, audit, or supervision is unavailable. Mode units own their approved
+enforcement hooks; DNS, broker, and turn enforcement belong to separate changes.
 """
 from __future__ import annotations
 
