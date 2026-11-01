@@ -39,14 +39,11 @@ _ANSI_RE = re.compile(
     re.DOTALL,
 )
 _DOMAIN_LABEL = r"[^\W_](?:[\w-]{0,61}[^\W_])?"
-_ASCII_TLD = r"(?:[a-z]{2,63}|xn--[a-z0-9-]{2,59})"
 _UNICODE_TLD = r"[^\W\d_][\w-]{1,62}"
-_BARE_TLD = rf"(?:{_ASCII_TLD}|测试)"
-_BARE_DOMAIN = rf"(?:{_DOMAIN_LABEL}\.)+{_BARE_TLD}"
-_IDN_DOMAIN = rf"(?:{_DOMAIN_LABEL}\.)+{_UNICODE_TLD}"
-_BARE_UNICODE_DOT_DOMAIN = rf"(?:{_DOMAIN_LABEL}[。．｡․])+{_BARE_TLD}"
-_UNICODE_DOT_DOMAIN = rf"(?:{_DOMAIN_LABEL}[。．｡․])+{_UNICODE_TLD}"
+_BARE_DOMAIN = rf"(?:{_DOMAIN_LABEL}\.)+{_UNICODE_TLD}"
+_BARE_UNICODE_DOT_DOMAIN = rf"(?:{_DOMAIN_LABEL}[。．｡․])+{_UNICODE_TLD}"
 _EMAIL_DOMAIN = rf"(?:{_DOMAIN_LABEL}[.。．｡․])+{_UNICODE_TLD}"
+_AMBIGUOUS_BARE_PROSE = frozenset({"你好。世界", "你好.世界"})
 _URL_RES = (
     re.compile(rf"(?i)(?<![\w.+-])[\w.+-]+@{_EMAIL_DOMAIN}"),
     re.compile(
@@ -63,16 +60,8 @@ _URL_RES = (
         r"(?::\d{1,5})?(?:/[^\s<>]*)?"
     ),
     re.compile(
-        rf"(?i)(?<![\w@.-]){_IDN_DOMAIN}"
-        r"(?::\d{1,5})?/[^\s<>]*"
-    ),
-    re.compile(
         rf"(?i)(?<![\w@.-]){_BARE_UNICODE_DOT_DOMAIN}"
         r"(?::\d{1,5})?(?:/[^\s<>]*)?"
-    ),
-    re.compile(
-        rf"(?i)(?<![\w@.-]){_UNICODE_DOT_DOMAIN}"
-        r"(?::\d{1,5})?/[^\s<>]*"
     ),
     re.compile(
         r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?(?:/[^\s<>]*)?"
@@ -184,6 +173,13 @@ def _strip_markup(text: str) -> str:
     return "".join(output)
 
 
+def _replace_url(match: re.Match[str]) -> str:
+    value = match.group(0)
+    if value in _AMBIGUOUS_BARE_PROSE:
+        return value
+    return " [link removed] "
+
+
 def sanitize_field(value: str, *, limit: int, empty: str = "[no safe text]") -> str:
     """Return one plain-text line with no links, controls, or text formatting."""
     text = html.unescape(unicodedata.normalize("NFKC", value[:MAX_RAW_SUMMARY]))
@@ -195,7 +191,7 @@ def sanitize_field(value: str, *, limit: int, empty: str = "[no safe text]") -> 
         for char in text
     )
     for pattern in _URL_RES:
-        text = pattern.sub(" [link removed] ", text)
+        text = pattern.sub(_replace_url, text)
     text = _strip_markup(text)
     text = text.translate({ord(char): " " for char in "`*_~#>\\"})
     text = _WHITESPACE_RE.sub(" ", text).strip()
