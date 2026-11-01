@@ -303,6 +303,7 @@ class Controller:
         self.state = "LOCKING"
         self.expires_at: float | None = None
         self.deadline_monotonic: float | None = None
+        self.review_since = clock()
         self.lock = threading.RLock()
         self.next_audit_check = 0.0
 
@@ -325,6 +326,7 @@ class Controller:
                 "state": self.state,
                 "expires_at": expires_at,
                 "remaining_seconds": remaining,
+                "review_since": self.review_since,
                 "boot_id": self.store.boot_id,
             }
 
@@ -342,6 +344,8 @@ class Controller:
 
     def enter_locked(self, reason: str) -> None:
         with self.lock:
+            if self.state != "LOCKED":
+                self.review_since = self.clock()
             self._save("LOCKING")
             self.modes.activate("locked")
             self.modes.verify_network_audit()
@@ -349,23 +353,45 @@ class Controller:
             self.audit.emit("controller.transition", "lock", "observed", "LOCKED", reason)
             self.next_audit_check = self.monotonic() + AUDIT_HEALTH_INTERVAL
 
+    def _enter_attended(self, event: str, reason: str, peer: dict[str, int]) -> dict[str, Any]:
+        self.audit.emit(event, "request", "observed", self.state, reason, peer)
+        self._save("LOCKING")
+        self.modes.verify_network_audit()
+        self.modes.activate("attended")
+        self.modes.verify_network_audit()
+        self.deadline_monotonic = self.monotonic() + self.attended_seconds
+        self._save("ATTENDED", self.clock() + self.attended_seconds)
+        self.audit.emit(event, "attended", "allow", "ATTENDED", reason, peer)
+        self.next_audit_check = self.monotonic() + AUDIT_HEALTH_INTERVAL
+        return self.status()
+
     def break_glass(self, peer: dict[str, int]) -> dict[str, Any]:
         with self.lock:
-            self.audit.emit(
-                "controller.break_glass", "request", "observed", self.state,
-                "local_owner_override", peer,
+            if self.state == "ATTENDED":
+                raise RequestRejected("break-glass cannot extend attendance")
+            return self._enter_attended(
+                "controller.break_glass", "local_owner_override", peer,
             )
-            self._save("LOCKING")
+
+    def unlock(self, peer: dict[str, int]) -> dict[str, Any]:
+        with self.lock:
+            if self.state != "LOCKED":
+                raise RequestRejected("fresh unlock requires locked state")
+            return self._enter_attended("controller.unlock", "fresh_owner_ui", peer)
+
+    def extend(self, peer: dict[str, int]) -> dict[str, Any]:
+        with self.lock:
+            if self.state != "ATTENDED" or self.deadline_monotonic is None:
+                raise RequestRejected("attendance is not active")
             self.modes.verify_network_audit()
             self.modes.activate("attended")
             self.modes.verify_network_audit()
             self.deadline_monotonic = self.monotonic() + self.attended_seconds
             self._save("ATTENDED", self.clock() + self.attended_seconds)
             self.audit.emit(
-                "controller.break_glass", "attended", "allow", "ATTENDED",
-                "local_owner_override", peer,
+                "controller.attendance", "extend", "allow", "ATTENDED",
+                "independent_owner_ui", peer,
             )
-            self.next_audit_check = self.monotonic() + AUDIT_HEALTH_INTERVAL
             return self.status()
 
     def maintenance(self) -> None:
@@ -416,8 +442,10 @@ class Controller:
                     "failsafe could not prove locked mode: " + "; ".join(str(error) for error in errors)
                 ) from errors[0]
 
-    def handle(self, value: object, peer: dict[str, int], owner_uid: int) -> dict[str, Any]:
-        if peer["uid"] not in {0, owner_uid}:
+    def handle(
+        self, value: object, peer: dict[str, int], owner_uid: int, ui_uid: int | None = None,
+    ) -> dict[str, Any]:
+        if peer["uid"] not in {0, owner_uid, ui_uid}:
             raise RequestRejected("caller is not authorized")
         if not isinstance(value, dict) or set(value) != {"cmd"}:
             raise RequestRejected("invalid controller request")
@@ -427,9 +455,13 @@ class Controller:
         if value["cmd"] == "lock":
             self.enter_locked("explicit_lock")
             return self.status()
-        if value["cmd"] == "break_glass":
+        if value["cmd"] == "break_glass" and peer["uid"] in {0, owner_uid}:
             return self.break_glass(peer)
-        raise RequestRejected("unknown controller request")
+        if value["cmd"] == "unlock" and peer["uid"] == ui_uid:
+            return self.unlock(peer)
+        if value["cmd"] == "extend" and peer["uid"] == ui_uid:
+            return self.extend(peer)
+        raise RequestRejected("unknown or unauthorized controller request")
 
 
 class LockRequestHandler(socketserver.StreamRequestHandler):
@@ -453,7 +485,7 @@ class LockRequestHandler(socketserver.StreamRequestHandler):
                     raise RequestRejected("read-only caller may only request controller status")
                 reply = server.controller.status()
             else:
-                reply = server.controller.handle(value, peer, server.owner_uid)
+                reply = server.controller.handle(value, peer, server.owner_uid, server.ui_uid)
         except RequestRejected as exc:
             reply = {"ok": False, "error": str(exc)}
         except (LockError, OSError) as exc:
@@ -481,12 +513,14 @@ class LockDaemon(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         group: str,
         owner_uid: int,
         dashboard_user: str | None = None,
+        ui_uid: int | None = None,
     ) -> None:
         self.path = path
         self.controller = controller
         self.group = group
         self.owner_uid = owner_uid
         self.dashboard_user = dashboard_user
+        self.ui_uid = ui_uid
         self.fatal_error: Exception | None = None
         self.fatal_lock = threading.Lock()
         parent = Path(path).parent.stat()
@@ -505,7 +539,7 @@ class LockDaemon(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         os.chmod(path, 0o660)
 
     def read_only(self, peer: dict[str, int]) -> bool:
-        if self.dashboard_user is None or peer["uid"] in {0, self.owner_uid}:
+        if self.dashboard_user is None or peer["uid"] in {0, self.owner_uid, self.ui_uid}:
             return False
         try:
             name = pwd.getpwuid(peer["uid"]).pw_name
@@ -514,7 +548,7 @@ class LockDaemon(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         return name == self.dashboard_user and name not in {"agent", "diary-pipeline"}
 
     def authorized(self, peer: dict[str, int]) -> bool:
-        if peer["uid"] in {0, self.owner_uid}:
+        if peer["uid"] in {0, self.owner_uid, self.ui_uid}:
             return True
         if not self.read_only(peer):
             return False
@@ -587,6 +621,7 @@ def daemon_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--group", default=DEFAULT_GROUP)
     parser.add_argument("--owner", default=DEFAULT_OWNER)
     parser.add_argument("--dashboard-user")
+    parser.add_argument("--ui-user")
     parser.add_argument("--attended-seconds", type=int, default=DEFAULT_ATTENDED_SECONDS)
     parser.add_argument("--boot-id-file", default="/proc/sys/kernel/random/boot_id")
     args = parser.parse_args(argv)
@@ -602,12 +637,14 @@ def daemon_main(argv: list[str] | None = None) -> int:
             args.attended_seconds,
         )
         controller.startup()
+        ui_uid = pwd.getpwnam(args.ui_user).pw_uid if args.ui_user else None
         server = LockDaemon(
             args.listen,
             controller,
             args.group,
             pwd.getpwnam(args.owner).pw_uid,
             args.dashboard_user,
+            ui_uid,
         )
         server.timeout = 1.0
         sd_notify("READY=1")

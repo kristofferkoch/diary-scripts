@@ -225,6 +225,71 @@ def test_agent_requests_and_spoofed_identity_cannot_change_or_extend_state(tmp_p
     assert svc.status() == before
 
 
+def test_ui_peer_is_the_only_fresh_unlock_and_attendance_extension_principal(tmp_path: Path) -> None:
+    svc, modes, events, now, monotonic = controller(tmp_path)
+    svc.startup()
+    review_since = svc.status()["review_since"]
+    ui = peer(uid=1100)
+    for caller in (peer(uid=1000), peer(uid=1001), peer(uid=0)):
+        with pytest.raises(lock.RequestRejected):
+            svc.handle({"cmd": "unlock"}, caller, owner_uid=1000, ui_uid=1100)
+    result = svc.handle({"cmd": "unlock"}, ui, owner_uid=1000, ui_uid=1100)
+    assert result["state"] == "ATTENDED"
+    assert result["review_since"] == review_since
+    assert result["remaining_seconds"] == 900
+    assert modes.active == {"diary-attended.service"}
+    assert events.events[-1]["event"] == "controller.unlock"
+
+    monotonic[0] += 500
+    now[0] += 500
+    for command in ({"cmd": "status"}, {"cmd": "extend"}):
+        if command["cmd"] == "status":
+            svc.handle(command, ui, owner_uid=1000, ui_uid=1100)
+            assert svc.status()["remaining_seconds"] == 400
+        else:
+            with pytest.raises(lock.RequestRejected):
+                svc.handle(command, peer(uid=1000), owner_uid=1000, ui_uid=1100)
+    calls_before = list(modes.calls)
+    health_before = modes.health_checks
+    extended = svc.handle({"cmd": "extend"}, ui, owner_uid=1000, ui_uid=1100)
+    assert extended["remaining_seconds"] == 900
+    assert modes.calls == [*calls_before, "attended"]
+    assert modes.health_checks == health_before + 2
+    with pytest.raises(lock.RequestRejected, match="cannot extend"):
+        svc.break_glass(peer(uid=1000))
+    monotonic[0] += 900
+    svc.maintenance()
+    assert svc.status()["state"] == "LOCKED"
+    assert svc.status()["review_since"] == now[0]
+
+
+def test_failed_ui_unlock_failsafe_restores_locked_state(tmp_path: Path) -> None:
+    svc, modes, _, _, _ = controller(tmp_path)
+    svc.startup()
+    modes.fail = True
+    with pytest.raises(lock.LockError):
+        svc.handle({"cmd": "unlock"}, peer(uid=1100), owner_uid=1000, ui_uid=1100)
+    assert svc.status()["state"] == "LOCKING"
+    modes.fail = False
+    svc.failsafe("request_failed")
+    assert svc.status()["state"] == "LOCKED"
+    assert modes.active == {"diary-locked.service"}
+
+
+def test_extension_requires_forwarder_before_same_mode_reapplication(tmp_path: Path) -> None:
+    svc, modes, _, _, _ = controller(tmp_path)
+    svc.startup()
+    svc.unlock(peer(uid=1100))
+    calls_before = list(modes.calls)
+    modes.network_audit_available = False
+    with pytest.raises(lock.LockError, match="NFLOG"):
+        svc.extend(peer(uid=1100))
+    assert modes.calls == calls_before
+    modes.network_audit_available = True
+    svc.failsafe("request_failed")
+    assert svc.status()["state"] == "LOCKED"
+
+
 def test_invalid_owner_request_does_not_trigger_failsafe(tmp_path: Path) -> None:
     svc, _, _, _, _ = controller(tmp_path)
     svc.startup()
@@ -362,6 +427,32 @@ def test_real_socket_enforces_peer_credentials_without_fail_closed_auth_bypass(t
         server.owner_uid = os.geteuid()
         reply = lock.request(str(tmp_path / "lock.sock"), {"cmd": "lock"})
         assert reply["state"] == "LOCKED"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_real_socket_ui_peer_can_unlock_and_extend_without_owner_break_glass(tmp_path: Path) -> None:
+    svc, _, _, _, monotonic = controller(tmp_path)
+    svc.startup()
+    group = grp.getgrgid(os.getegid()).gr_name
+    server = lock.LockDaemon(
+        str(tmp_path / "lock.sock"), svc, group, os.geteuid() + 1, os.geteuid(),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(lock.LockError, match="unknown or unauthorized"):
+            lock.request(str(tmp_path / "lock.sock"), {"cmd": "break_glass"})
+        assert lock.request(str(tmp_path / "lock.sock"), {"cmd": "unlock"})["state"] == "ATTENDED"
+        monotonic[0] += 100
+        assert lock.request(str(tmp_path / "lock.sock"), {"cmd": "extend"})["remaining_seconds"] == 900
+        server.ui_uid = os.geteuid() + 2
+        before = svc.status()
+        with pytest.raises(lock.LockError, match="not authorized"):
+            lock.request(str(tmp_path / "lock.sock"), {"cmd": "extend"})
+        assert svc.status() == before
     finally:
         server.shutdown()
         server.server_close()

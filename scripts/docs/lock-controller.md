@@ -2,9 +2,9 @@
 
 `diary-lockd` owns the authoritative `LOCKING`, `LOCKED`, and `ATTENDED` state.
 It is a root-owned stdlib-only installed file, not code executed from a
-worktree or uv environment. Its clients are the local `diary-lock` command and
-the CTL-09 read-only dashboard. Later state-changing trusted services remain a
-separate trust path.
+worktree or uv environment. Its clients are the local `diary-lock` command,
+the CTL-09 read-only dashboard, and the independently authenticated
+`diary-lock-ui` service.
 
 CTL-01 installs the mode lifecycle. With CTL-03, the mode units also own the
 network policy described in [`network-policy.md`](network-policy.md); until its
@@ -13,32 +13,36 @@ DNS, broker, Signal, and active-turn enforcement remain separate cards.
 
 ## Trust boundary and requests
 
-`/run/diary-lock/socket` is `root:diary-lock-control` mode `0660`. The installer
-adds only the local owner and the CTL-09 dashboard reader to that group and
-removes `agent` and `diary-pipeline`. Filesystem permissions are not the only
-check: every request uses kernel `SO_PEERCRED`, and the daemon accepts state
-changes only from UID 0 or the configured owner's kernel UID. When configured
-with `--dashboard-user diary-lock-dashboard`, that account receives only the
-exact `status` request; `lock`, `break_glass`, extra fields, and attendance
-changes are rejected. Peer authorization happens immediately after
-accept, before reading any request bytes, so an unauthorized partial frame is
-rejected without waiting for its timeout or invoking failsafe. Client-supplied
-UIDs, names, sessions, reasons, expiry values, and other identity assertions are
-rejected. Unknown commands and extra request fields are rejected without
-changing state. In particular, an unauthorized caller cannot use a malformed
-request to force a transition or extend attendance.
+`/run/diary-lock/socket` is `root:diary-lock-control` mode `0660`. The installers
+add only the local owner, CTL-09 dashboard reader, and dedicated `diary-lock-ui`
+service identity to that group and remove `agent` and `diary-pipeline`.
+Filesystem permissions are not the only check: every request uses kernel
+`SO_PEERCRED`. With `--dashboard-user diary-lock-dashboard`, that account
+receives only the exact `status` request; `lock`, `break_glass`, `unlock`,
+`extend`, and extra fields are rejected. Root and the owner retain their local
+commands, while only the UI peer may request `unlock` or `extend`. Peer
+authorization happens immediately after accept, before reading any request
+bytes, so an unauthorized partial frame is rejected without waiting for its
+timeout or invoking failsafe. Client-supplied UIDs, names, sessions, reasons,
+expiry values, and other identity assertions are rejected. Unknown commands and
+extra request fields are rejected without changing state. In particular, an
+unauthorized caller cannot use a malformed request to force a transition or
+extend attendance.
 
-The owner UID is itself the CTL-01 break-glass authorization. Any process with
-that UID may request or renew attendance noninteractively and without a renewal
-limit; each request is audited. The TTY confirmation described below is client
-convenience, not a trusted local-interaction boundary. Fresh human authentication
-and independent UI renewal controls belong to CTL-08/CTL-07.
+The owner UID is itself the CTL-01 initial break-glass authorization. The TTY
+confirmation described below is client convenience, not a trusted
+local-interaction boundary. Break-glass cannot renew an already attended
+session. Only the UI peer may request `unlock` or `extend`; root and the owner
+cannot substitute those commands for the independent browser workflow. Fresh
+single-use proof and report acknowledgement are enforced by CTL-08/CTL-07 before
+the UI sends `unlock`.
 
 Requests are bounded newline-delimited JSON with exactly one `cmd` field:
-`status`, `lock`, or `break_glass`. `status` returns the daemon's authoritative
-state and attendance expiry. There is no agent-accessible attendance or idle
-assertion operation. Later WebAuthn/UI authorization is a separate trust path;
-this card does not implement it.
+`status`, `lock`, `break_glass`, `unlock`, or `extend`. `status` returns the
+daemon's authoritative state, attendance expiry, and start of the current lock
+review window. There is no agent-accessible attendance or idle assertion
+operation. `extend` is valid only in attended mode and resets the monotonic
+deadline to 15 minutes; `unlock` is valid only from locked state.
 
 ## Durable state and fail-closed lifecycle
 
@@ -62,20 +66,22 @@ startup fails and the failsafe remains responsible for locked mode.
 A lock request persists `LOCKING`, restarts and verifies the locked unit even if
 it was already active, verifies the NFLOG forwarder, then persists `LOCKED`.
 Applying locked policy deliberately precedes the forwarder check so an audit
-outage cannot prevent containment. A break-glass request emits its override
-audit, persists `LOCKING`, requires a healthy forwarder before and after
-restarting attended mode, and only then persists `ATTENDED` with a 15-minute
-expiry. Same-mode attended requests also reapply and read back the rules. Active
-attendance enforcement and remaining seconds use a monotonic deadline, so
-backward or forward wall-clock steps do not extend or prematurely expire the
-session. Runtime health checks combine the fixed AUD-01 journal heartbeat and
-exact emission read-back with an active NFLOG-forwarder check every 30 seconds.
-The forwarder has its own 15-second systemd watchdog and exits when its worker
-or trusted audit writer fails. Its CTL-03 `OnFailure` unit independently applies
-network containment before restarting the forwarder and requesting locked
-controller state, so a fail-then-active-before-poll sequence cannot bypass the
-locked failsafe in attended, locked, or dark mode. The 30-second checks remain
-defense in depth rather than the failure record.
+outage cannot prevent containment. Entering a new lock window records its wall
+start for the UI report; repeated lock requests while already locked do not hide
+the existing window. Break-glass and authorized UI unlock emit their request
+audit, persist `LOCKING`, require a healthy forwarder before and after restarting
+attended mode, and only then persist `ATTENDED` with a 15-minute expiry. UI
+extension likewise reapplies and reads back attended rules before resetting the
+deadline. Active attendance enforcement and remaining seconds use the monotonic
+deadline, so backward or forward wall-clock steps do not extend or prematurely
+expire the session. Runtime health checks combine the fixed AUD-01 journal
+heartbeat and exact emission read-back with an active NFLOG-forwarder check every
+30 seconds. The forwarder has its own 15-second systemd watchdog and exits when
+its worker or trusted audit writer fails. Its CTL-03 `OnFailure` unit
+independently applies network containment before restarting the forwarder and
+requesting locked controller state, so a fail-then-active-before-poll sequence
+cannot bypass the locked failsafe in attended, locked, or dark mode. The
+30-second checks remain defense in depth rather than the failure record.
 
 Failsafe first retains/persists `LOCKING`; it records `LOCKED` only after locked
 mode and conflict checks succeed. Mode, state, and audit errors are propagated.
@@ -102,13 +108,15 @@ diary-lock break-glass
 
 The command requires the owner account and a TTY, displays a bypass warning,
 and requires typing `ATTENDED` to reduce accidental activation. This TTY check
-is not a security boundary: the daemon authorizes only the kernel owner UID and
-accepts noninteractive renewal from that UID as documented above. Break-glass
-does not require WebAuthn or report acknowledgement. It emits warning-priority
-`controller.break_glass` request and allow events with trusted caller PID, UID,
-and GID before/after the attended transition. Failure of either audit or the
-transition invokes fatal failsafe handling. Use `diary-lock lock` to end
-attendance immediately; otherwise it expires after 15 monotonic minutes.
+is not a security boundary: the daemon authorizes the kernel owner UID rather
+than terminal properties. Initial break-glass does not require WebAuthn or
+report acknowledgement, but it is rejected in attended mode and therefore
+cannot extend the deadline. It emits warning-priority `controller.break_glass`
+request and allow events with trusted caller PID, UID, and GID before/after the
+attended transition. Failure of either audit or the transition invokes fatal
+failsafe handling. Use `diary-lock lock` to end attendance immediately;
+otherwise it expires after 15 monotonic minutes unless the independent UI
+explicitly extends it.
 
 ## Approved installation and dark live verification
 

@@ -183,7 +183,7 @@ read-only dashboard identity.
 
 `baseline` groups all validated records by fingerprint and reports occurrence
 and stored-record counts. `review` includes only `deny`, `would_deny`, and
-`error`, marks repeated groups, and is intended for the later independent UI.
+`error`, marks repeated groups, and supplies the independent CTL-07 owner UI.
 Times are `now`, bounded durations (`30m`, `24h`, `7d`), or ISO-8601. Reports
 accept no arbitrary matches, search strings, or journalctl flags. The daemon
 uses a fixed argv and returns only allowlisted metadata, never raw `MESSAGE` or

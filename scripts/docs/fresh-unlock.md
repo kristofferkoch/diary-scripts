@@ -2,9 +2,9 @@
 
 `diary-fresh-unlock` is the CTL-08 authorization boundary. It does not contain
 review UI, report acknowledgement, attendance expiry, or a controller client.
-CTL-07 consumes a fresh transaction only after those independent checks, then
-makes its separate controller request. CTL-01 remains the only lock-state
-authority.
+The CTL-07 `diary-lock-ui` service consumes a fresh transaction only after those
+independent checks, then makes its separate controller request. CTL-01 remains
+the only lock-state authority; see `owner-ui.md`.
 
 The daemon is stdlib-only and installed as a root-owned file. It reads fixed
 root-owned `/etc/diary/lock-auth.toml`; there is no environment or working-tree
