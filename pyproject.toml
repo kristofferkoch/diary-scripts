@@ -67,6 +67,7 @@ diary-production-baseline = "scripts.diary_production_baseline:main"
 diary-lock        = "scripts.diary_lock:main"
 diary-lockd       = "scripts.diary_lock:daemon_main"
 diary-network-auditd = "scripts.diary_network_audit:daemon_main"
+diary-dns-auditd   = "scripts.diary_dns_audit:daemon_main"
 diary-fresh-unlock = "scripts.diary_fresh_unlock:main"
 diary-lock-dashboard = "scripts.diary_lock_dashboard:main"
 

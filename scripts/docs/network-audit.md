@@ -21,18 +21,20 @@ or journal events: sampling, kernel loss, queue overflow, and duplicate
 suppression deliberately make those totals different.
 
 `diary-network-auditd` binds NFLOG group 30 with `CAP_NET_ADMIN`, a 4 MiB
-requested receive buffer, and `NFULNL_CFG_F_SEQ`. It accepts only the two fixed
-prefixes installed by the approved rules. Kernel NFLOG UID/GID and sequence
-attributes are decoded as big-endian `!I` values; when optional UID/GID
-attributes are present, they must exactly match the resolved agent identity.
-When the kernel omits them, the reader uses the root-configured agent UID/GID
-selected by the dedicated nftables rule, never the root writer identity.
-Sequence gaps and received `ENOBUFS` errors
-increment observation-loss counters. The reader parses only destination IP,
-destination port, and TCP/UDP protocol from at most 256 copied bytes. Payloads,
-URLs, queries, commands, interface names, and packet sources are never sent to
-the audit writer. Unsupported fragments or truncated extension headers are
-skipped rather than inventing flow metadata.
+requested receive buffer, and `NFULNL_CFG_F_SEQ`. It accepts only the fixed
+AUD-02 flow prefixes and AUD-03 direct/alternate-DNS prefixes installed by the
+approved rules. Kernel NFLOG UID/GID and sequence attributes are decoded as
+big-endian `!I` values; when optional UID/GID attributes are present, they must
+exactly match the resolved agent identity. When the kernel omits them, the
+reader uses the root-configured agent UID/GID selected by the dedicated
+nftables rule, never the root writer identity. Sequence gaps and received
+`ENOBUFS` errors increment observation-loss counters. The group accepts at most
+512 copied bytes; AUD-02's own rules still copy 256. Flow events contain only
+destination IP, destination port, and TCP/UDP protocol. AUD-03 plaintext DNS
+events may also contain one approved question name as described in
+[`dns-audit.md`](dns-audit.md). Other payloads, URLs, commands, interface names,
+and packet sources are never sent to the audit writer. Unsupported fragments or
+truncated extension headers are skipped rather than inventing flow metadata.
 
 The reader calls the existing root-owned `diary-auditd` Unix socket. It writes
 `network.flow` events with decision `would_deny`, reason `audit_only`, and

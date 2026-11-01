@@ -19,7 +19,7 @@ from typing import Any
 
 DEFAULT_GROUP = 30
 DEFAULT_SOCKET = "/run/diary-audit/socket"
-SNAPLEN = 256
+SNAPLEN = 512
 RECEIVE_BUFFER = 4 * 1024 * 1024
 QUEUE_SIZE = 1024
 AUDIT_TIMEOUT = 2.0
@@ -48,7 +48,15 @@ NFULA_CFG_FLAGS = 6
 PREFIX_OPERATIONS = {
     "diary-audit-new": "connect",
     "diary-audit-established": "flow",
+    "diary-dns-direct": "direct",
+    "diary-dns-dot": "dot",
+    "diary-dns-doh": "doh_path",
+    "diary-dns-mdns": "mdns",
+    "diary-dns-llmnr": "llmnr",
 }
+DNS_PREFIXES = frozenset({
+    "diary-dns-direct", "diary-dns-dot", "diary-dns-doh", "diary-dns-mdns", "diary-dns-llmnr",
+})
 TCP = 6
 UDP = 17
 EXTENSION_HEADERS = {0, 43, 60, 135, 139, 140}
@@ -202,7 +210,7 @@ def open_nflog(group: int) -> socket.socket:
         raise
 
 
-def flow_from_packet(packet: bytes, family: int) -> tuple[str, int, str]:
+def transport_from_packet(packet: bytes, family: int) -> tuple[str, int, str, bytes]:
     if family == socket.AF_INET:
         if len(packet) < 20 or packet[0] >> 4 != 4:
             raise UnsupportedPacket("invalid IPv4 packet")
@@ -258,7 +266,57 @@ def flow_from_packet(packet: bytes, family: int) -> tuple[str, int, str]:
     if destination_port == 0:
         raise UnsupportedPacket("destination port is zero")
     protocol = "tcp" if protocol_number == TCP else "udp"
-    return destination, destination_port, protocol
+    return destination, destination_port, protocol, packet[offset:]
+
+
+def flow_from_packet(packet: bytes, family: int) -> tuple[str, int, str]:
+    destination, port, protocol, _transport = transport_from_packet(packet, family)
+    return destination, port, protocol
+
+
+def dns_name_from_transport(transport: bytes, protocol: str) -> str | None:
+    if protocol == "udp":
+        if len(transport) < 8:
+            return None
+        data = transport[8:]
+    elif protocol == "tcp":
+        if len(transport) < 20:
+            return None
+        header_length = (transport[12] >> 4) * 4
+        if header_length < 20 or len(transport) < header_length + 2:
+            return None
+        framed = transport[header_length:]
+        if struct.unpack_from("!H", framed)[0] != len(framed) - 2:
+            return None
+        data = framed[2:]
+    else:
+        return None
+    if len(data) < 12 or data[2] & 0x80 or struct.unpack_from("!H", data, 4)[0] != 1:
+        return None
+    labels = []
+    offset = 12
+    try:
+        for _ in range(128):
+            length = data[offset]
+            if length == 0:
+                if not labels or offset + 5 > len(data):
+                    return None
+                name = ".".join(labels)
+                return name if len(name) <= 253 else None
+            if length > 63 or offset + 1 + length > len(data):
+                return None
+            label = data[offset + 1:offset + 1 + length].decode("ascii").lower()
+            if (
+                not (label[0].isalnum() or label[0] == "_")
+                or not (label[-1].isalnum() or label[-1] == "_")
+                or any(not (character.isalnum() or character in "_-") for character in label)
+            ):
+                return None
+            labels.append(label)
+            offset += 1 + length
+    except (IndexError, UnicodeDecodeError):
+        return None
+    return None
 
 
 def event_from_packet_message(
@@ -293,9 +351,9 @@ def event_from_packet_message(
         raise NetworkAuditError("NFLOG packet identity does not match agent")
     if sequence_callback is not None:
         sequence_callback(sequence)
-    destination, port, protocol = flow_from_packet(attributes[NFULA_PAYLOAD], family)
-    return {
-        "event": "network.flow",
+    destination, port, protocol, transport = transport_from_packet(attributes[NFULA_PAYLOAD], family)
+    event = {
+        "event": "dns.alternate" if prefix in DNS_PREFIXES else "network.flow",
         "component": "nftables",
         "operation": operation,
         "decision": "would_deny",
@@ -306,6 +364,11 @@ def event_from_packet_message(
         "protocol": protocol,
         "caller": {"pid": 0, "uid": uid, "gid": gid},
     }
+    if operation in ("direct", "mdns", "llmnr"):
+        name = dns_name_from_transport(transport, protocol)
+        if name is not None:
+            event["dns_name"] = name
+    return event
 
 
 def events_from_datagram(
