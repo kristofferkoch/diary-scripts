@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""sudo-broker — a root daemon that runs commands only after a human approves.
+"""sudo-broker — a root daemon that normally runs commands after human approval.
 
 Started by a human in a terminal they keep open:
 
@@ -14,7 +14,9 @@ for `y`. A request also raises a desktop notification (OSC 99 — kitty and foot
 turn it into a native one, a click focuses the window) and rings the terminal
 bell, which then repeats every 30 s while the prompt is unanswered. There is
 deliberately **no answer timeout**: a request waits as long as the human needs,
-because being hurried is how a wrong command gets approved.
+because being hurried is how a wrong command gets approved. The explicit
+`--auto-accept-all` startup mode skips confirmation and logs each request as
+AUTO-APPROVED instead.
 Each request names the identity it needs (`as`, default `root`): the daemon
 drops to that uid/gid for the command, with its own HOME and user-session
 environment, and the prompt shows it. Only the identities in ALLOWED_USERS are
@@ -23,8 +25,8 @@ reaches kek's user session never has to run as root, and root stays visible as
 the exception it is.
 Approvals are single-use, the executed command gets no access to the
 terminal (stdin is /dev/null), and the whole capability disappears when the
-daemon exits (Ctrl-C, terminal closed, or idle timeout). There is deliberately
-no way to pre-authorise a command.
+daemon exits (Ctrl-C, terminal closed, or idle timeout). There is no way to
+pre-authorise an individual command.
 
 Protocol: newline-delimited JSON over an AF_UNIX stream socket; see sudo_ask.py
 for the client half. Every request is logged to stderr (your terminal) — pipe
@@ -33,6 +35,7 @@ stderr to a file if you want an audit trail across sessions.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import pwd
@@ -52,6 +55,7 @@ MAX_CMD_CHARS = 4096
 BELL_INTERVAL = 30.0  # re-ring the terminal bell while a prompt is unanswered
 EXEC_TIMEOUT = 600.0  # seconds before an approved command is killed
 IDLE_EXIT = 1800.0  # exit when nothing has connected for this long
+AUTO_ACCEPT_ALL = False
 
 # Identities a request may ask for. Root stays in because `sudo-ask` may be the
 # only way to install a package or touch /etc; kek is here so a command that
@@ -217,10 +221,29 @@ def read_request(conn: socket.socket) -> dict | None:
     return req
 
 
+def consume_operator_input(last_activity: float) -> tuple[float, bool]:
+    """Discard input typed between prompts and refresh the idle deadline.
+
+    The boolean is false at end-of-input, so the main loop can stop watching a
+    closed terminal instead of spinning on a stream that is always readable.
+    """
+    if not _prompt_lock.acquire(blocking=False):
+        return last_activity, True
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], 0)
+        if not ready:
+            return last_activity, True
+        if os.read(sys.stdin.fileno(), 4096) == b"":
+            return last_activity, False
+        return time.monotonic(), True
+    finally:
+        _prompt_lock.release()
+
+
 def approve(
     info: tuple[int, int, int, str], cmd: str, cwd: str, as_user: str = "root"
 ) -> tuple[bool, str]:
-    """Show the request on the terminal and wait for an explicit y.
+    """Show the request and wait for an explicit y unless auto-accept is enabled.
 
     Deliberately no answer timeout: being hurried is how a human approves
     something they did not read. The request waits until it is answered or the
@@ -236,6 +259,10 @@ def approve(
         print(f"│ cwd  : {sanitize(cwd, 512)}", flush=True)
         print(f"│ as   : {as_user}", flush=True)
         print(f"│ run  : {sanitize(cmd)}", flush=True)
+        if AUTO_ACCEPT_ALL:
+            print("└─ AUTO-ACCEPT-ALL — running without confirmation", flush=True)
+            log(f"AUTO-APPROVED (as {as_user}): {cmd!r} from uid {uid} (cwd {cwd})")
+            return True, ""
         print("│ no timeout — answer when you have read it", flush=True)
         print("└─ approve? [y/N] ", end="", flush=True)
         notify(
@@ -247,7 +274,12 @@ def approve(
         while answer is None:
             ready, _, _ = select.select([sys.stdin], [], [], BELL_INTERVAL)
             if ready:
-                answer = sys.stdin.readline().strip().lower()
+                answer = (
+                    os.read(sys.stdin.fileno(), 4096)
+                    .decode("utf-8", "replace")
+                    .strip()
+                    .lower()
+                )
             else:
                 bell()  # still unanswered — nudge the terminal again
         if answer not in ("y", "yes"):
@@ -364,6 +396,17 @@ def handle(conn: socket.socket) -> None:
 
 
 def main() -> int:
+    global AUTO_ACCEPT_ALL
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--auto-accept-all",
+        action="store_true",
+        help="run every valid request without operator confirmation (dangerous)",
+    )
+    args = parser.parse_args()
+    AUTO_ACCEPT_ALL = args.auto_accept_all
+
     if os.geteuid() != 0:
         print("sudo-broker: must run as root (sudo /usr/local/sbin/sudo-broker)", file=sys.stderr)
         return 1
@@ -389,14 +432,19 @@ def main() -> int:
     srv.settimeout(30.0)
 
     log(f"listening on {SOCK_PATH}")
-    log(f"approvals appear here; idle-exit after {int(IDLE_EXIT / 60)} min; Ctrl-C to stop")
+    if AUTO_ACCEPT_ALL:
+        log("WARNING: AUTO-ACCEPT-ALL enabled; every valid request runs without confirmation")
+    else:
+        log("approvals appear here")
+    log(f"idle-exit after {int(IDLE_EXIT / 60)} min; Ctrl-C to stop")
 
     last_activity = time.monotonic()
+    watch_stdin = True
     try:
         while True:
-            try:
-                conn, _ = srv.accept()
-            except socket.timeout:
+            readers = [srv, sys.stdin] if watch_stdin else [srv]
+            ready, _, _ = select.select(readers, [], [], 30.0)
+            if not ready:
                 # A prompt waiting for the human keeps the daemon alive: the
                 # idle exit must not pull the socket out from under it.
                 if _prompt_lock.locked():
@@ -405,8 +453,12 @@ def main() -> int:
                     log("idle timeout — exiting")
                     break
                 continue
-            last_activity = time.monotonic()
-            threading.Thread(target=handle, args=(conn,), daemon=True).start()
+            if watch_stdin and sys.stdin in ready:
+                last_activity, watch_stdin = consume_operator_input(last_activity)
+            if srv in ready:
+                conn, _ = srv.accept()
+                last_activity = time.monotonic()
+                threading.Thread(target=handle, args=(conn,), daemon=True).start()
     except KeyboardInterrupt:
         log("interrupted")
     finally:

@@ -56,14 +56,17 @@ def _read_until(fd: int, needle: bytes, timeout: float = 10.0) -> bytes:
 
 
 class Broker:
-    def __init__(self) -> None:
+    def __init__(self, *, auto_accept_all: bool = False) -> None:
         self.tmp = tempfile.mkdtemp(prefix="sudo-broker-test-")
         self.sock = os.path.join(self.tmp, "agent.sock")
         self.env = {**os.environ, "SUDO_BROKER_SOCK": self.sock}
         self.last_tty = b""  # everything the daemon wrote to the pty last time
         self.master, slave = pty.openpty()
+        argv = [sys.executable, str(DAEMON)]
+        if auto_accept_all:
+            argv.append("--auto-accept-all")
         self.proc = subprocess.Popen(
-            [sys.executable, str(DAEMON)],
+            argv,
             stdin=slave,
             stdout=slave,
             stderr=slave,
@@ -209,8 +212,15 @@ class PromptProbe:
         """Write into the prompt as if the human typed it."""
         os.write(self._stdin, answer)
 
-    def run(self, *, bell_interval: float = 0.1, as_user: str = "root") -> tuple[bool, str]:
+    def run(
+        self,
+        *,
+        bell_interval: float = 0.1,
+        as_user: str = "root",
+        auto_accept_all: bool = False,
+    ) -> tuple[bool, str]:
         self._patched.setattr(sudo_broker, "BELL_INTERVAL", bell_interval)
+        self._patched.setattr(sudo_broker, "AUTO_ACCEPT_ALL", auto_accept_all)
         self._patched.setattr(sys, "stdin", self.stdin)
         self._patched.setattr(sys, "stdout", self.stdout)
         self._patched.setattr(sys, "stderr", self.stderr)
@@ -225,6 +235,69 @@ class PromptProbe:
             os.close(self._stdin)  # the write end of the stdin pipe
         except OSError:
             pass
+
+
+def test_auto_accept_all_approves_without_prompting() -> None:
+    prompt = PromptProbe()
+    try:
+        ok, why = prompt.run(auto_accept_all=True)
+        written = _written(prompt.stdout) + _written(prompt.stderr)
+    finally:
+        prompt.close()
+    assert (ok, why) == (True, "")
+    assert b"AUTO-ACCEPT-ALL" in written
+    assert b"AUTO-APPROVED (as root)" in written
+    assert b"[y/N]" not in written
+    assert b"\a" not in written
+    assert b"\x1b]99;" not in written
+
+
+def test_input_between_prompts_is_consumed_and_refreshes_idle_timer() -> None:
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b"ignored between prompts\n")
+    os.close(write_fd)
+    with os.fdopen(read_fd, "r") as stream:
+        patched = _Patch()
+        patched.setattr(sys, "stdin", stream)
+        previous = time.monotonic() - 100.0
+        try:
+            last_activity, watch_stdin = sudo_broker.consume_operator_input(previous)
+        finally:
+            patched.restore()
+        assert watch_stdin
+        assert last_activity > previous
+        assert stream.read() == "", "input must not remain buffered for the next prompt"
+
+
+def test_input_reader_rechecks_readiness_under_the_prompt_lock() -> None:
+    read_fd, write_fd = os.pipe()
+    with os.fdopen(read_fd, "r") as stream:
+        patched = _Patch()
+        patched.setattr(sys, "stdin", stream)
+        previous = time.monotonic()
+        try:
+            last_activity, watch_stdin = sudo_broker.consume_operator_input(previous)
+        finally:
+            patched.restore()
+            os.close(write_fd)
+        assert watch_stdin
+        assert last_activity == previous
+
+
+def test_input_reader_leaves_an_active_prompts_answer_alone() -> None:
+    stream = io.StringIO("y\n")
+    patched = _Patch()
+    patched.setattr(sys, "stdin", stream)
+    sudo_broker._prompt_lock.acquire()
+    previous = time.monotonic()
+    try:
+        last_activity, watch_stdin = sudo_broker.consume_operator_input(previous)
+    finally:
+        sudo_broker._prompt_lock.release()
+        patched.restore()
+    assert watch_stdin
+    assert last_activity == previous
+    assert stream.read() == "y\n"
 
 
 def test_prompt_rings_until_answered_then_approves() -> None:
@@ -380,6 +453,34 @@ def test_approved_command_runs_and_streams_exit_code() -> None:
         assert res.returncode == 7, res.stderr.decode()
         assert b"BROKER_OK" in res.stdout
         assert b"approved" in res.stderr.lower()
+    finally:
+        broker.stop()
+
+
+@requires_root
+def test_auto_accept_all_runs_without_a_prompt() -> None:
+    broker = Broker(auto_accept_all=True)
+    try:
+        res = broker.ask("echo AUTO_ACCEPT_OK", b"")
+        tty = _read_until(broker.master, b"AUTO-APPROVED")
+        assert res.returncode == 0, res.stderr.decode()
+        assert b"AUTO_ACCEPT_OK" in res.stdout
+        assert b"AUTO-ACCEPT-ALL enabled" in tty
+        assert b"AUTO-APPROVED (as root)" in tty
+        assert b"[y/N]" not in tty
+        assert b"\a" not in tty
+    finally:
+        broker.stop()
+
+
+@requires_root
+def test_enter_between_prompts_does_not_deny_the_next_request() -> None:
+    broker = Broker()
+    try:
+        os.write(broker.master, b"\n\n\n")
+        time.sleep(0.1)
+        res = broker.ask("true", b"y\n")
+        assert res.returncode == 0, res.stderr.decode()
     finally:
         broker.stop()
 

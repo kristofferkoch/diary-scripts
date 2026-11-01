@@ -16,10 +16,30 @@ sudo-ask systemctl restart caddy
 sudo-ask --as kek 'systemctl --user restart mail-sync'
 ```
 
-Nothing runs until you type `y`. **There is no answer timeout** — a request
-waits until you have read it and decided, because being hurried is how a wrong
-command gets approved. Closing the terminal (or Ctrl-C, or 30 minutes with
-nothing connected) removes the capability entirely.
+In the default mode, nothing runs until you type `y`. **There is no answer
+timeout** — a request waits until you have read it and decided, because being
+hurried is how a wrong command gets approved. Closing the terminal (or Ctrl-C,
+or 30 minutes with nothing connected) removes the capability entirely. Enter or
+other input typed between prompts is discarded and refreshes the idle timer;
+it cannot become an implicit answer to the next request.
+
+## Temporarily accepting every request
+
+For a larger system rework, start the daemon with:
+
+```bash
+sudo /usr/local/sbin/sudo-broker --auto-accept-all
+```
+
+This mode runs **every valid request without confirmation**, including requests
+for root. The socket remains open to every local user, so this is equivalent to
+handing them the broker's privileges until you stop the daemon. Use it only for
+a bounded rework, and stop it with Ctrl-C as soon as that work is finished.
+
+The existing command-length and identity checks still apply. Every request is
+printed and logged as `AUTO-APPROVED`; there is no prompt, bell, or desktop
+notification. The 600-second per-command timeout and 30-minute idle timeout
+remain in effect.
 
 ## Running as another user
 
@@ -90,9 +110,10 @@ control surface.
 - **No password ever travels.** The daemon *executes* approved commands; it
   never hands out credentials, and no askpass process passes a password
   through a path an agent could read.
-- **No pre-authorisation.** There is no allowlist to widen, no token to
-  replay: each request is shown with the requesting uid/pid/cwd and dies
-  single-use.
+- **No per-command pre-authorisation.** There is no allowlist to widen and no
+  token to replay: each request is shown with the requesting uid/pid/cwd and
+  dies single-use. Auto-accept is an explicit daemon-wide startup mode, not a
+  capability the client can request.
 - **The command cannot touch your terminal.** The child gets
   `stdin=/dev/null`, so an approved command can't read what you type next.
 - **Fail-closed.** No socket → `sudo-ask` exits 2 with instructions. A denial
@@ -106,15 +127,17 @@ control surface.
 
 ## What it does not protect against
 
-The human is the control. A command you approve runs as root, in full, with
-`/bin/bash -c`. Read the line before typing `y` — it is shown escaped and
-truncated at 4096 characters precisely so it stays readable. A request that
-contains a newline or control characters is displayed escaped (`\n`, `\x1b`),
-not executed verbatim, so what you see is what runs.
+In the default mode, the human is the control. A command you approve runs as
+root, in full, with `/bin/bash -c`. Read the line before typing `y` — it is
+shown escaped and truncated at 4096 characters precisely so it stays readable.
+A request that contains a newline or control characters is displayed escaped
+(`\n`, `\x1b`), not executed verbatim, so what you see is what runs.
+Auto-accept mode deliberately suspends this per-command human control.
 
 The socket is `0666` inside a `0755 root` directory: any local user may
-*ask*, but only a human can *approve*. If you want to narrow who may ask,
-change the socket mode and the peer check in `sudo_broker.py`.
+*ask*, but by default only a human can *approve*. In auto-accept mode the
+daemon approves every local user's valid request. If you want to narrow who may
+ask, change the socket mode and the peer check in `sudo_broker.py`.
 
 ## Client behaviour
 
@@ -147,15 +170,16 @@ sudo /usr/bin/python3 scripts/test_sudo_broker.py
 ```
 
 Covers: approval runs and streams the command's exit code, denial runs
-nothing, an empty answer is a denial, the prompt rings the bell and keeps
-ringing while unanswered (and stops once answered), there is no answer
-timeout, a second request while one is pending is refused, the notification
-escape carries the focus action and the command, bell/notification follow
-whichever of stdout/stderr is the terminal without ever landing in a redirected
-log, the requested identity is shown in the prompt and actually used, an
-unlisted identity is refused before the human is asked, and the per-user
-environment carries `HOME`/`USER`/`XDG_RUNTIME_DIR`. A missing broker fails
-closed.
+nothing, an empty answer is a denial, auto-accept runs without a prompt, input
+between prompts is consumed and refreshes the idle timer without denying the
+next request, the prompt rings the bell and keeps ringing while unanswered (and
+stops once answered), there is no answer timeout, a second request while one is
+pending is refused, the notification escape carries the focus action and the
+command, bell/notification follow whichever of stdout/stderr is the terminal
+without ever landing in a redirected log, the requested identity is shown in
+the prompt and actually used, an unlisted identity is refused before the human
+is asked, and the per-user environment carries
+`HOME`/`USER`/`XDG_RUNTIME_DIR`. A missing broker fails closed.
 
 ## Removing a standing NOPASSWD rule
 
