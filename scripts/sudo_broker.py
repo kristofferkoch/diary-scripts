@@ -451,6 +451,9 @@ def handle(
         if not ok:
             send(conn, {"t": "state", "s": "denied", "msg": why})
             return
+        if enforce_lockdown and not allowed("execute"):
+            send(conn, {"t": "state", "s": "denied", "msg": "denied by locked-mode broker policy"})
+            return
         send(conn, {"t": "state", "s": "approved", "as": target.pw_name})
         execute(conn, cmd, cwd, target)
     except (OSError, ValueError) as exc:

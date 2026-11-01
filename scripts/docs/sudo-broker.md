@@ -131,12 +131,14 @@ control surface.
   caller identity, without recording the command. Approval and execution are
   unchanged.
 - **CTL-05 is explicit.** With `sudo-broker --enforce-lockdown`, ordinary sudo
-  is denied before the operator prompt while `LOCKING`/`LOCKED`. The only
-  exception is `sudo-ask --break-glass`, which contains no shell command and
-  asks the controller for attended mode after a human types `y`. Break-glass
-  always requires confirmation, even under `--auto-accept-all`. Controller
-  uncertainty and audit failure deny; rejected commands are never replayed.
-  `--lock-socket` and `--audit-socket` support isolated tests.
+  is denied before the operator prompt while `LOCKING`/`LOCKED` and authorized
+  again after approval immediately before dispatch, closing the pending-prompt
+  relock race. The only exception is `sudo-ask --break-glass`, which contains
+  no shell command and asks the controller for attended mode after a human
+  types `y`. Break-glass always requires confirmation, even under
+  `--auto-accept-all`. Controller uncertainty and audit failure at either check
+  deny; rejected commands are never replayed. `--lock-socket` and
+  `--audit-socket` support isolated tests.
 
 ## What it does not protect against
 

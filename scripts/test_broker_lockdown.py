@@ -423,3 +423,107 @@ def test_sudo_audit_failure_denies_break_glass_before_prompt(
     )
     assert replies[0]["s"] == "denied"
     assert controller.requests == [{"cmd": "status"}]
+
+
+def test_sudo_relock_during_approval_denies_before_execution(
+    controller: FakeController,
+    events: list[dict],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller.state = "ATTENDED"
+
+    def relock_while_waiting(*args, **kwargs):
+        controller.state = "LOCKED"
+        return True, ""
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("a command approved before relock must not execute")
+
+    monkeypatch.setattr(sudo, "approve", relock_while_waiting)
+    monkeypatch.setattr(sudo, "execute", unexpected)
+    replies = round_trip(
+        lambda conn: sudo.handle(
+            conn,
+            enforce_lockdown=True,
+            lock_socket=str(controller.server.getsockname()),
+            audit_socket="unused-audit.sock",
+        ),
+        {"cmd": "touch /private/relock-must-not-run", "cwd": "/", "as": "root"},
+    )
+    assert replies == [
+        {"t": "state", "s": "denied", "msg": "denied by locked-mode broker policy"},
+    ]
+    assert controller.requests == [{"cmd": "status"}, {"cmd": "status"}]
+    assert [event["decision"] for event in events] == ["allow", "deny"]
+    assert [event["lock_state"] for event in events] == ["attended", "locked"]
+    assert all(event["operation"] == "execute" for event in events)
+
+
+def test_sudo_controller_failure_on_second_check_denies_execution(
+    controller: FakeController,
+    events: list[dict],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller.state = "ATTENDED"
+
+    def fail_controller_after_approval(*args, **kwargs):
+        def unavailable(path: str) -> str:
+            raise OSError("controller unavailable")
+
+        monkeypatch.setattr(broker_audit, "controller_state", unavailable)
+        return True, ""
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("controller uncertainty after approval must not execute")
+
+    monkeypatch.setattr(sudo, "approve", fail_controller_after_approval)
+    monkeypatch.setattr(sudo, "execute", unexpected)
+    replies = round_trip(
+        lambda conn: sudo.handle(
+            conn,
+            enforce_lockdown=True,
+            lock_socket=str(controller.server.getsockname()),
+            audit_socket="unused-audit.sock",
+        ),
+        {"cmd": "touch /private/uncertain-must-not-run", "cwd": "/", "as": "root"},
+    )
+    assert replies[0]["s"] == "denied"
+    assert controller.requests == [{"cmd": "status"}]
+    assert [event["decision"] for event in events] == ["allow", "deny"]
+    assert events[-1]["reason"] == "controller_unavailable"
+
+
+def test_sudo_audit_failure_on_second_check_denies_execution(
+    controller: FakeController,
+    events: list[dict],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller.state = "ATTENDED"
+    failed_audits: list[dict] = []
+
+    def fail_audit_after_approval(*args, **kwargs):
+        def unavailable(path: str, event: dict) -> dict:
+            failed_audits.append(dict(event))
+            raise OSError("audit unavailable")
+
+        monkeypatch.setattr(broker_audit, "request", unavailable)
+        return True, ""
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("unaudited approval must not execute")
+
+    monkeypatch.setattr(sudo, "approve", fail_audit_after_approval)
+    monkeypatch.setattr(sudo, "execute", unexpected)
+    replies = round_trip(
+        lambda conn: sudo.handle(
+            conn,
+            enforce_lockdown=True,
+            lock_socket=str(controller.server.getsockname()),
+            audit_socket="unused-audit.sock",
+        ),
+        {"cmd": "touch /private/unaudited-must-not-run", "cwd": "/", "as": "root"},
+    )
+    assert replies[0]["s"] == "denied"
+    assert controller.requests == [{"cmd": "status"}, {"cmd": "status"}]
+    assert len(failed_audits) == 1
+    assert [event["decision"] for event in events] == ["allow"]
