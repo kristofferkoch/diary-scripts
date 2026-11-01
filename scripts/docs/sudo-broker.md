@@ -23,7 +23,7 @@ or 30 minutes with nothing connected) removes the capability entirely. Enter or
 other input typed between prompts is discarded and refreshes the idle timer;
 it cannot become an implicit answer to the next request.
 
-## Temporarily accepting every request
+## Temporarily accepting ordinary requests
 
 For a larger system rework, start the daemon with:
 
@@ -31,15 +31,17 @@ For a larger system rework, start the daemon with:
 sudo /usr/local/sbin/sudo-broker --auto-accept-all
 ```
 
-This mode runs **every valid request without confirmation**, including requests
-for root. The socket remains open to every local user, so this is equivalent to
-handing them the broker's privileges until you stop the daemon. Use it only for
-a bounded rework, and stop it with Ctrl-C as soon as that work is finished.
+This mode runs **every ordinary valid request without confirmation**, including
+requests for root. The socket remains open to every local user, so this is
+equivalent to handing them the broker's privileges until you stop the daemon.
+Use it only for a bounded rework, and stop it with Ctrl-C as soon as that work
+is finished. The fixed break-glass operation is the exception: it always
+requires a human confirmation.
 
-The existing command-length and identity checks still apply. Every request is
-printed and logged as `AUTO-APPROVED`; there is no prompt, bell, or desktop
-notification. The 600-second per-command timeout and 30-minute idle timeout
-remain in effect.
+The existing command-length and identity checks still apply. Every ordinary
+request is printed and logged as `AUTO-APPROVED`; there is no prompt, bell, or
+desktop notification. The 600-second per-command timeout and 30-minute idle
+timeout remain in effect.
 
 ## Running as another user
 
@@ -124,10 +126,17 @@ control surface.
   `/usr/local/bin/sudo-ask`. Never run the daemon with `uv run` — that would
   execute code from a tree the agent can write, which is the whole thing we
   are trying to avoid.
-- **AUD-04 is observation only.** Every valid request emits a `would_deny`
-  locked-mode decision with kernel caller identity, without recording the
-  command. The existing approval and execution flow is unchanged; no sudo
-  break-glass exception exists until the later enforcement work.
+- **AUD-04 remains the default.** Without `--enforce-lockdown`, every ordinary
+  request emits a hypothetical `would_deny` locked-mode decision with kernel
+  caller identity, without recording the command. Approval and execution are
+  unchanged.
+- **CTL-05 is explicit.** With `sudo-broker --enforce-lockdown`, ordinary sudo
+  is denied before the operator prompt while `LOCKING`/`LOCKED`. The only
+  exception is `sudo-ask --break-glass`, which contains no shell command and
+  asks the controller for attended mode after a human types `y`. Break-glass
+  always requires confirmation, even under `--auto-accept-all`. Controller
+  uncertainty and audit failure deny; rejected commands are never replayed.
+  `--lock-socket` and `--audit-socket` support isolated tests.
 
 ## What it does not protect against
 
@@ -140,8 +149,9 @@ Auto-accept mode deliberately suspends this per-command human control.
 
 The socket is `0666` inside a `0755 root` directory: any local user may
 *ask*, but by default only a human can *approve*. In auto-accept mode the
-daemon approves every local user's valid request. If you want to narrow who may
-ask, change the socket mode and the peer check in `sudo_broker.py`.
+daemon approves every local user's ordinary valid request; break-glass still
+requires confirmation. If you want to narrow who may ask, change the socket
+mode and the peer check in `sudo_broker.py`.
 
 ## Client behaviour
 

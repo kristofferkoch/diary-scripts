@@ -74,6 +74,17 @@ unreachable. That is what keeps a plain kek shell working during a broker
 outage — and it is why `sjekk-collect` uses it everywhere: the same command is
 correct for both identities.
 
+## Optional CTL-05 lock enforcement
+
+Starting the broker with `--enforce-lockdown` makes it query the controller for
+each request. `LOCKING`/`LOCKED` allow only `ping` and read-only `status`;
+`sync`, `start`, and unknown operations are denied before rate limiting or
+command execution. Controller uncertainty and audit-write failure deny even the
+read-only exceptions. `ATTENDED` retains ordinary validation. Denials are not
+retried or replayed after unlock. `--lock-socket` and `--audit-socket` support
+isolated tests. The shipped unit does not pass `--enforce-lockdown`, so existing
+installations remain AUD-04 audit-only until a later explicit service change.
+
 ## Install (as root; use approved sources)
 
 Install the owner-reviewed collector and host settings as root-owned

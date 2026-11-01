@@ -6,6 +6,7 @@ Used by an agent that has no standing sudo rights:
     sudo-ask systemctl restart caddy
     sudo-ask --as kek 'systemctl --user restart mail-sync'
     sudo-ask 'docker compose -f /path/to/diary-approved/immich/compose.yaml up -d'
+    sudo-ask --break-glass
 
 A human with `sudo /usr/local/sbin/sudo-broker` running in a terminal sees the
 command, its cwd and the requesting uid, and types y or n. Output is streamed
@@ -39,33 +40,39 @@ def main(argv: list[str]) -> int:
     if not argv or argv[0] in ("-h", "--help"):
         print(
             "usage: sudo-ask [--as USER] <command ...>\n"
-            "       sudo-ask [--as USER] 'shell command with | pipes or && logic'\n\n"
+            "       sudo-ask [--as USER] 'shell command with | pipes or && logic'\n"
+            "       sudo-ask --break-glass\n\n"
             "Sends the command to the sudo-broker that a human has running in a\n"
             "terminal. It runs only if they approve it there. --as picks the\n"
             "identity it runs as (default root; the broker only allows the\n"
-            "users it was built with, normally root and kek).",
+            "users it was built with, normally root and kek). Break-glass asks\n"
+            "the controller for attended mode and always requires confirmation.",
             file=sys.stderr,
         )
         return 2
 
+    break_glass = argv == ["--break-glass"]
     as_user = "root"
-    rest = list(argv)
-    while rest:
-        if rest[0] == "--as" and len(rest) > 1:
-            as_user = rest[1]
-            del rest[:2]
-            continue
-        if rest[0].startswith("--as="):
-            as_user = rest[0].split("=", 1)[1]
-            del rest[0]
-            continue
-        break
-    if not rest:
-        die("--as needs a command to run")
-    if not as_user:
-        die("--as needs a user name")
+    if break_glass:
+        cmd = ""
+    else:
+        rest = list(argv)
+        while rest:
+            if rest[0] == "--as" and len(rest) > 1:
+                as_user = rest[1]
+                del rest[:2]
+                continue
+            if rest[0].startswith("--as="):
+                as_user = rest[0].split("=", 1)[1]
+                del rest[0]
+                continue
+            break
+        if not rest:
+            die("--as needs a command to run")
+        if not as_user:
+            die("--as needs a user name")
 
-    cmd = rest[0] if len(rest) == 1 else " ".join(rest)
+        cmd = rest[0] if len(rest) == 1 else " ".join(rest)
 
     try:
         st = os.stat(SOCK_PATH)
@@ -97,12 +104,12 @@ def main(argv: list[str]) -> int:
     except OSError as exc:
         die(f"cannot reach the broker ({exc}). Is the terminal still open?")
 
-    conn.sendall(
-        json.dumps(
-            {"cmd": cmd, "as": as_user, "cwd": os.getcwd(), "client_pid": os.getpid()}
-        ).encode()
-        + b"\n"
-    )
+    payload = {"cmd": cmd, "cwd": os.getcwd(), "client_pid": os.getpid()}
+    if break_glass:
+        payload["break_glass"] = True
+    else:
+        payload["as"] = as_user
+    conn.sendall(json.dumps(payload).encode() + b"\n")
 
     code = 1
     buf = b""

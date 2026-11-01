@@ -15,8 +15,9 @@ turn it into a native one, a click focuses the window) and rings the terminal
 bell, which then repeats every 30 s while the prompt is unanswered. There is
 deliberately **no answer timeout**: a request waits as long as the human needs,
 because being hurried is how a wrong command gets approved. The explicit
-`--auto-accept-all` startup mode skips confirmation and logs each request as
-AUTO-APPROVED instead.
+`--auto-accept-all` startup mode skips confirmation for ordinary commands and
+logs each as AUTO-APPROVED instead. The fixed break-glass operation always
+requires confirmation and calls only the lock controller.
 Each request names the identity it needs (`as`, default `root`): the daemon
 drops to that uid/gid for the command, with its own HOME and user-session
 environment, and the prompt shows it. Only the identities in ALLOWED_USERS are
@@ -246,13 +247,19 @@ def consume_operator_input(last_activity: float) -> tuple[float, bool]:
 
 
 def approve(
-    info: tuple[int, int, int, str], cmd: str, cwd: str, as_user: str = "root"
+    info: tuple[int, int, int, str],
+    cmd: str,
+    cwd: str,
+    as_user: str = "root",
+    *,
+    require_confirmation: bool = False,
 ) -> tuple[bool, str]:
     """Show the request and wait for an explicit y unless auto-accept is enabled.
 
     Deliberately no answer timeout: being hurried is how a human approves
     something they did not read. The request waits until it is answered or the
-    daemon goes away, and the bell keeps repeating in the meantime.
+    daemon goes away, and the bell keeps repeating in the meantime. Break-glass
+    sets require_confirmation so auto-accept can never unlock a locked agent.
     """
     pid, uid, _gid, name = info
     if not _prompt_lock.acquire(blocking=False):
@@ -264,7 +271,7 @@ def approve(
         print(f"│ cwd  : {sanitize(cwd, 512)}", flush=True)
         print(f"│ as   : {as_user}", flush=True)
         print(f"│ run  : {sanitize(cmd)}", flush=True)
-        if AUTO_ACCEPT_ALL:
+        if AUTO_ACCEPT_ALL and not require_confirmation:
             print("└─ AUTO-ACCEPT-ALL — running without confirmation", flush=True)
             log(f"AUTO-APPROVED (as {as_user}): {cmd!r} from uid {uid} (cwd {cwd})")
             return True, ""
@@ -358,19 +365,73 @@ def execute(conn: socket.socket, cmd: str, cwd: str, target: pwd.struct_passwd) 
     send(conn, {"t": "exit", "code": proc.returncode})
 
 
-def handle(conn: socket.socket) -> None:
+def handle(
+    conn: socket.socket,
+    *,
+    enforce_lockdown: bool = False,
+    lock_socket: str = broker_audit.DEFAULT_LOCK_SOCKET,
+    audit_socket: str = broker_audit.DEFAULT_SOCKET,
+) -> None:
     try:
         info = peer_info(conn)
         caller = {"pid": info[0], "uid": info[1], "gid": info[2]}
+
+        def allowed(operation: str) -> bool:
+            return broker_audit.authorize(
+                "sudo-broker",
+                operation,
+                caller,
+                enforce=enforce_lockdown,
+                socket_path=audit_socket,
+                lock_socket=lock_socket,
+                owner_uid=os.geteuid(),
+            )[0]
+
         req = read_request(conn)
         if req is None:
-            broker_audit.audit("sudo-broker", "unknown", caller)
+            allowed("unknown")
             send(conn, {"t": "state", "s": "error", "msg": "malformed request"})
             return
-        broker_audit.audit("sudo-broker", "execute", caller)
+        break_glass = req.get("break_glass", False)
+        valid_break_glass = (
+            break_glass is True
+            and req["cmd"] == ""
+            and set(req) == {"cmd", "cwd", "client_pid", "break_glass"}
+        )
+        operation = "break_glass" if valid_break_glass else (
+            "execute" if break_glass is False else "unknown"
+        )
+        if not allowed(operation):
+            send(conn, {"t": "state", "s": "denied", "msg": "denied by locked-mode broker policy"})
+            return
         cmd = req["cmd"]
         requested_cwd = req.get("cwd")
         cwd = requested_cwd if isinstance(requested_cwd, str) else "/"
+        if break_glass is not False:
+            if not valid_break_glass:
+                send(conn, {"t": "state", "s": "error", "msg": "malformed break-glass request"})
+                return
+            ok, why = approve(
+                info,
+                "/usr/local/bin/diary-lock break-glass",
+                cwd,
+                require_confirmation=True,
+            )
+            if not ok:
+                send(conn, {"t": "state", "s": "denied", "msg": why})
+                return
+            send(conn, {"t": "state", "s": "approved", "as": "root"})
+            try:
+                reply = broker_audit.controller_request(
+                    lock_socket, {"cmd": "break_glass"}, timeout=10.0,
+                )
+                if reply.get("state") != "ATTENDED":
+                    raise ValueError("controller did not confirm attended mode")
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                send(conn, {"t": "exit", "code": 1, "msg": f"break-glass failed: {exc}"})
+            else:
+                send(conn, {"t": "exit", "code": 0})
+            return
         as_user = req.get("as", "root")
         if not cmd.strip():
             send(conn, {"t": "state", "s": "error", "msg": "empty command"})
@@ -413,8 +474,11 @@ def main() -> int:
     parser.add_argument(
         "--auto-accept-all",
         action="store_true",
-        help="run every valid request without operator confirmation (dangerous)",
+        help="run ordinary valid requests without operator confirmation (dangerous)",
     )
+    parser.add_argument("--enforce-lockdown", action="store_true")
+    parser.add_argument("--lock-socket", default=broker_audit.DEFAULT_LOCK_SOCKET)
+    parser.add_argument("--audit-socket", default=broker_audit.DEFAULT_SOCKET)
     args = parser.parse_args()
     AUTO_ACCEPT_ALL = args.auto_accept_all
 
@@ -444,7 +508,7 @@ def main() -> int:
 
     log(f"listening on {SOCK_PATH}")
     if AUTO_ACCEPT_ALL:
-        log("WARNING: AUTO-ACCEPT-ALL enabled; every valid request runs without confirmation")
+        log("WARNING: AUTO-ACCEPT-ALL enabled; ordinary valid requests run without confirmation")
     else:
         log("approvals appear here")
     log(f"idle-exit after {int(IDLE_EXIT / 60)} min; Ctrl-C to stop")
@@ -469,7 +533,16 @@ def main() -> int:
             if srv in ready:
                 conn, _ = srv.accept()
                 last_activity = time.monotonic()
-                threading.Thread(target=handle, args=(conn,), daemon=True).start()
+                threading.Thread(
+                    target=handle,
+                    args=(conn,),
+                    kwargs={
+                        "enforce_lockdown": args.enforce_lockdown,
+                        "lock_socket": args.lock_socket,
+                        "audit_socket": args.audit_socket,
+                    },
+                    daemon=True,
+                ).start()
     except KeyboardInterrupt:
         log("interrupted")
     finally:

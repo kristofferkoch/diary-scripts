@@ -113,6 +113,24 @@ or with `SupplementaryGroups=diary-audit`; general agents never receive that
 group. Inspect parseable results with `diary-audit baseline --since 1h --json`
 or the corresponding `DIARY_AUDIT_*` fields in the `diary-lock` journal.
 
+## CTL-05 opt-in enforcement
+
+`broker_audit.authorize(..., enforce=True)` and the helper's
+`--enforce-lockdown` option independently query the controller for every
+request. `LOCKING` and `LOCKED` permit only the explicitly lock-safe policy:
+sync `ping`/`status`, owner-UID merge approval, and the fixed sudo break-glass
+operation. External actions, unknown operations, and unknown future brokers are
+`deny`; unknown or unreadable controller state is `deny` with
+`reason=controller_unavailable`. `ATTENDED` passes requests to the broker's
+ordinary validation without weakening owner-UID approval.
+
+Enforcement requires the single audit write to succeed before dispatch. An
+audit failure denies with `reason=audit_unavailable`; there is no retry, pending
+queue, or replay after unlock. The default `audit()` path and all shipped
+service definitions remain AUD-04 observation only, including Signal. Enabling
+broker enforcement requires a later explicit root-owned service change after
+AUD-05.
+
 ## Duplicates and restart behavior
 
 The SHA-256 fingerprint covers the validated event and trusted caller metadata,

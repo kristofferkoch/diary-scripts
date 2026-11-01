@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import importlib
 import io
+import json
 import os
 import pty
 import select
+import socket
 import subprocess
 import sys
 import tempfile
@@ -220,13 +222,20 @@ class PromptProbe:
         bell_interval: float = 0.1,
         as_user: str = "root",
         auto_accept_all: bool = False,
+        require_confirmation: bool = False,
     ) -> tuple[bool, str]:
         self._patched.setattr(sudo_broker, "BELL_INTERVAL", bell_interval)
         self._patched.setattr(sudo_broker, "AUTO_ACCEPT_ALL", auto_accept_all)
         self._patched.setattr(sys, "stdin", self.stdin)
         self._patched.setattr(sys, "stdout", self.stdout)
         self._patched.setattr(sys, "stderr", self.stderr)
-        return sudo_broker.approve((1234, 0, 0, "tester"), "true", "/", as_user=as_user)
+        return sudo_broker.approve(
+            (1234, 0, 0, "tester"),
+            "true",
+            "/",
+            as_user=as_user,
+            require_confirmation=require_confirmation,
+        )
 
     def close(self) -> None:
         self._patched.restore()  # put sys.* and the timers back first
@@ -254,6 +263,45 @@ def test_help_is_concise() -> None:
     assert "Protocol:" not in res.stdout
 
 
+def test_break_glass_client_uses_fixed_operation() -> None:
+    with tempfile.TemporaryDirectory(prefix="sudo-break-glass-test-") as directory:
+        path = os.path.join(directory, "broker.sock")
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(path)
+        server.listen(1)
+        received: list[dict] = []
+
+        def serve() -> None:
+            conn, _ = server.accept()
+            with conn:
+                data = b""
+                while not data.endswith(b"\n"):
+                    data += conn.recv(4096)
+                received.append(json.loads(data))
+                conn.sendall(b'{"t":"exit","code":0}\n')
+            server.close()
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        res = subprocess.run(
+            [sys.executable, str(CLIENT), "--break-glass"],
+            capture_output=True,
+            env={**os.environ, "SUDO_BROKER_SOCK": path},
+            timeout=10,
+            check=False,
+        )
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert res.returncode == 0, res.stderr
+        assert len(received) == 1
+        request = received[0]
+        assert request["cmd"] == ""
+        assert request["break_glass"] is True
+        assert request["cwd"] == os.getcwd()
+        assert isinstance(request["client_pid"], int)
+        assert "as" not in request
+
+
 def test_auto_accept_all_approves_without_prompting() -> None:
     prompt = PromptProbe()
     try:
@@ -267,6 +315,19 @@ def test_auto_accept_all_approves_without_prompting() -> None:
     assert b"[y/N]" not in written
     assert b"\a" not in written
     assert b"\x1b]99;" not in written
+
+
+def test_auto_accept_cannot_bypass_break_glass_confirmation() -> None:
+    prompt = PromptProbe()
+    try:
+        prompt.type(b"y\n")
+        ok, why = prompt.run(auto_accept_all=True, require_confirmation=True)
+        written = _written(prompt.stdout) + _written(prompt.stderr)
+    finally:
+        prompt.close()
+    assert (ok, why) == (True, "")
+    assert b"[y/N]" in written
+    assert b"AUTO-APPROVED" not in written
 
 
 def test_input_between_prompts_is_consumed_and_refreshes_idle_timer() -> None:

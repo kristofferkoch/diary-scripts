@@ -33,6 +33,9 @@ Security boundary
   request waits up to 240 s for the slot, then gets ``busy``.
 * Requests are capped at 64 KiB, replies at 4000 chars of output tail.
 * Rejections are logged to the journal with the caller's uid.
+* Explicit ``--enforce-lockdown`` permits only ping/read-only status while
+  locked and fails closed on controller or audit uncertainty. The default is
+  audit-only and no denied request is replayed.
 * The socket is ``0770`` in a ``0750`` runtime dir owned by ``kek:diary`` — the
   group membership is the capability, exactly like ``signal-notify``.
 
@@ -299,7 +302,14 @@ def handle(request, *, sync_limiter: Limiter, status_limiter: Limiter,
             "target": "all", "results": results}
 
 
-def serve(listen: str, *, runner=run_command) -> int:
+def serve(
+    listen: str,
+    *,
+    runner=run_command,
+    enforce_lockdown: bool = False,
+    lock_socket: str = broker_audit.DEFAULT_LOCK_SOCKET,
+    audit_socket: str = broker_audit.DEFAULT_SOCKET,
+) -> int:
     """Run the broker until killed. One thread per connection, max 8."""
     listen_dir = os.path.dirname(listen) or "."
     os.makedirs(listen_dir, exist_ok=True)
@@ -319,6 +329,18 @@ def serve(listen: str, *, runner=run_command) -> int:
     def _serve_one(conn: socket.socket) -> None:
         try:
             caller = broker_audit.peer_credentials(conn)
+
+            def allowed(operation: str) -> bool:
+                return broker_audit.authorize(
+                    "diary-sync",
+                    operation,
+                    caller,
+                    enforce=enforce_lockdown,
+                    socket_path=audit_socket,
+                    lock_socket=lock_socket,
+                    owner_uid=os.geteuid(),
+                )[0]
+
             conn.settimeout(STATUS_TIMEOUT)
             buf = b""
             while b"\n" not in buf:
@@ -333,15 +355,17 @@ def serve(listen: str, *, runner=run_command) -> int:
             try:
                 request = json.loads(raw)
             except json.JSONDecodeError:
-                broker_audit.audit("diary-sync", "unknown", caller)
+                allowed("unknown")
                 conn.sendall(b'{"ok": false, "error": "parse error"}\n')
                 return
             operation = request.get("cmd") if isinstance(request, dict) else "unknown"
             if not isinstance(operation, str):
                 operation = "unknown"
-            broker_audit.audit("diary-sync", operation, caller)
-            reply = handle(request, sync_limiter=sync_limiter,
-                           status_limiter=status_limiter, busy=busy, runner=runner)
+            if not allowed(operation):
+                reply = {"ok": False, "error": "denied by locked-mode broker policy"}
+            else:
+                reply = handle(request, sync_limiter=sync_limiter,
+                               status_limiter=status_limiter, busy=busy, runner=runner)
             if not reply.get("ok"):
                 cmd = request.get("cmd") if isinstance(request, dict) else None
                 print(f"[diary-sync] {cmd!r} -> "
@@ -495,8 +519,16 @@ def _local(cmd: str, payload: dict) -> dict:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("--listen", default=os.environ.get("DIARY_SYNC_SOCKET", DEFAULT_SOCKET))
+    parser.add_argument("--enforce-lockdown", action="store_true")
+    parser.add_argument("--lock-socket", default=broker_audit.DEFAULT_LOCK_SOCKET)
+    parser.add_argument("--audit-socket", default=broker_audit.DEFAULT_SOCKET)
     args = parser.parse_args(argv)
-    return serve(args.listen)
+    return serve(
+        args.listen,
+        enforce_lockdown=args.enforce_lockdown,
+        lock_socket=args.lock_socket,
+        audit_socket=args.audit_socket,
+    )
 
 
 if __name__ == "__main__":

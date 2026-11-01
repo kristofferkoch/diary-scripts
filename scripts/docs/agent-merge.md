@@ -137,6 +137,14 @@ the peer UID equals the service owner UID, and non-owner approval is `would_deny
 with `reason=owner_required`. This observation does not alter queueing or approval
 and does not use the advisory model reviewer as an authority.
 
+Setting `DIARY_BROKER_ENFORCE_LOCKDOWN=1` in the root-owned service environment
+opts into CTL-05 enforcement. While `LOCKING`/`LOCKED`, diary/scripts queue and
+publication requests and unknown operations are denied before dispatch; exact-OID
+owner approval remains available. Controller uncertainty or a failed audit write
+also denies. The service has `diary-lock-control` only to confirm controller
+state. The shipped unit leaves the variable unset, preserving audit-only behavior,
+and denied requests are never queued for replay.
+
 An empty queue is a no-op. A changed queue OID, dirty approved/integration
 checkout, dirty queue, unexpected queue HEAD, wrong caller UID, or merge conflict
 fails closed. Approval uses a normal non-forced `git push origin master`; a failed
