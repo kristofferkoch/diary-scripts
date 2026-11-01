@@ -6,76 +6,36 @@ message-id for every visible thread.
 """
 from __future__ import annotations
 
-import os
-
-import psycopg
 import pytest
 
 from mail_reader import inbox
 from mail_reader.thread_id import ThreadId
 
 
-PG_DSN = os.environ.get("PG_DSN", "dbname=mailvec")
-
-
-def _dsn_reachable() -> bool:
-    try:
-        with psycopg.connect(PG_DSN, connect_timeout=2):
-            return True
-    except Exception:
-        return False
-
-
-pytestmark = pytest.mark.skipif(
-    not _dsn_reachable(),
-    reason=f"mailvec DB not reachable at PG_DSN={PG_DSN!r}",
-)
+@pytest.fixture
+def conn(db_conn):
+    return db_conn
 
 
 @pytest.fixture
-def conn():
-    with psycopg.connect(PG_DSN) as c:
-        yield c
-
-
-def test_thread_latest_mids_returns_newest_per_thread(conn):
-    """Pick a real thread with multiple embedded messages and verify the
-    helper returns the newest one's message_id."""
+def message_thread(conn):
+    tid = ThreadId("pytest-inbox")
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT thread_id
-            FROM messages
-            WHERE thread_id IS NOT NULL
-            GROUP BY thread_id
-            HAVING count(*) >= 2
-            ORDER BY thread_id
-            LIMIT 1
-            """
-        )
-        row = cur.fetchone()
-    if row is None:
-        pytest.skip("no multi-message thread in DB")
-    db_thread_id = row[0]
-    tid = ThreadId(db_thread_id)
+        for mid, date in (
+            ("old@example.invalid", "2026-01-01T12:00:00Z"),
+            ("new@example.invalid", "2026-01-02T12:00:00Z"),
+        ):
+            cur.execute(
+                "INSERT INTO messages (message_id, thread_id, date, tier) "
+                "VALUES (%s, %s, %s, 2)",
+                (mid, tid.db_form, date),
+            )
+    return tid
 
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT message_id
-            FROM messages
-            WHERE thread_id = %s
-            ORDER BY date DESC
-            LIMIT 1
-            """,
-            (db_thread_id,),
-        )
-        expected_row = cur.fetchone()
-    assert expected_row is not None
-    expected_mid = expected_row[0]
 
-    result = inbox.thread_latest_mids(conn, [tid])
-    assert result == {tid: expected_mid}
+def test_thread_latest_mids_returns_newest_per_thread(conn, message_thread):
+    result = inbox.thread_latest_mids(conn, [message_thread])
+    assert result == {message_thread: "new@example.invalid"}
 
 
 def test_thread_latest_mids_omits_unknown_threads(conn):
@@ -91,27 +51,8 @@ def test_thread_latest_mids_empty_input_returns_empty(conn):
     assert inbox.thread_latest_mids(conn, []) == {}
 
 
-def test_thread_latest_mids_accepts_either_form_via_threadid(conn):
-    """ThreadId normalizes both forms (bare from notmuch, prefixed from
-    DB) at construction time. The helper takes ThreadId values now —
-    callers don't need to think about the form."""
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT thread_id
-            FROM messages
-            WHERE thread_id IS NOT NULL
-            LIMIT 1
-            """
-        )
-        row = cur.fetchone()
-    if row is None:
-        pytest.skip("no embedded message with thread_id")
-    prefixed = row[0]
-    assert prefixed.startswith("thread:")
-    bare = prefixed[len("thread:"):]
-    # Both inputs normalize to the same ThreadId.
-    from_bare = inbox.thread_latest_mids(conn, [ThreadId(bare)])
-    from_prefixed = inbox.thread_latest_mids(conn, [ThreadId(prefixed)])
-    assert from_bare and from_prefixed
-    assert list(from_bare.values()) == list(from_prefixed.values())
+def test_thread_latest_mids_accepts_either_form_via_threadid(conn, message_thread):
+    """Bare and prefixed inputs normalize to the same database key."""
+    from_bare = inbox.thread_latest_mids(conn, [ThreadId(str(message_thread))])
+    from_prefixed = inbox.thread_latest_mids(conn, [ThreadId(message_thread.db_form)])
+    assert from_bare == from_prefixed == {message_thread: "new@example.invalid"}

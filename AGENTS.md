@@ -32,6 +32,6 @@ Full policy (branch naming, review-before-merge, publication + cleanup): `~/diar
 ## Working here
 
 - Run everything as `uv run <entry-point>` from the repo root — never bare `python3` (it misses the venv deps like psycopg).
-- Tests: `uv run pytest` (doctests run too, via `--doctest-modules`). Run them before merging.
+- Tests: `uv run pytest` (doctests run too, via `--doctest-modules`). Run them before merging. PostgreSQL integration tests opt in with `DIARY_TEST_PG_DSN`; they migrate and drop a unique schema, never use application tables.
 - New CLI tools: entry in `[project.scripts]`, a docstring naming the purpose, sensible flags, and a doc under `scripts/docs/` listed in the `scripts/README.md` index.
 - Commit convention: `TOOLS:` prefix + a `Generated-with:` trailer naming harness, model, and settings (see `~/diary/AGENTS.md` §Commits).

@@ -1,34 +1,13 @@
 """Tests for mail_reader.extract helpers.
 
-Integration-style: needs `mailvec`. Each DB-touching test runs inside a
-transaction that's rolled back at teardown — the helpers don't commit, so
-nothing leaks into `entities` / `summary_*` for subsequent runs.
+Integration-style: uses synthetic rows in the disposable test database.
+Each DB-touching test rolls back its fixture and helper writes.
 """
 from __future__ import annotations
 
-import os
-
-import psycopg
 import pytest
 
 from mail_reader import extract
-
-
-PG_DSN = os.environ.get("PG_DSN", "dbname=mailvec")
-
-
-def _dsn_reachable() -> bool:
-    try:
-        with psycopg.connect(PG_DSN, connect_timeout=2):
-            return True
-    except Exception:
-        return False
-
-
-pytestmark = pytest.mark.skipif(
-    not _dsn_reachable(),
-    reason=f"mailvec DB not reachable at PG_DSN={PG_DSN!r}",
-)
 
 
 # ---------- normalize_entity (pure, no DB) ----------
@@ -71,29 +50,25 @@ def test_normalize_entity_tel_no_digits():
 # ---------- DB-touching tests ----------
 
 @pytest.fixture
-def conn():
-    """Rollback-on-teardown connection — the helpers don't commit, so
-    nothing leaks into themes/entities/summary_* between tests."""
-    with psycopg.connect(PG_DSN) as c:
-        try:
-            yield c
-        finally:
-            c.rollback()
+def conn(db_conn):
+    """Roll back each test's fixture and helper writes."""
+    try:
+        yield db_conn
+    finally:
+        db_conn.rollback()
 
 
 @pytest.fixture
 def summary_id(conn):
-    """Insert a sentinel summary row, yield its id, rollback at end."""
+    """Insert a sentinel message and summary, rolled back with the test."""
     with conn.cursor() as cur:
-        # any embedded message works — we just need a valid FK target
         cur.execute("""
-            SELECT m.id
-            FROM messages m
-            JOIN chunks c ON c.message_id = m.id AND c.attachment_id IS NULL
-            LIMIT 1
+            INSERT INTO messages (message_id, tier)
+            VALUES ('pytest-extract@example.invalid', 2)
+            RETURNING id
         """)
         row = cur.fetchone()
-        assert row is not None, "no embedded messages in DB"
+        assert row is not None
         msg_row_id = row[0]
         cur.execute("""
             INSERT INTO summaries

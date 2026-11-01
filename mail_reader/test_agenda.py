@@ -1,54 +1,32 @@
 """Tests for the agenda query.
 
-Integration-style: needs `mailvec`. The agenda query reads
-`summary_temporal + summaries + messages` and dedupes across thread
-replies. We insert synthetic rows under a sentinel `prompt_version`
-that doesn't collide with the live `PROMPT_VERSION`, then patch
-`summarize.PROMPT_VERSION` in the test so the agenda module's filter
-matches our fixtures and ignores everything else.
+Integration-style: uses the disposable test PostgreSQL database. The
+agenda query reads `summary_temporal + summaries + messages` and dedupes
+across thread replies. Synthetic rows use a sentinel `prompt_version`,
+patched into `summarize.PROMPT_VERSION` so only the fixtures match.
 """
 from __future__ import annotations
 
 import datetime
-import os
 import uuid
 
-import psycopg
 import pytest
 
 from mail_reader import agenda, summarize
 from mail_reader.thread_id import ThreadId
 
 
-PG_DSN = os.environ.get("PG_DSN", "dbname=mailvec")
 TEST_PROMPT = "pytest-agenda"
 
 
-def _dsn_reachable() -> bool:
-    try:
-        with psycopg.connect(PG_DSN, connect_timeout=2):
-            return True
-    except Exception:
-        return False
-
-
-pytestmark = pytest.mark.skipif(
-    not _dsn_reachable(),
-    reason=f"mailvec DB not reachable at PG_DSN={PG_DSN!r}",
-)
-
-
 @pytest.fixture
-def conn():
-    with psycopg.connect(PG_DSN) as c:
-        yield c
+def conn(db_conn):
+    return db_conn
 
 
 @pytest.fixture
 def isolated_prompt(monkeypatch):
-    """Patch `summarize.PROMPT_VERSION` so the agenda query's filter only
-    matches our test rows. Tests INSERT summaries at this prompt version
-    so they're invisible to the live UI and only visible to the test."""
+    """Patch `summarize.PROMPT_VERSION` so only the test rows match."""
     monkeypatch.setattr(summarize, "PROMPT_VERSION", TEST_PROMPT)
 
 

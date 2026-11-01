@@ -79,7 +79,12 @@ uv run python -m scripts.kindle_dashboard.serve  # Kindle dashboard server
 ```bash
 uv run pytest                                # doctests + unit tests
 uv run pytest scripts/                       # scripts-only
+DIARY_TEST_PG_DSN=dbname=mailvec uv run pytest  # include PostgreSQL integration
 ```
+
+PostgreSQL integration tests skip unless `DIARY_TEST_PG_DSN` names a database
+where the test role may create schemas. Each run applies the migrations in a
+unique schema and drops it afterward; application tables are not used.
 
 ## Configuration
 
