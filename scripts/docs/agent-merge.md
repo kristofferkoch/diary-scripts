@@ -115,7 +115,10 @@ by the queue lock, and trigger replacement is atomic.
 After acceptance, queue-triggered `agent-merge-review` adds an advisory local-model
 report without modifying the diff. It never approves or
 executes queued code. The report supplements the diff and tests; it does not
-replace them. See [`agent-merge-review.md`](agent-merge-review.md).
+replace them. See [`agent-merge-review.md`](agent-merge-review.md). The prepared
+LATER-01 owner UI extension renders that report beside the real diff and reuses
+the exact-OID approval below; its CTL-07/09 boundary and undeployed live gates
+are in [`agent-merge-console.md`](agent-merge-console.md).
 
 The human supplies the reviewed OID explicitly; the client never substitutes a
 newer queue HEAD. `agent-merge-approve` sends that OID with the request, so a
