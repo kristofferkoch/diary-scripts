@@ -92,7 +92,7 @@ class FakeSystemd:
 
     def workload_services(self) -> list[str]:
         self._require_manager()
-        return sorted(service for service in self.services if service != "dbus-broker.service")
+        return sorted(self.services)
 
     def all_scopes(self) -> list[str]:
         self._require_manager()
@@ -106,7 +106,7 @@ class FakeSystemd:
         self._require_manager()
         if unit.endswith(".scope"):
             return unit in self.scopes_by_name and unit not in self.inactive_scopes
-        return self.services[unit]
+        return self.services.get(unit, False)
 
     def stop(self, unit: str, no_block: bool = False) -> None:
         self._require_manager()
@@ -124,12 +124,16 @@ class FakeSystemd:
 
     def start(self, service: str) -> None:
         self.calls.append(("start", service))
-        if self.services[service]:
+        if self.services.get(service, False):
             raise lock.LockError("old service was not stopped")
         self.services[service] = True
-        self.supervisor_pids[service] += 1
-        self.pids[service] += 1
+        self.supervisor_pids[service] = self.supervisor_pids.get(service, 3000) + 1
+        self.pids[service] = self.pids.get(service, 3001) + 1
         self.membership[service] = {self.pids[service]}
+
+    def ensure_service(self, service: str) -> None:
+        if not self.active(service):
+            self.start(service)
 
 
 class FakeProcesses:
@@ -198,8 +202,10 @@ def test_locked_turn_is_denied_and_cancel_stops_services_before_complete_scopes(
 
     svc.attend()
     assert all(fake.services.values())
-    assert fake.supervisor_pids == {"dsh-web.service": 1100, "kimi-web.service": 2200}
-    assert fake.pids == {"dsh-web.service": 1101, "kimi-web.service": 2201}
+    assert fake.supervisor_pids["dsh-web.service"] == 1100
+    assert fake.supervisor_pids["kimi-web.service"] == 2200
+    assert fake.pids["dsh-web.service"] == 1101
+    assert fake.pids["kimi-web.service"] == 2201
     assert svc.current == {}
 
 
@@ -212,7 +218,7 @@ def test_lock_also_stops_tool_created_scopes_outside_controller_prefix() -> None
     assert "tool-created-escape.scope" in fake.inactive_scopes
 
 
-def test_arbitrary_service_and_token_are_workload_but_dbus_is_preserved() -> None:
+def test_arbitrary_service_token_and_dbus_are_all_contained() -> None:
     fake = FakeSystemd()
     fake.services.update({
         "dsh-web-token.service": True,
@@ -225,7 +231,7 @@ def test_arbitrary_service_and_token_are_workload_but_dbus_is_preserved() -> Non
     assert not fake.services["dsh-web-token.service"]
     assert not fake.services["kimi-web-token.service"]
     assert not fake.services["escape.service"]
-    assert fake.services["dbus-broker.service"]
+    assert not fake.services["dbus-broker.service"]
 
 
 def test_cancellation_attempts_every_scope_before_failing_closed() -> None:
@@ -296,6 +302,7 @@ def test_attend_quiesces_stale_service_and_rejects_reused_fresh_pids() -> None:
 
 def test_outage_lock_unlock_quiesces_default_target_and_starts_fresh_processes() -> None:
     fake = FakeSystemd()
+    fake.services["dbus-broker.service"] = True
     fake.manager_available = False
     fake.services = {service: False for service in fake.services}
     svc = turns(fake)
@@ -305,8 +312,14 @@ def test_outage_lock_unlock_quiesces_default_target_and_starts_fresh_processes()
     assert fake.manager_recoveries == 1
     assert fake.auto_started_pids == [(1100, 1101), (2200, 2201)]
     assert all(fake.services.values())
-    assert fake.supervisor_pids == {"dsh-web.service": 1101, "kimi-web.service": 2201}
-    assert fake.pids == {"dsh-web.service": 1102, "kimi-web.service": 2202}
+    assert fake.services["dbus-broker.service"]
+    assert fake.supervisor_pids["dsh-web.service"] == 1101
+    assert fake.supervisor_pids["kimi-web.service"] == 2201
+    assert fake.pids["dsh-web.service"] == 1102
+    assert fake.pids["kimi-web.service"] == 2202
+    start_calls = [unit for operation, unit in fake.calls if operation == "start"]
+    assert start_calls.index("dbus-broker.service") < start_calls.index("dsh-web.service")
+    assert start_calls.index("dbus-broker.service") < start_calls.index("kimi-web.service")
     for service in ("dsh-web.service", "kimi-web.service"):
         current = (fake.supervisor_pids[service], fake.pids[service])
         assert current not in fake.auto_started_pids
@@ -463,7 +476,7 @@ def test_systemd_scope_cancellation_excludes_manager_init_scope() -> None:
     assert systemd.all_scopes() == ["tool-created.scope"]
 
 
-def test_systemd_workload_listing_includes_arbitrary_services_not_dbus() -> None:
+def test_systemd_workload_listing_includes_dbus_and_arbitrary_services() -> None:
     def run(argv, **kwargs):
         return SimpleNamespace(
             returncode=0,
@@ -475,7 +488,9 @@ def test_systemd_workload_listing_includes_arbitrary_services_not_dbus() -> None
         )
 
     systemd = lock.SystemdUser("agent", runner=run)
-    assert systemd.workload_services() == ["dsh-web-token.service", "escape.service"]
+    assert systemd.workload_services() == [
+        "dbus-broker.service", "dsh-web-token.service", "escape.service",
+    ]
 
 
 def test_turn_socket_uses_kernel_agent_uid_and_preserves_protocol(tmp_path: Path) -> None:
@@ -556,7 +571,7 @@ def fake_process(tmp_path: Path, pid: int, cgroup: str) -> None:
     (directory / "cgroup").write_text(f"0::{cgroup}\n")
 
 
-def test_pid_fallback_preserves_manager_and_infrastructure_cgroups(tmp_path: Path) -> None:
+def test_pid_fallback_preserves_only_manager_pid_and_contains_attached_workload(tmp_path: Path) -> None:
     uid = os.geteuid()
     prefix = f"/user.slice/user-{uid}.slice/user@{uid}.service"
     fake_process(tmp_path, 9001, f"{prefix}/init.scope")
@@ -566,12 +581,18 @@ def test_pid_fallback_preserves_manager_and_infrastructure_cgroups(tmp_path: Pat
     fake_process(tmp_path, 9005, f"{prefix}/app.slice/dbus-broker.service")
     fake_process(tmp_path, 9006, f"{prefix}/app.slice/kimi-web.service/tool-child")
     fake_process(tmp_path, 9007, f"{prefix}/app.slice/escape.service")
-    processes = lock.AgentProcesses(uid, proc_root=str(tmp_path))
+    fake_process(tmp_path, 9008, f"{prefix}/app.slice/dbus-broker.service/attached-workload")
+    fake_process(tmp_path, 9009, f"{prefix}/init.scope/attached-workload")
+    processes = lock.AgentProcesses(uid, proc_root=str(tmp_path), manager_pid=9001)
     assert not processes.is_workload(9001)
     assert processes.is_workload(9003)
-    assert not processes.is_workload(9005)
+    assert processes.is_workload(9005)
     assert processes.is_workload(9007)
-    assert {identity.pid for identity in processes.processes()} == {9002, 9003, 9004, 9006, 9007}
+    assert processes.is_workload(9008)
+    assert processes.is_workload(9009)
+    assert {identity.pid for identity in processes.processes()} == {
+        9002, 9003, 9004, 9005, 9006, 9007, 9008, 9009,
+    }
 
 
 def pid_running(pid: int) -> bool:
@@ -673,9 +694,13 @@ signal.pause()
     ], check=True, capture_output=True, text=True, timeout=20)
     systemd = lock.SystemdUser(None)
     cast(Any, systemd).workload_services = lambda: [service, escape_service]
+    uid = os.geteuid()
+    manager_pid = int(subprocess.check_output([
+        "/usr/bin/systemctl", "show", f"user@{uid}.service", "--property=MainPID", "--value",
+    ], text=True).strip())
     allowed: set[int] = set()
     processes = lock.AgentProcesses(
-        os.geteuid(), eligible=lambda identity: identity.pid in allowed,
+        uid, eligible=lambda identity: identity.pid in allowed, manager_pid=manager_pid,
     )
     svc = lock.SystemdTurns(
         None, lambda: True, runtimes={"probe": service}, systemd=systemd,
@@ -683,12 +708,8 @@ signal.pause()
     )
     old_pid = None
     old_child = None
-    uid = os.geteuid()
-    manager_pid = int(subprocess.check_output([
-        "/usr/bin/systemctl", "show", f"user@{uid}.service", "--property=MainPID", "--value",
-    ], text=True).strip())
     manager_processes = lock.AgentProcesses(
-        uid, eligible=lambda identity: identity.pid == manager_pid,
+        uid, eligible=lambda identity: identity.pid == manager_pid, manager_pid=manager_pid,
     )
     assert manager_processes.processes() == []
     try:
@@ -713,6 +734,19 @@ signal.pause()
             time.sleep(0.05)
         escape_pid = int(escape_pid_file.read_text())
         assert pid_running(escape_pid)
+        dbus_attached = True
+        try:
+            systemd.attach("dbus-broker.service", escape_pid)
+        except lock.SystemdUnavailable:
+            dbus_attached = False
+        init_attached = True
+        try:
+            systemd.attach("init.scope", escape_pid)
+        except lock.SystemdUnavailable:
+            init_attached = False
+        if dbus_attached or init_attached:
+            assert processes.is_workload(escape_pid)
+        print(f"attachment results: dbus={dbus_attached} init={init_attached}")
         allowed.update({old_supervisor, old_pid, old_child, escape_pid})
 
         assert svc.cancel() == 1

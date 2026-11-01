@@ -515,12 +515,12 @@ class AgentProcesses:
         uid: int,
         proc_root: str = "/proc",
         eligible: Callable[[ProcessIdentity], bool] | None = None,
-        infrastructure_services: set[str] | None = None,
+        manager_pid: int | None = None,
     ) -> None:
         self.uid = uid
         self.proc_root = proc_root
         self.eligible = eligible
-        self.infrastructure_services = infrastructure_services or {"dbus-broker.service"}
+        self.manager_pid = manager_pid
         self.manager_prefix = f"/user.slice/user-{uid}.slice/user@{uid}.service/"
 
     def is_workload(self, pid: int) -> bool:
@@ -530,11 +530,11 @@ class AgentProcesses:
         relative = cgroup[len(self.manager_prefix):]
         parts = relative.split("/")
         if parts[0] == "init.scope":
-            return False
+            return self.manager_pid is None or pid != self.manager_pid
         if any(part.endswith(".scope") for part in parts):
             return True
         if len(parts) >= 2 and parts[0] == "app.slice":
-            return parts[1].endswith(".service") and parts[1] not in self.infrastructure_services
+            return parts[1].endswith(".service")
         return False
 
     def processes(self) -> list[ProcessIdentity]:
@@ -640,6 +640,17 @@ class SystemdUser:
             except SystemdUnavailable:
                 time.sleep(0.05)
         raise SystemdUnavailable("agent user manager did not become ready")
+
+    def manager_pid(self) -> int | None:
+        uid = os.geteuid() if self.user is None else pwd.getpwnam(self.user).pw_uid
+        result = self._run_system(["show", f"user@{uid}.service", "--property=MainPID", "--value"])
+        try:
+            pid = int(result.stdout.strip())
+        except (AttributeError, ValueError) as exc:
+            raise LockError("cannot identify the agent user manager") from exc
+        if result.returncode != 0:
+            raise SystemdUnavailable("cannot identify the agent user manager")
+        return pid if pid > 0 else None
 
     def active(self, unit: str) -> bool:
         result = self._run("systemctl", ["is-active", "--quiet", unit])
@@ -748,11 +759,7 @@ class SystemdUser:
         ])
         if result.returncode != 0:
             raise SystemdUnavailable("cannot list agent workload services")
-        return [
-            parts[0]
-            for line in result.stdout.splitlines()
-            if (parts := line.split()) and parts[0] != "dbus-broker.service"
-        ]
+        return [parts[0] for line in result.stdout.splitlines() if (parts := line.split())]
 
     def all_scopes(self) -> list[str]:
         result = self._run("systemctl", [
@@ -797,6 +804,12 @@ class SystemdUser:
         if result.returncode != 0 or not self.active(service):
             raise LockError(f"could not start {service}")
 
+    def ensure_service(self, service: str) -> None:
+        if not self.active(service):
+            result = self._run("systemctl", ["start", service])
+            if result.returncode != 0 or not self.active(service):
+                raise LockError(f"could not restore {service}")
+
 
 @dataclass(frozen=True)
 class Turn:
@@ -830,7 +843,7 @@ class SystemdTurns:
         self.systemd = systemd or SystemdUser(agent_user)
         if processes is None:
             uid = os.geteuid() if agent_user is None else pwd.getpwnam(agent_user).pw_uid
-            processes = AgentProcesses(uid)
+            processes = AgentProcesses(uid, manager_pid=self.systemd.manager_pid())
         self.processes = processes
         self.contain_all_scopes = contain_all_scopes
         self.current: dict[str, Turn] = {}
@@ -947,6 +960,7 @@ class SystemdTurns:
             for service in self.systemd.workload_services():
                 if self.systemd.active(service):
                     raise LockError(f"refusing to resume active {service}")
+            self.systemd.ensure_service("dbus-broker.service")
             for service in self.runtimes.values():
                 self.systemd.start(service)
                 fresh = self.systemd.service_identities(service, wait=True)
