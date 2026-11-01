@@ -11,6 +11,24 @@ network policy described in [`network-policy.md`](network-policy.md); until its
 root-only arm file exists, every transition retains accept-only dark observation.
 DNS, broker, Signal, and active-turn enforcement remain separate cards.
 
+The prepared LATER-03 controller revision additionally verifies cgroup network
+identity. It requires active `agent.slice`, `dsh-web.service`, and
+`kimi-web.service`; stats the slice's real cgroup inode; and requires that
+inode in every `--cgroup-set FAMILY:TABLE:SET` nftables `cgroupv2` set. Both web
+services must be descendants of the slice. `verify_scope()` applies the same
+ancestor check to CTL-02 `dsh-turn-*.scope` and `kimi-turn-*.scope` units.
+Missing/wrong-type sets, inactive services, escaped cgroups, malformed command
+output, and nft/systemctl uncertainty fail the transition and failsafe. Repeat
+`--cgroup-set` for every ACT-01 audit and enforcement set. This verification
+does not itself install or prove locked packet rules; CTL-03/ACT-01 retains
+that responsibility.
+
+Do not deploy this controller revision alone with the older CTL-01 installer:
+its new unit intentionally orders after and wants the LATER-03 agents and needs
+`CAP_NET_ADMIN` plus `AF_NETLINK` for nftables verification. Use the integrated
+LATER-03 migration only after ACT-01 and CTL-02 pass their gates. The current
+live CTL-01 controller and UID/user-unit baseline are unchanged by preparation.
+
 ## Trust boundary and requests
 
 `/run/diary-lock/socket` is `root:diary-lock-control` mode `0660`. The installers

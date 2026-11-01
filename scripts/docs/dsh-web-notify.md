@@ -38,13 +38,15 @@ dsh-web-notify --unit kimi-web            # uses hosts.kimi_web, label "kimi web
 dsh-web-notify --unit kimi-web --dry-run  # print, don't send
 ```
 
-Flags: `--unit` (default `dsh-web`), `--scope user|system` (system units after
-the agent-uid split, where the journal and `systemctl show` need no `--user`),
-`--base-url`, `--label`, `--timeout`, `--socket`.
+Flags: `--unit` (default `dsh-web`), `--scope user|system`, `--base-url`,
+`--label`, `--timeout`, `--socket`. The live user units use the default `user`
+scope. The prepared LATER-03 system units pass `--scope system`, so the journal
+and `systemctl show` need no `--user`; they execute a root-owned Python closure
+under `/usr/local/libexec/diary-agents`, not `uv` with a home project.
 
 Because kimi's token is stable, the message is a *liveness* signal rather
 than a fresh credential — it confirms the service came back, and carries the
 link you would otherwise have to dig out of the journal by hand.
 
-Wire it up with `dsh/kimi-web-token.service` (`PartOf`/`WantedBy=kimi-web`),
-exactly like the dsh one.
+Kimi uses `kimi/kimi-web-token.service` with the same
+`PartOf`/`WantedBy=kimi-web` pattern as DSH.

@@ -1,16 +1,24 @@
-# UID-based network flow audit
+# Agent network flow audit
 
-AUD-02 observes the existing DSH/Kimi user units through their shared `agent`
-UID. It does not implement a lock controller or enforce lockdown. The only
-nftables verdict in the dedicated table is its base-chain `accept` policy;
-there are no `drop` or `reject` statements and normal packet processing
-continues through all other chains.
+The deployed AUD-02 baseline observes the existing DSH/Kimi user units through
+their shared `agent` UID. It does not implement a lock controller or enforce
+lockdown. The only nftables verdict in the dedicated table is its base-chain
+`accept` policy; there are no `drop` or `reject` statements and normal packet
+processing continues through all other chains.
+
+The prepared LATER-03 candidate instead selects `agent.slice` with
+`socket cgroupv2 level 1 @agent_egress`. `NFTSet=` maintains the slice's cgroup
+inode and the controller verifies actual membership. This candidate is not
+live; the ordinary AUD-02 installer refuses it rather than activating cgroup
+rules before the system-slice migration. Use the integrated LATER-03 preflight
+and installer after ACT-01 and CTL-02.
 
 ## Rules and trusted identity
 
-The root installer resolves the current `agent` UID/GID and installs a
-root-owned copy of `diary-agent-audit.nft`. Its `output` chain ignores
-loopback, logs every new TCP/UDP flow, and samples established TCP/UDP packets
+The AUD-02 root installer resolves the current `agent` UID/GID for trusted
+attribution and installs a root-owned copy of `diary-agent-audit.nft`. The
+baseline uses `meta skuid`; the candidate uses the slice set described above.
+The `output` chain ignores loopback, logs every new TCP/UDP flow, and samples established TCP/UDP packets
 at most 10 packets/second (20-packet burst). The established-packet sample
 keeps long-lived connections visible without copying an entire model stream
 into NFLOG. Both IPv4 and IPv6 use the same `inet` table, with no destination

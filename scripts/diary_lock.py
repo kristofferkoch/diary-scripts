@@ -3,8 +3,9 @@
 
 The daemon derives caller identity from SO_PEERCRED, persists LOCKING, LOCKED,
 and ATTENDED states, verifies conflicting systemd mode units, and fails locked
-when state, audit, or supervision is unavailable. Mode units own their approved
-enforcement hooks; DNS, broker, and turn enforcement belong to separate changes.
+when state, audit, cgroup identity, or supervision is unavailable. Mode units
+own their approved enforcement hooks; DNS, broker, and turn enforcement belong
+to separate changes.
 """
 from __future__ import annotations
 
@@ -262,6 +263,144 @@ class SystemdModes:
             raise LockError("NFLOG audit forwarder is unavailable")
 
 
+CgroupSet = tuple[str, str, str]
+DEFAULT_CGROUP_SETS: tuple[CgroupSet, ...] = (("inet", "diary_agent_audit", "agent_egress"),)
+AGENT_SLICE = "agent.slice"
+AGENT_SERVICES = ("dsh-web.service", "kimi-web.service")
+
+
+def cgroup_set(value: str) -> CgroupSet:
+    parts = tuple(value.split(":"))
+    if len(parts) != 3 or any(not part for part in parts):
+        raise argparse.ArgumentTypeError("cgroup set must be FAMILY:TABLE:SET")
+    if any(any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for character in part) for part in parts):
+        raise argparse.ArgumentTypeError("cgroup set contains invalid characters")
+    return cast(CgroupSet, parts)
+
+
+class NftCgroupIdentity:
+    def __init__(
+        self,
+        sets: tuple[CgroupSet, ...] = DEFAULT_CGROUP_SETS,
+        cgroup_root: str = "/sys/fs/cgroup",
+        runner: Callable[..., Any] = subprocess.run,
+    ) -> None:
+        if not sets:
+            raise LockError("at least one cgroup identity set is required")
+        self.sets = sets
+        self.cgroup_root = Path(cgroup_root)
+        self.runner = runner
+
+    def _run(self, argv: list[str]) -> Any:
+        try:
+            return self.runner(
+                argv,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=20,
+                env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise LockError("cgroup identity operation failed") from exc
+
+    def _properties(self, unit: str) -> dict[str, str]:
+        result = self._run([
+            "/usr/bin/systemctl", "show", unit,
+            "--property=ActiveState", "--property=ControlGroup",
+        ])
+        if result.returncode != 0:
+            raise LockError(f"cannot inspect {unit}")
+        values: dict[str, str] = {}
+        for line in result.stdout.splitlines():
+            if not line:
+                continue
+            key, separator, value = line.partition("=")
+            if not separator or key not in {"ActiveState", "ControlGroup"} or key in values:
+                raise LockError(f"systemd returned invalid properties for {unit}")
+            values[key] = value
+        if set(values) != {"ActiveState", "ControlGroup"}:
+            raise LockError(f"systemd omitted cgroup properties for {unit}")
+        return values
+
+    def _cgroup_id(self, control_group: str) -> int:
+        path = Path(control_group)
+        if not path.is_absolute() or ".." in path.parts:
+            raise LockError("systemd returned an unsafe cgroup path")
+        try:
+            info = (self.cgroup_root / path.relative_to("/")).stat()
+        except OSError as exc:
+            raise LockError(f"cannot stat cgroup {control_group}") from exc
+        if not stat.S_ISDIR(info.st_mode):
+            raise LockError(f"cgroup {control_group} is not a directory")
+        return info.st_ino
+
+    def _members(self, selector: CgroupSet) -> set[int]:
+        family, table, name = selector
+        result = self._run(["/usr/bin/nft", "--json", "list", "set", family, table, name])
+        if result.returncode != 0:
+            raise LockError(f"cannot read nftables set {table}/{name}")
+        try:
+            document = json.loads(result.stdout)
+            records = document["nftables"]
+            matches = [
+                record["set"] for record in records
+                if isinstance(record, dict) and "set" in record
+                and record["set"].get("family") == family
+                and record["set"].get("table") == table
+                and record["set"].get("name") == name
+            ]
+            if len(matches) != 1 or not isinstance(matches[0], dict):
+                raise LockError(f"nftables returned an ambiguous set {table}/{name}")
+            value = matches[0]
+            if value.get("type") != "cgroupv2":
+                raise LockError(f"nftables set {table}/{name} is not a cgroupv2 set")
+            elements = value.get("elem", [])
+            if not isinstance(elements, list) or any(isinstance(item, bool) or not isinstance(item, int) for item in elements):
+                raise LockError(f"nftables set {table}/{name} has invalid members")
+            return set(cast(list[int], elements))
+        except (KeyError, TypeError, AttributeError, json.JSONDecodeError) as exc:
+            raise LockError(f"nftables returned invalid set data for {table}/{name}") from exc
+
+    def _active_cgroup(self, unit: str) -> str:
+        properties = self._properties(unit)
+        if properties["ActiveState"] != "active":
+            raise LockError(f"{unit} is not active")
+        if not properties["ControlGroup"]:
+            raise LockError(f"{unit} has no control group")
+        return properties["ControlGroup"]
+
+    def _verify_slice(self) -> str:
+        control_group = self._active_cgroup(AGENT_SLICE)
+        if control_group != f"/{AGENT_SLICE}":
+            raise LockError(f"{AGENT_SLICE} has an unexpected control group")
+        cgroup_id = self._cgroup_id(control_group)
+        for selector in self.sets:
+            if cgroup_id not in self._members(selector):
+                family, table, name = selector
+                raise LockError(f"{AGENT_SLICE} is missing from {family}:{table}:{name}")
+        return control_group
+
+    def verify(self) -> None:
+        slice_cgroup = self._verify_slice()
+        for unit in AGENT_SERVICES:
+            control_group = self._active_cgroup(unit)
+            if not control_group.startswith(slice_cgroup + "/"):
+                raise LockError(f"{unit} escaped {AGENT_SLICE}")
+
+    def verify_scope(self, unit: str) -> None:
+        if not (
+            (unit.startswith("dsh-turn-") or unit.startswith("kimi-turn-"))
+            and unit.endswith(".scope")
+            and all(character in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-" for character in unit)
+        ):
+            raise LockError("invalid agent turn scope")
+        slice_cgroup = self._verify_slice()
+        control_group = self._active_cgroup(unit)
+        if not control_group.startswith(slice_cgroup + "/"):
+            raise LockError(f"{unit} escaped {AGENT_SLICE}")
+
+
 class ModeManager(Protocol):
     def activate(self, mode: str) -> None: ...
 
@@ -282,6 +421,12 @@ class AuditSink(Protocol):
     ) -> None: ...
 
 
+class CgroupIdentity(Protocol):
+    def verify(self) -> None: ...
+
+    def verify_scope(self, unit: str) -> None: ...
+
+
 class Controller:
     def __init__(
         self,
@@ -291,6 +436,7 @@ class Controller:
         attended_seconds: int = DEFAULT_ATTENDED_SECONDS,
         clock: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
+        identity: CgroupIdentity | None = None,
     ) -> None:
         if not 60 <= attended_seconds <= 3600:
             raise LockError("attended duration must be between 60 and 3600 seconds")
@@ -300,12 +446,18 @@ class Controller:
         self.attended_seconds = attended_seconds
         self.clock = clock
         self.monotonic = monotonic
+        self.identity = identity
         self.state = "LOCKING"
         self.expires_at: float | None = None
         self.deadline_monotonic: float | None = None
         self.review_since = clock()
         self.lock = threading.RLock()
         self.next_audit_check = 0.0
+
+    def _activate(self, mode: str) -> None:
+        self.modes.activate(mode)
+        if self.identity is not None:
+            self.identity.verify()
 
     def _save(self, state: str, expires_at: float | None = None) -> None:
         self.store.save(state, self.clock(), expires_at)
@@ -347,7 +499,7 @@ class Controller:
             if self.state != "LOCKED":
                 self.review_since = self.clock()
             self._save("LOCKING")
-            self.modes.activate("locked")
+            self._activate("locked")
             self.modes.verify_network_audit()
             self._save("LOCKED")
             self.audit.emit("controller.transition", "lock", "observed", "LOCKED", reason)
@@ -357,7 +509,7 @@ class Controller:
         self.audit.emit(event, "request", "observed", self.state, reason, peer)
         self._save("LOCKING")
         self.modes.verify_network_audit()
-        self.modes.activate("attended")
+        self._activate("attended")
         self.modes.verify_network_audit()
         self.deadline_monotonic = self.monotonic() + self.attended_seconds
         self._save("ATTENDED", self.clock() + self.attended_seconds)
@@ -384,7 +536,7 @@ class Controller:
             if self.state != "ATTENDED" or self.deadline_monotonic is None:
                 raise RequestRejected("attendance is not active")
             self.modes.verify_network_audit()
-            self.modes.activate("attended")
+            self._activate("attended")
             self.modes.verify_network_audit()
             self.deadline_monotonic = self.monotonic() + self.attended_seconds
             self._save("ATTENDED", self.clock() + self.attended_seconds)
@@ -418,7 +570,7 @@ class Controller:
             except (LockError, OSError) as exc:
                 errors.append(exc)
             try:
-                self.modes.activate("locked")
+                self._activate("locked")
             except (LockError, OSError) as exc:
                 errors.append(exc)
             else:
@@ -624,6 +776,11 @@ def daemon_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ui-user")
     parser.add_argument("--attended-seconds", type=int, default=DEFAULT_ATTENDED_SECONDS)
     parser.add_argument("--boot-id-file", default="/proc/sys/kernel/random/boot_id")
+    parser.add_argument(
+        "--cgroup-set", type=cgroup_set, action="append",
+        help="required FAMILY:TABLE:SET agent identity; repeat for audit and enforcement sets",
+    )
+    parser.add_argument("--cgroup-root", default="/sys/fs/cgroup")
     args = parser.parse_args(argv)
     if os.geteuid() != 0:
         parser.error("diary-lockd must run as root")
@@ -635,6 +792,9 @@ def daemon_main(argv: list[str] | None = None) -> int:
             SystemdModes(),
             AuditClient(args.audit_socket),
             args.attended_seconds,
+            identity=NftCgroupIdentity(
+                tuple(args.cgroup_set or DEFAULT_CGROUP_SETS), args.cgroup_root,
+            ),
         )
         controller.startup()
         ui_uid = pwd.getpwnam(args.ui_user).pw_uid if args.ui_user else None

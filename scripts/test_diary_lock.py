@@ -696,6 +696,9 @@ def test_real_daemon_exits_when_transition_and_first_failsafe_fail(
     events = FakeAudit()
     monkeypatch.setattr(lock, "SystemdModes", lambda: modes)
     monkeypatch.setattr(lock, "AuditClient", lambda _: events)
+    monkeypatch.setattr(
+        lock, "NftCgroupIdentity", lambda *_: SimpleNamespace(verify=lambda: None),
+    )
     monkeypatch.setattr(lock.signal, "signal", lambda *_: None)
     notifications: list[str] = []
     monkeypatch.setattr(lock, "sd_notify", lambda message: notifications.append(message) or True)

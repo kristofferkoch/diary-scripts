@@ -161,8 +161,7 @@ def main() -> None:
                    help="systemd unit whose journal carries the URL "
                         "(dsh-web, kimi-web)")
     p.add_argument("--scope", choices=("user", "system"), default="user",
-                   help="user units run as kek today; system units after the "
-                        "agent-uid split")
+                   help="current agent user units, or LATER-03 system units")
     p.add_argument("--base-url", default=None,
                    help="public base URL (default: hosts.dsh_web / "
                         "hosts.kimi_web for the chosen unit)")
