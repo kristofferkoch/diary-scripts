@@ -58,7 +58,7 @@ def sd_notify(message: str) -> bool:
     if not address:
         return False
     if address.startswith("@"):
-        address = "\0" + address[1:]
+        address = chr(0) + address[1:]
     elif not address.startswith("/"):
         raise LockError("NOTIFY_SOCKET must be an absolute path or abstract socket")
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)

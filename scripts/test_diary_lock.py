@@ -475,6 +475,17 @@ def test_sd_notify_and_expiry_health_use_systemd_watchdog_messages(tmp_path: Pat
     sink.close()
 
 
+def test_sd_notify_abstract_socket(monkeypatch: pytest.MonkeyPatch) -> None:
+    name = f"diary-lock-test-{os.getpid()}"
+    sink = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    sink.bind("\0" + name)
+    sink.settimeout(2)
+    monkeypatch.setenv("NOTIFY_SOCKET", "@" + name)
+    assert lock.sd_notify("WATCHDOG=1") is True
+    assert sink.recv(1024) == b"WATCHDOG=1"
+    sink.close()
+
+
 def test_real_daemon_exits_when_transition_and_first_failsafe_fail(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
