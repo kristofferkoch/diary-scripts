@@ -8,6 +8,7 @@ import ipaddress
 import json
 import os
 import queue
+import signal
 import socket
 import struct
 import sys
@@ -23,6 +24,7 @@ RECEIVE_BUFFER = 4 * 1024 * 1024
 QUEUE_SIZE = 1024
 AUDIT_TIMEOUT = 2.0
 HEALTH_INTERVAL = 10.0
+SHUTDOWN_TIMEOUT = 5.0
 NETLINK_NETFILTER = 12
 NFNL_SUBSYS_ULOG = 4
 NFULNL_MSG_PACKET = (NFNL_SUBSYS_ULOG << 8)
@@ -65,10 +67,24 @@ class UnsupportedPacket(ValueError):
     """A packet has no auditable transport flow in the copied bytes."""
 
 
+class ShutdownRequested(Exception):
+    """SIGTERM requested a bounded, graceful forwarding shutdown."""
+
+
+class WorkerState:
+    def __init__(self) -> None:
+        self.reported_version = 0
+        self.in_flight: str | None = None
+        self.exited = False
+
+
+_WORK_SENTINEL = object()
+
+
 class LossTracker:
     """Thread-safe, bounded-cardinality observation and writer failure counters."""
 
-    KINDS = ("sequence_gap", "enobufs", "queue_overflow", "audit_unavailable")
+    KINDS = ("sequence_gap", "enobufs", "queue_overflow", "audit_unavailable", "shutdown_loss")
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -274,9 +290,9 @@ def event_from_packet_message(
     sequence = struct.unpack("!I", attributes[NFULA_SEQ])[0]
     if uid != expected_uid or gid != expected_gid:
         raise NetworkAuditError("NFLOG packet identity does not match agent")
-    destination, port, protocol = flow_from_packet(attributes[NFULA_PAYLOAD], family)
     if sequence_callback is not None:
         sequence_callback(sequence)
+    destination, port, protocol = flow_from_packet(attributes[NFULA_PAYLOAD], family)
     return {
         "event": "network.flow",
         "component": "nftables",
@@ -369,36 +385,68 @@ def health_event(counts: dict[str, int]) -> dict[str, Any]:
     }
 
 
+def _write_event(
+    state: WorkerState,
+    kind: str,
+    socket_path: str,
+    writer: Callable[[str, dict[str, Any]], dict[str, Any]],
+    event: dict[str, Any],
+) -> dict[str, Any]:
+    state.in_flight = kind
+    try:
+        return writer(socket_path, event)
+    finally:
+        state.in_flight = None
+
+
+def _emit_health(
+    state: WorkerState,
+    loss: LossTracker,
+    socket_path: str,
+    writer: Callable[[str, dict[str, Any]], dict[str, Any]],
+) -> None:
+    version, counts = loss.snapshot()
+    summary = " ".join(f"{kind}={count}" for kind, count in sorted(counts.items()))
+    print(f"diary-network-auditd: observation loss: {summary}", file=sys.stderr, flush=True)
+    try:
+        _write_event(state, "health", socket_path, writer, health_event(counts))
+    except (NetworkAuditError, OSError):
+        loss.add("audit_unavailable")
+    else:
+        state.reported_version = version
+
+
 def _audit_worker(
-    work: queue.Queue[dict[str, Any]],
+    work: queue.Queue[Any],
     loss: LossTracker,
     socket_path: str,
     writer: Callable[[str, dict[str, Any]], dict[str, Any]],
     health_interval: float,
+    state: WorkerState | None = None,
 ) -> None:
-    reported_version = 0
+    state = state or WorkerState()
     last_attempt = 0.0
-    while True:
-        version, counts = loss.snapshot()
-        now = time.monotonic()
-        if version != reported_version and now - last_attempt >= health_interval:
-            last_attempt = now
-            summary = " ".join(f"{kind}={count}" for kind, count in sorted(counts.items()))
-            print(f"diary-network-auditd: observation loss: {summary}", file=sys.stderr, flush=True)
+    try:
+        while True:
+            version, _counts = loss.snapshot()
+            now = time.monotonic()
+            if version != state.reported_version and now - last_attempt >= health_interval:
+                last_attempt = now
+                _emit_health(state, loss, socket_path, writer)
             try:
-                writer(socket_path, health_event(counts))
+                event = work.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if event is _WORK_SENTINEL:
+                if loss.snapshot()[0] != state.reported_version:
+                    _emit_health(state, loss, socket_path, writer)
+                return
+            try:
+                _write_event(state, "flow", socket_path, writer, event)
             except (NetworkAuditError, OSError):
                 loss.add("audit_unavailable")
-            else:
-                reported_version = version
-        try:
-            event = work.get(timeout=0.5)
-        except queue.Empty:
-            continue
-        try:
-            writer(socket_path, event)
-        except (NetworkAuditError, OSError):
-            loss.add("audit_unavailable")
+    finally:
+        state.exited = True
 
 
 def serve(
@@ -411,13 +459,16 @@ def serve(
     queue_size: int = QUEUE_SIZE,
     health_interval: float = HEALTH_INTERVAL,
     loss: LossTracker | None = None,
+    state: WorkerState | None = None,
+    shutdown_timeout: float = SHUTDOWN_TIMEOUT,
 ) -> None:
     loss = loss or LossTracker()
-    work: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=queue_size)
+    state = state or WorkerState()
+    work: queue.Queue[Any] = queue.Queue(maxsize=queue_size)
     sock = opener(group)
     worker = threading.Thread(
         target=_audit_worker,
-        args=(work, loss, socket_path, writer, health_interval),
+        args=(work, loss, socket_path, writer, health_interval, state),
         name="diary-network-audit-writer",
         daemon=True,
     )
@@ -440,6 +491,32 @@ def serve(
                     loss.add("queue_overflow")
     finally:
         sock.close()
+        discarded = 0
+        try:
+            work.put_nowait(_WORK_SENTINEL)
+        except queue.Full:
+            try:
+                work.get_nowait()
+                discarded = 1
+            except queue.Empty:
+                pass
+            work.put_nowait(_WORK_SENTINEL)
+        worker.join(shutdown_timeout)
+        with work.mutex:
+            discarded += sum(item is not _WORK_SENTINEL for item in work.queue)
+        if state.in_flight == "flow":
+            discarded += 1
+        if loss.snapshot()[0] != state.reported_version:
+            discarded += 1
+        if discarded:
+            loss.add("shutdown_loss", discarded)
+            _version, counts = loss.snapshot()
+            summary = " ".join(f"{kind}={count}" for kind, count in sorted(counts.items()))
+            print(f"diary-network-auditd: shutdown loss: {summary}", file=sys.stderr, flush=True)
+
+
+def _handle_sigterm(_signum: int, _frame: Any) -> None:
+    raise ShutdownRequested
 
 
 def daemon_main(argv: list[str] | None = None) -> int:
@@ -453,12 +530,18 @@ def daemon_main(argv: list[str] | None = None) -> int:
         parser.error("diary-network-auditd must run as root")
     if not 1 <= args.group <= 65_535 or not 0 <= args.uid <= 2_147_483_647 or not 0 <= args.gid <= 2_147_483_647:
         parser.error("invalid NFLOG group or agent identity")
+    previous_handler = signal.signal(signal.SIGTERM, _handle_sigterm)
     try:
-        serve(args.group, args.uid, args.gid, args.socket)
-    except (NetworkAuditError, OSError) as exc:
-        print(f"diary-network-auditd: {exc}", file=sys.stderr)
-        return 1
-    return 0
+        try:
+            serve(args.group, args.uid, args.gid, args.socket)
+        except ShutdownRequested:
+            return 0
+        except (NetworkAuditError, OSError) as exc:
+            print(f"diary-network-auditd: {exc}", file=sys.stderr)
+            return 1
+        return 0
+    finally:
+        signal.signal(signal.SIGTERM, previous_handler)
 
 
 if __name__ == "__main__":

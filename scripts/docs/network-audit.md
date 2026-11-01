@@ -53,6 +53,14 @@ queue-overflow, and writer-failure counters also go to the forwarder's
 namespaced stderr journal. Health events intentionally carry no raw packet or
 free-form counter payload.
 
+A fatal receive error or SIGTERM triggers a sentinel-based bounded shutdown.
+The forwarder stops accepting packets, lets the worker drain queued flows and
+pending health for up to five seconds, and joins it. If the budget expires,
+remaining queued/in-flight flows and unreported health evidence are counted as
+`shutdown_loss` and printed to the namespaced journal. SIGKILL cannot run this
+cleanup: queued events may be lost without a final shutdown summary, although
+any previously emitted loss evidence remains valid.
+
 The forwarder has only `AF_UNIX` and `AF_NETLINK` sockets and a capability
 bounding set containing only `CAP_NET_ADMIN`. If the forwarder itself stops,
 dependent rules are removed; this loses observation but never blocks traffic.
@@ -120,9 +128,9 @@ controlled window and an explicit recovery command.
    grant it only to that controlled probe without changing its UID, and remove
    the probe afterward. Record the exact command and packet evidence. An
    initial fragment with a complete transport header must produce the expected
-   flow; a non-initial fragment must not invent a destination port and may
-   produce sequence-gap health evidence. Do not mark extension/fragment
-   coverage complete from synthetic parser fixtures alone.
+   flow; a non-initial fragment must not invent a destination port and must not
+   by itself create a sequence gap. Do not mark extension/fragment coverage
+   complete from synthetic parser fixtures alone.
 
 5. Inspect structured evidence through AUD-01:
 
@@ -169,12 +177,17 @@ controlled window and an explicit recovery command.
    network calls retained their ordinary behavior while the writer was
    unavailable.
 
-7. Kill `diary-network-auditd` with SIGKILL in the controlled window. Confirm
-   systemd restarts it, the NFLOG group is bound again, the table is present,
-   and a fresh test flow is recorded. Repeat normal DSH/Kimi model,
-   search/fetch, local web UI, loopback, and Unix-socket operations. Their
-   behavior and unit PIDs must remain unaffected apart from the intended
-   forwarder PID change.
+7. During queued writer activity, send SIGTERM with
+   `systemctl kill --signal=SIGTERM diary-network-auditd.service`. Confirm the
+   bounded drain finishes or the journal accounts for every residual flow and
+   pending health record as `shutdown_loss`. Then kill the restarted forwarder
+   with SIGKILL and confirm systemd restarts it, the NFLOG group is bound
+   again, the table is present, and a fresh test flow is recorded. SIGKILL may
+   discard queued events without a final shutdown summary; do not claim
+   graceful accounting for that unavoidable case. Repeat normal DSH/Kimi
+   model, search/fetch, local web UI, loopback, and Unix-socket operations.
+   Their behavior and unit PIDs must remain unaffected apart from the intended
+   forwarder PID changes.
 
 8. In the controlled window, reload/restart `firewalld` and restart the global
    `nftables.service`. After each operation, verify both the ordinary host
