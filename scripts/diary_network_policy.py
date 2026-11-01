@@ -137,6 +137,10 @@ def rule_matches(actual: dict[str, Any], expected: list[dict[str, Any]]) -> bool
             expected_limit = expected_expression["limit"]
             if not isinstance(actual_limit, dict) or not isinstance(expected_limit, dict):
                 return False
+            if actual_limit.get("inv", False) is not False:
+                return False
+            if actual_limit.get("rate_unit", "packets") != "packets":
+                return False
             if any(actual_limit.get(key) != value for key, value in expected_limit.items()):
                 return False
         elif not expression_matches(actual_expression, expected_expression):

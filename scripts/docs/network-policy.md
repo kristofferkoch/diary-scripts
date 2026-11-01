@@ -26,13 +26,17 @@ active but general-agent enforcement dark.
 
 ## Transactions, read-back, and failure handling
 
+Every controller request uses `systemctl restart` for the selected oneshot,
+including an already-active same-mode request. Arming while locked and repeated
+locked/attended requests therefore reapply rather than inheriting stale rules.
 Each transition atomically destroys the legacy AUD-02 table and replaces the
 policy table in one `nft -f -` transaction. A separate JSON read-back then checks
 the exact table, base-chain hook/priority/policy, UID selector, rule order,
-conntrack states, NFLOG prefix/group/snaplen, rate limit, and verdicts. Handles
-and counter values are ignored, but missing rules, extra rules/chains/sets/maps,
-wrong UIDs, wrong chains, and a surviving legacy table fail verification. An
-active oneshot or successful `nft` load by itself is never success evidence.
+conntrack states, NFLOG prefix/group/snaplen, non-inverted packet-rate limit, and
+verdicts. Handles and counter values are ignored, but missing rules, extra
+rules/chains/sets/maps, wrong UIDs, wrong chains, inverted or byte-based limits,
+and a surviving legacy table fail verification. An active oneshot or successful
+`nft` load by itself is never success evidence.
 
 While armed, an apply or read-back failure causes the tool to reapply and verify
 locked policy, then stop `user@<agent-UID>.service`. It returns failure even when
@@ -48,6 +52,14 @@ The failsafe restores dark observation instead. `diary-attended.service` reverts
 to locked/dark policy on stop, and both mode units follow global firewall service
 restarts. An out-of-band flush still requires explicit verification; unit active
 state alone is not a firewall check.
+
+The controller checks the NFLOG forwarder before recording a successful locked
+or attended transition and during every 30-second runtime audit check. Attended
+mode requires it both before and after activation; locked policy is applied
+before an unavailable forwarder can fail the transition. The forwarder's own
+watchdog covers a stuck receiver/worker and trusted-audit write failure. Runtime
+failure enters the locked failsafe; in dark mode this restores observation
+without stopping agents.
 
 The NFLOG reader accepts only the fixed AUD-02 and CTL-03 prefixes. Dark events
 remain simulated `would_deny` observations. Locked new/established events are
@@ -107,8 +119,8 @@ is mandatory even when a check fails.
 1. Run `systemd/test-network-policy-live` through `sudo-ask`. Its EXIT trap
    removes the arm file, reapplies and verifies dark policy, explicitly relocks
    the controller, and prints the final table. The armed portion checks locked
-   and attended transitions and explicit relock using the real structural
-   read-back.
+   and attended transitions, same-mode repair after out-of-band table flushes,
+   and explicit relock using real structural read-back.
 
 2. For the complete packet matrix, open a second owner-controlled root shell and
    establish an EXIT trap before arming:

@@ -24,6 +24,8 @@ RECEIVE_BUFFER = 4 * 1024 * 1024
 QUEUE_SIZE = 1024
 AUDIT_TIMEOUT = 2.0
 HEALTH_INTERVAL = 10.0
+WATCHDOG_INTERVAL = 5.0
+RECEIVE_TIMEOUT = 1.0
 SHUTDOWN_TIMEOUT = 5.0
 NETLINK_NETFILTER = 12
 NFNL_SUBSYS_ULOG = 4
@@ -87,6 +89,7 @@ class ShutdownRequested(Exception):
 class WorkerState:
     def __init__(self) -> None:
         self.reported_version = 0
+        self.audit_available = True
         self.in_flight: str | None = None
         self.sentinel_done = False
         self.exited = False
@@ -464,7 +467,13 @@ def _write_event(
 ) -> dict[str, Any]:
     state.in_flight = kind
     try:
-        return writer(socket_path, event)
+        reply = writer(socket_path, event)
+    except BaseException:
+        state.audit_available = False
+        raise
+    else:
+        state.audit_available = True
+        return reply
     finally:
         state.in_flight = None
 
@@ -542,6 +551,7 @@ def serve(
     state = state or WorkerState()
     work: queue.Queue[Any] = queue.Queue(maxsize=queue_size)
     sock = opener(group)
+    getattr(sock, "settimeout", lambda _value: None)(RECEIVE_TIMEOUT)
     worker = threading.Thread(
         target=_audit_worker,
         args=(work, loss, socket_path, writer, health_interval, state),
@@ -550,10 +560,21 @@ def serve(
     )
     worker.start()
     try:
+        last_watchdog = time.monotonic()
         sd_notify("READY=1")
         while True:
+            if not worker.is_alive():
+                raise NetworkAuditError("network audit worker stopped")
+            if not state.audit_available:
+                raise NetworkAuditError("trusted audit writer is unavailable")
+            now = time.monotonic()
+            if now - last_watchdog >= WATCHDOG_INTERVAL:
+                sd_notify("WATCHDOG=1")
+                last_watchdog = now
             try:
                 data = sock.recv(MAX_NETLINK_DATAGRAM)
+            except socket.timeout:
+                continue
             except OSError as exc:
                 if exc.errno == errno.ENOBUFS:
                     loss.add("enobufs")

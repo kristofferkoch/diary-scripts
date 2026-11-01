@@ -22,7 +22,14 @@ class FakeModes:
     def __init__(self) -> None:
         self.active = {"diary-locked.service"}
         self.calls: list[str] = []
+        self.health_checks = 0
         self.fail = False
+        self.network_audit_available = True
+
+    def verify_network_audit(self) -> None:
+        self.health_checks += 1
+        if not self.network_audit_available:
+            raise lock.LockError("injected NFLOG forwarder failure")
 
     def activate(self, mode: str) -> None:
         self.calls.append(mode)
@@ -265,6 +272,45 @@ def test_audit_health_failure_invokes_failsafe(tmp_path: Path) -> None:
     assert svc.status()["state"] == "LOCKED"
 
 
+def test_locked_transition_applies_policy_before_reporting_forwarder_failure(tmp_path: Path) -> None:
+    svc, modes, _, _, _ = controller(tmp_path)
+    modes.network_audit_available = False
+    with pytest.raises(lock.LockError, match="NFLOG"):
+        svc.enter_locked("explicit_lock")
+    assert modes.calls == ["locked"]
+    assert modes.active == {"diary-locked.service"}
+    assert svc.status()["state"] == "LOCKING"
+    modes.network_audit_available = True
+    svc.failsafe("request_failed")
+    assert svc.status()["state"] == "LOCKED"
+
+
+def test_attended_transition_requires_available_forwarder(tmp_path: Path) -> None:
+    svc, modes, _, _, _ = controller(tmp_path)
+    svc.startup()
+    modes.network_audit_available = False
+    with pytest.raises(lock.LockError, match="NFLOG"):
+        svc.break_glass(peer())
+    assert modes.calls == ["locked"]
+    assert "diary-attended.service" not in modes.active
+    modes.network_audit_available = True
+    svc.failsafe("request_failed")
+    assert svc.status()["state"] == "LOCKED"
+
+
+def test_runtime_forwarder_failure_invokes_failsafe(tmp_path: Path) -> None:
+    svc, modes, _, _, monotonic = controller(tmp_path)
+    svc.startup()
+    svc.break_glass(peer())
+    modes.network_audit_available = False
+    monotonic[0] += 31
+    with pytest.raises(lock.LockError, match="NFLOG"):
+        svc.maintenance()
+    modes.network_audit_available = True
+    svc.failsafe("supervision_failed")
+    assert svc.status()["state"] == "LOCKED"
+
+
 def test_failsafe_propagates_write_errors_and_retains_locking(tmp_path: Path) -> None:
     svc, modes, events, _, _ = controller(tmp_path)
     events.fail_emit = True
@@ -355,7 +401,7 @@ def test_systemd_mode_activation_uses_fixed_argv_and_verifies_conflicts() -> Non
         calls.append(argv)
         assert kwargs["env"] == {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
         assert "shell" not in kwargs
-        if argv[1] == "start":
+        if argv[1] == "restart":
             active.clear()
             active.add(argv[2])
             return SimpleNamespace(returncode=0)
@@ -365,9 +411,12 @@ def test_systemd_mode_activation_uses_fixed_argv_and_verifies_conflicts() -> Non
     modes.activate("attended")
     assert active == {"diary-attended.service"}
     assert all(call[0] == "/usr/bin/systemctl" for call in calls)
+    calls.clear()
+    modes.activate("attended")
+    assert calls[0] == ["/usr/bin/systemctl", "restart", "diary-attended.service"]
 
     def conflicting(argv, **kwargs):
-        if argv[1] == "start":
+        if argv[1] == "restart":
             return SimpleNamespace(returncode=0)
         return SimpleNamespace(returncode=0)
 
@@ -377,10 +426,19 @@ def test_systemd_mode_activation_uses_fixed_argv_and_verifies_conflicts() -> Non
 
 def test_systemd_uncertainty_is_not_treated_as_inactive() -> None:
     def run(argv, **kwargs):
-        return SimpleNamespace(returncode=0 if argv[1] == "start" else 4)
+        return SimpleNamespace(returncode=0 if argv[1] == "restart" else 4)
 
     with pytest.raises(lock.LockError, match="cannot verify"):
         lock.SystemdModes(runner=run).activate("locked")
+
+
+def test_systemd_forwarder_health_rejects_inactive_service() -> None:
+    def run(argv, **kwargs):
+        assert argv[1:] == ["is-active", "--quiet", "diary-network-auditd.service"]
+        return SimpleNamespace(returncode=3)
+
+    with pytest.raises(lock.LockError, match="NFLOG"):
+        lock.SystemdModes(runner=run).verify_network_audit()
 
 
 def test_break_glass_audit_event_is_warning_priority(tmp_path: Path) -> None:

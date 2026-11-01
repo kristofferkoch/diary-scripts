@@ -246,7 +246,7 @@ class SystemdModes:
         if mode not in {"locked", "attended"}:
             raise LockError("unsupported mode unit")
         selected = f"diary-{mode}.service"
-        result = self._run(["start", selected])
+        result = self._run(["restart", selected])
         if result.returncode != 0:
             raise LockError(f"could not activate {selected}")
         if not self._active(selected):
@@ -257,9 +257,15 @@ class SystemdModes:
         if any(self._active(unit) for unit in forbidden):
             raise LockError("conflicting mode unit remains active")
 
+    def verify_network_audit(self) -> None:
+        if not self._active("diary-network-auditd.service"):
+            raise LockError("NFLOG audit forwarder is unavailable")
+
 
 class ModeManager(Protocol):
     def activate(self, mode: str) -> None: ...
+
+    def verify_network_audit(self) -> None: ...
 
 
 class AuditSink(Protocol):
@@ -338,6 +344,7 @@ class Controller:
         with self.lock:
             self._save("LOCKING")
             self.modes.activate("locked")
+            self.modes.verify_network_audit()
             self._save("LOCKED")
             self.audit.emit("controller.transition", "lock", "observed", "LOCKED", reason)
             self.next_audit_check = self.monotonic() + AUDIT_HEALTH_INTERVAL
@@ -349,7 +356,9 @@ class Controller:
                 "local_owner_override", peer,
             )
             self._save("LOCKING")
+            self.modes.verify_network_audit()
             self.modes.activate("attended")
+            self.modes.verify_network_audit()
             self.deadline_monotonic = self.monotonic() + self.attended_seconds
             self._save("ATTENDED", self.clock() + self.attended_seconds)
             self.audit.emit(
@@ -369,6 +378,7 @@ class Controller:
                 self.enter_locked("attendance_expired")
             if now >= self.next_audit_check:
                 self.audit.ping()
+                self.modes.verify_network_audit()
                 self.next_audit_check = now + AUDIT_HEALTH_INTERVAL
 
     def failsafe(self, reason: str) -> None:
@@ -387,11 +397,16 @@ class Controller:
                 errors.append(exc)
             else:
                 try:
-                    self.store.save("LOCKED", self.clock())
+                    self.modes.verify_network_audit()
                 except (LockError, OSError) as exc:
                     errors.append(exc)
                 else:
-                    self.state = "LOCKED"
+                    try:
+                        self.store.save("LOCKED", self.clock())
+                    except (LockError, OSError) as exc:
+                        errors.append(exc)
+                    else:
+                        self.state = "LOCKED"
             try:
                 self.audit.emit("controller.failsafe", "lock", "error", self.state, reason)
             except (LockError, OSError) as exc:

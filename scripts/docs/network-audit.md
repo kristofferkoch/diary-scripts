@@ -52,7 +52,11 @@ A bounded 1,024-event queue decouples NFLOG reception from audit writes. Each
 audit socket operation has a two-second timeout; a stalled or unavailable
 writer therefore cannot apply backpressure to packet reception. Overflow and
 writer failures are counted, failed flow events are not retried, and health
-reporting is rate-limited to one attempt per 10 seconds. Detected loss emits a
+reporting is rate-limited to one attempt per 10 seconds. A failed audit write
+also marks the forwarder unhealthy: its bounded one-second receive loop exits
+and systemd restarts it rather than leaving apparently healthy attended
+observation. Healthy receive/worker/audit-writer state produces watchdog
+notifications every five seconds under `WatchdogSec=15`. Detected loss emits a
 bounded `network.audit_health` error when the writer can accept it, with
 `operation=receive` or `audit_write`. Exact cumulative sequence-gap, ENOBUFS,
 queue-overflow, and writer-failure counters also go to the forwarder's
@@ -70,8 +74,9 @@ any previously emitted loss evidence remains valid.
 The forwarder has only `AF_UNIX` and `AF_NETLINK` sockets and a capability
 bounding set containing only `CAP_NET_ADMIN`. If the forwarder itself stops,
 dependent rules are removed; this loses observation but never blocks traffic.
-An audit-writer outage is instead tolerated and reported until recovery.
-Restarting either AUD-02 service does not restart DSH or Kimi. The rules unit
+An audit-writer outage is counted and triggers a forwarder restart; AUD-02
+itself still never blocks traffic. Restarting either AUD-02 service does not
+restart DSH or Kimi. The rules unit
 verifies the table after loading and follows `firewalld`/`nftables` restart
 lifecycle, but an active oneshot is not proof that an out-of-band `nft flush`
 has not erased the table; always inspect the live table after global firewall

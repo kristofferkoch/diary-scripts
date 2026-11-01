@@ -59,13 +59,20 @@ the controller. The daemon then persists a fresh locked state; unreadable old
 state is replaced only after locked mode is active. If this cannot be done,
 startup fails and the failsafe remains responsible for locked mode.
 
-A lock request persists `LOCKING` before activating and verifying the locked
-unit, then persists `LOCKED`. A break-glass request emits its override audit,
-persists `LOCKING`, activates and verifies attended mode, and persists
-`ATTENDED` with a 15-minute expiry. Active attendance enforcement and remaining
-seconds use a monotonic deadline, so backward or forward wall-clock steps do not
-extend or prematurely expire the session. Audit health uses a fixed AUD-01
-journal heartbeat and exact emission read-back every 30 seconds.
+A lock request persists `LOCKING`, restarts and verifies the locked unit even if
+it was already active, verifies the NFLOG forwarder, then persists `LOCKED`.
+Applying locked policy deliberately precedes the forwarder check so an audit
+outage cannot prevent containment. A break-glass request emits its override
+audit, persists `LOCKING`, requires a healthy forwarder before and after
+restarting attended mode, and only then persists `ATTENDED` with a 15-minute
+expiry. Same-mode attended requests also reapply and read back the rules. Active
+attendance enforcement and remaining seconds use a monotonic deadline, so
+backward or forward wall-clock steps do not extend or prematurely expire the
+session. Runtime health checks combine the fixed AUD-01 journal heartbeat and
+exact emission read-back with an active NFLOG-forwarder check every 30 seconds.
+The forwarder has its own 15-second systemd watchdog and exits when its worker
+or trusted audit writer fails, allowing controller supervision to invoke the
+locked failsafe in attended, locked, and dark modes.
 
 Failsafe first retains/persists `LOCKING`; it records `LOCKED` only after locked
 mode and conflict checks succeed. Mode, state, and audit errors are propagated.

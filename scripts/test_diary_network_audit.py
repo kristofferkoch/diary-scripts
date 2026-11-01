@@ -494,6 +494,39 @@ def test_enobufs_is_reported_and_receiving_continues(monkeypatch: pytest.MonkeyP
     assert loss.snapshot()[1]["enobufs"] == 1
 
 
+def test_serve_fails_closed_when_audit_writer_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeSocket:
+        def __init__(self) -> None:
+            self.reads = 0
+            self.closed = False
+
+        def recv(self, _size: int) -> bytes:
+            self.reads += 1
+            if self.reads == 1:
+                return packet_message(ipv4())
+            raise socket.timeout("idle")
+
+        def close(self) -> None:
+            self.closed = True
+
+    sock = FakeSocket()
+    loss = network.LossTracker()
+    state = network.WorkerState()
+
+    def writer(_path, _event):
+        raise network.NetworkAuditError("audit socket unavailable")
+
+    monkeypatch.setattr(network, "sd_notify", lambda _: True)
+    with pytest.raises(network.NetworkAuditError, match="audit writer is unavailable"):
+        network.serve(
+            GROUP, UID, GID, "/run/test/audit.sock",
+            opener=lambda _: sock, writer=writer, loss=loss, state=state,
+        )
+    assert state.audit_available is False
+    assert loss.snapshot()[1]["audit_unavailable"] >= 1
+    assert sock.closed is True
+
+
 def test_audit_writer_outage_emits_bounded_health_after_recovery() -> None:
     work = network.queue.Queue()
     loss = network.LossTracker()

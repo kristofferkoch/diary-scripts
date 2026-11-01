@@ -149,6 +149,8 @@ def test_dark_policy_preserves_audit_only_new_and_established_observation() -> N
         lambda value: value["nftables"].append({"set": {"family": "inet", "table": policy.TABLE, "name": "unexpected"}}),
         lambda value: value["nftables"][2]["chain"].update(policy="drop"),
         lambda value: value["nftables"][3]["rule"]["expr"][0]["match"].update(right=UID + 1),
+        lambda value: value["nftables"][5]["rule"]["expr"][4]["limit"].update(inv=True),
+        lambda value: value["nftables"][5]["rule"]["expr"][4]["limit"].update(rate_unit="bytes"),
     ],
 )
 def test_missing_or_extra_live_state_is_rejected(mutation) -> None:
@@ -179,6 +181,30 @@ def test_armed_transitions_apply_and_read_back_each_mode(tmp_path: Path) -> None
     manager.activate("attended")
     manager.verify("attended")
     assert kernel.mode == "attended"
+    assert kernel.stops == []
+
+
+@pytest.mark.parametrize(("mode", "corrupted"), [("locked", "dark"), ("attended", "locked")])
+def test_same_mode_activation_replaces_out_of_band_policy(
+    tmp_path: Path, mode: str, corrupted: str,
+) -> None:
+    kernel = FakeKernel(tmp_path)
+    manager = kernel.manager()
+    manager.activate(mode)
+    kernel.mode = corrupted
+    manager.activate(mode)
+    assert kernel.mode == mode
+    assert kernel.stops == []
+    assert sum(call[1:3] == ["--file", "-"] for call in kernel.calls) == 2
+
+
+def test_repeated_dark_transition_repairs_out_of_band_drop_rules(tmp_path: Path) -> None:
+    kernel = FakeKernel(tmp_path, armed=False)
+    manager = kernel.manager()
+    kernel.mode = "locked"
+    manager.activate("locked")
+    manager.verify("locked")
+    assert kernel.mode == "dark"
     assert kernel.stops == []
 
 
@@ -259,6 +285,12 @@ def test_real_nftables_readback_and_dark_lifecycle(tmp_path: Path) -> None:
     manager = policy.NetworkPolicy(os.geteuid(), str(arm), runner=isolated_runner)
     manager.activate("locked")
     manager.verify("locked")
+    manager._run(["flush", "table", "inet", policy.TABLE])
+    manager.activate("locked")
+    manager.verify("locked")
+    manager.activate("attended")
+    manager.verify("attended")
+    manager._run(["flush", "table", "inet", policy.TABLE])
     manager.activate("attended")
     manager.verify("attended")
     arm.unlink()
