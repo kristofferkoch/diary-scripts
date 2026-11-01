@@ -18,6 +18,17 @@ from scripts import diary_network_audit as network
 UID = 1001
 GID = 1002
 GROUP = 30
+WIRE_IPV4 = bytes.fromhex(
+    "640000000004000007000000000000000200001e080001000000000014000a00"
+    "64696172792d61756469742d6e65770008000b00000003e908000e00000003ea"
+    "08000c00000000071c000900450000180000000040060000c000020ac6336414109201bb"
+)
+WIRE_IPV6 = bytes.fromhex(
+    "780000000004000007000000000000000a00001e080001000000000014000a00"
+    "64696172792d61756469742d6e65770008000b00000003e908000e00000003ea"
+    "08000c000000000730000900600000040000064020010db8000000000000000000000010"
+    "20010db8000000000000000000000020109201bb"
+)
 
 
 def ipv4(protocol: int = network.TCP, port: int = 443, fragment: int = 0) -> bytes:
@@ -57,12 +68,14 @@ def packet_message(
     uid: int = UID,
     gid: int = GID,
     group: int = GROUP,
+    sequence: int = 7,
 ) -> bytes:
     body = struct.pack("BBH", family, 0, socket.htons(group))
     body += network._attribute(network.NFULA_PACKET_HDR, bytes(4))
     body += network._attribute(network.NFULA_PREFIX, prefix)
-    body += network._attribute(network.NFULA_UID, struct.pack("I", uid))
-    body += network._attribute(network.NFULA_GID, struct.pack("I", gid))
+    body += network._attribute(network.NFULA_UID, struct.pack("!I", uid))
+    body += network._attribute(network.NFULA_GID, struct.pack("!I", gid))
+    body += network._attribute(network.NFULA_SEQ, struct.pack("!I", sequence))
     body += network._attribute(network.NFULA_PAYLOAD, packet)
     return network._message(network.NFULNL_MSG_PACKET, body, sequence=7)
 
@@ -82,6 +95,15 @@ def test_bind_request_subscribes_to_bounded_packet_copy() -> None:
     assert struct.unpack("!IBB", attributes[network.NFULA_CFG_MODE]) == (
         network.SNAPLEN, network.NFULNL_COPY_PACKET, 0,
     )
+    assert struct.unpack("!H", attributes[network.NFULA_CFG_FLAGS])[0] == network.NFULNL_CFG_F_SEQ
+
+
+@pytest.mark.parametrize(("wire", "destination"), [(WIRE_IPV4, "198.51.100.20"), (WIRE_IPV6, "2001:db8::20")])
+def test_literal_kernel_wire_fixtures_use_big_endian_identity(wire: bytes, destination: str) -> None:
+    events = network.events_from_datagram(wire, GROUP, UID, GID)
+    assert len(events) == 1
+    assert events[0]["caller"] == {"pid": 0, "uid": 1001, "gid": 1002}
+    assert events[0]["destination_ip"] == destination
 
 
 @pytest.mark.parametrize("group", [0, -1, 65_536])
@@ -199,6 +221,17 @@ def test_malformed_netlink_messages_fail_closed(data: bytes) -> None:
             network.events_from_datagram(data, GROUP, UID, GID)
 
 
+def test_sequence_gaps_and_wraparound_are_counted() -> None:
+    loss = network.LossTracker()
+    data = packet_message(ipv4(), sequence=10) + packet_message(ipv4(), sequence=12)
+    assert len(network.events_from_datagram(data, GROUP, UID, GID, loss.sequence)) == 2
+    assert loss.snapshot()[1] == {"sequence_gap": 1}
+    wrapped = network.LossTracker()
+    wrapped.sequence(0xFFFF_FFFF)
+    wrapped.sequence(0)
+    assert wrapped.snapshot()[1] == {}
+
+
 def test_serve_forwards_only_parsed_events_and_closes_socket(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeSocket:
         def __init__(self) -> None:
@@ -216,18 +249,203 @@ def test_serve_forwards_only_parsed_events_and_closes_socket(monkeypatch: pytest
 
     sock = FakeSocket()
     written = []
+    delivered = threading.Event()
     ready = []
+
+    def writer(path, event):
+        written.append((path, event))
+        delivered.set()
+        return {"ok": True}
+
     monkeypatch.setattr(network, "sd_notify", lambda message: ready.append(message) or True)
     with pytest.raises(OSError, match="stop test"):
         network.serve(
             GROUP, UID, GID, "/run/test/audit.sock",
             opener=lambda group: sock,
-            writer=lambda path, event: written.append((path, event)) or {"ok": True},
+            writer=writer,
         )
+    assert delivered.wait(2)
     assert ready == ["READY=1"]
     assert sock.closed is True
     assert written[0][0] == "/run/test/audit.sock"
     assert written[0][1]["caller"]["uid"] == UID
+
+
+def test_open_nflog_sizes_receive_buffer_before_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeSocket:
+        def __init__(self) -> None:
+            self.options = []
+            self.bound = None
+            self.timeouts = []
+            self.sent = None
+
+        def setsockopt(self, *args) -> None:
+            self.options.append(args)
+
+        def bind(self, address) -> None:
+            self.bound = address
+
+        def settimeout(self, value) -> None:
+            self.timeouts.append(value)
+
+        def sendto(self, data, address) -> None:
+            self.sent = (data, address)
+
+        def close(self) -> None:
+            pass
+
+    sock = FakeSocket()
+    monkeypatch.setattr(network.socket, "socket", lambda *args: sock)
+    monkeypatch.setattr(network, "_acknowledge", lambda *args: None)
+    assert network.open_nflog(GROUP) is sock
+    assert sock.options == [(socket.SOL_SOCKET, socket.SO_RCVBUF, network.RECEIVE_BUFFER)]
+    assert sock.bound == (0, 0)
+    assert sock.timeouts == [5.0, None]
+    assert sock.sent is not None
+    assert sock.sent[1] == (0, 0)
+
+
+def test_audit_socket_stall_has_short_bounded_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    class StalledSocket:
+        def __init__(self) -> None:
+            self.timeout = None
+            self.closed = False
+
+        def settimeout(self, value) -> None:
+            self.timeout = value
+
+        def connect(self, _path) -> None:
+            pass
+
+        def sendall(self, _data) -> None:
+            pass
+
+        def recv(self, _size) -> bytes:
+            raise TimeoutError("stalled")
+
+        def close(self) -> None:
+            self.closed = True
+
+    sock = StalledSocket()
+    monkeypatch.setattr(network.socket, "socket", lambda *args: sock)
+    with pytest.raises(network.NetworkAuditError, match="stalled"):
+        network.request("/run/test/stalled.sock", {"event": "test"})
+    assert sock.timeout == network.AUDIT_TIMEOUT == 2.0
+    assert sock.closed is True
+
+
+def test_burst_overflow_does_not_block_receiver_and_emits_health(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeSocket:
+        def __init__(self) -> None:
+            self.reads = 0
+
+        def recv(self, _size) -> bytes:
+            self.reads += 1
+            if self.reads == 1:
+                return b"".join(packet_message(ipv4(), sequence=index) for index in range(1, 5))
+            raise OSError("stop test")
+
+        def close(self) -> None:
+            pass
+
+    writer_started = threading.Event()
+    release_writer = threading.Event()
+    health_written = threading.Event()
+    flows = []
+    health = []
+
+    def writer(_path, event):
+        if event["event"] == "network.audit_health":
+            health.append(event)
+            health_written.set()
+        else:
+            flows.append(event)
+            writer_started.set()
+            release_writer.wait(2)
+        return {"ok": True}
+
+    loss = network.LossTracker()
+    monkeypatch.setattr(network, "sd_notify", lambda _: True)
+    with pytest.raises(OSError, match="stop test"):
+        network.serve(
+            GROUP, UID, GID, "/run/test/audit.sock",
+            opener=lambda _: FakeSocket(), writer=writer,
+            queue_size=1, health_interval=0, loss=loss,
+        )
+    assert writer_started.wait(2)
+    assert not release_writer.is_set()
+    assert loss.snapshot()[1]["queue_overflow"] >= 1
+    release_writer.set()
+    assert health_written.wait(2)
+    assert health[0]["operation"] == "receive"
+    assert health[0]["reason"] == "observation_loss"
+    assert len(flows) < 4
+
+
+def test_enobufs_is_reported_and_receiving_continues(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeSocket:
+        def __init__(self) -> None:
+            self.reads = 0
+
+        def recv(self, _size) -> bytes:
+            self.reads += 1
+            if self.reads == 1:
+                raise OSError(network.errno.ENOBUFS, "receive buffer exhausted")
+            if self.reads == 2:
+                return packet_message(ipv4())
+            raise OSError("stop test")
+
+        def close(self) -> None:
+            pass
+
+    flow_written = threading.Event()
+    health_written = threading.Event()
+
+    def writer(_path, event):
+        if event["event"] == "network.flow":
+            flow_written.set()
+        else:
+            health_written.set()
+        return {"ok": True}
+
+    loss = network.LossTracker()
+    monkeypatch.setattr(network, "sd_notify", lambda _: True)
+    with pytest.raises(OSError, match="stop test"):
+        network.serve(
+            GROUP, UID, GID, "/run/test/audit.sock",
+            opener=lambda _: FakeSocket(), writer=writer,
+            health_interval=0, loss=loss,
+        )
+    assert flow_written.wait(2)
+    assert health_written.wait(2)
+    assert loss.snapshot()[1]["enobufs"] == 1
+
+
+def test_audit_writer_outage_emits_bounded_health_after_recovery() -> None:
+    work = network.queue.Queue()
+    loss = network.LossTracker()
+    recovered = threading.Event()
+    attempts = []
+
+    def writer(_path, event):
+        attempts.append(event)
+        if len(attempts) == 1:
+            raise network.NetworkAuditError("audit socket unavailable")
+        recovered.set()
+        return {"ok": True}
+
+    thread = threading.Thread(
+        target=network._audit_worker,
+        args=(work, loss, "/run/test/audit.sock", writer, 0),
+        daemon=True,
+    )
+    thread.start()
+    work.put({"event": "network.flow"})
+    assert recovered.wait(2)
+    assert attempts[1]["event"] == "network.audit_health"
+    assert attempts[1]["operation"] == "audit_write"
+    assert attempts[1]["decision"] == "error"
+    assert loss.snapshot()[1]["audit_unavailable"] == 1
 
 
 def test_daemon_requires_root(monkeypatch: pytest.MonkeyPatch) -> None:

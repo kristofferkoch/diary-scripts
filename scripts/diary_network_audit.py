@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import ipaddress
 import json
 import os
+import queue
 import socket
 import struct
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator
 from typing import Any
@@ -16,12 +19,17 @@ from typing import Any
 DEFAULT_GROUP = 30
 DEFAULT_SOCKET = "/run/diary-audit/socket"
 SNAPLEN = 256
+RECEIVE_BUFFER = 4 * 1024 * 1024
+QUEUE_SIZE = 1024
+AUDIT_TIMEOUT = 2.0
+HEALTH_INTERVAL = 10.0
 NETLINK_NETFILTER = 12
 NFNL_SUBSYS_ULOG = 4
 NFULNL_MSG_PACKET = (NFNL_SUBSYS_ULOG << 8)
 NFULNL_MSG_CONFIG = NFULNL_MSG_PACKET | 1
 NFULNL_CFG_CMD_BIND = 1
 NFULNL_COPY_PACKET = 2
+NFULNL_CFG_F_SEQ = 0x0001
 NLM_F_REQUEST = 0x01
 NLM_F_ACK = 0x04
 NLMSG_ERROR = 0x02
@@ -30,9 +38,11 @@ NFULA_PACKET_HDR = 1
 NFULA_PAYLOAD = 9
 NFULA_PREFIX = 10
 NFULA_UID = 11
+NFULA_SEQ = 12
 NFULA_GID = 14
 NFULA_CFG_CMD = 1
 NFULA_CFG_MODE = 2
+NFULA_CFG_FLAGS = 5
 PREFIX_OPERATIONS = {
     "diary-audit-new": "connect",
     "diary-audit-established": "flow",
@@ -53,6 +63,39 @@ class NetworkAuditError(ValueError):
 
 class UnsupportedPacket(ValueError):
     """A packet has no auditable transport flow in the copied bytes."""
+
+
+class LossTracker:
+    """Thread-safe, bounded-cardinality observation and writer failure counters."""
+
+    KINDS = ("sequence_gap", "enobufs", "queue_overflow", "audit_unavailable")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._counts = {kind: 0 for kind in self.KINDS}
+        self._version = 0
+        self._last_sequence: int | None = None
+
+    def add(self, kind: str, count: int = 1) -> None:
+        if kind not in self.KINDS or count < 1:
+            raise NetworkAuditError("invalid network audit loss counter")
+        with self._lock:
+            self._counts[kind] += count
+            self._version += 1
+
+    def sequence(self, value: int) -> None:
+        with self._lock:
+            if self._last_sequence is not None:
+                expected = (self._last_sequence + 1) & 0xFFFF_FFFF
+                if value != expected:
+                    gap = (value - expected) & 0xFFFF_FFFF
+                    self._counts["sequence_gap"] += min(gap, 0x7FFF_FFFF) or 1
+                    self._version += 1
+            self._last_sequence = value
+
+    def snapshot(self) -> tuple[int, dict[str, int]]:
+        with self._lock:
+            return self._version, {kind: count for kind, count in self._counts.items() if count}
 
 
 def _aligned(length: int) -> int:
@@ -105,6 +148,7 @@ def bind_request(group: int, sequence: int) -> bytes:
     body = struct.pack("BBH", socket.AF_UNSPEC, 0, socket.htons(group))
     body += _attribute(NFULA_CFG_CMD, bytes([NFULNL_CFG_CMD_BIND]))
     body += _attribute(NFULA_CFG_MODE, struct.pack("!IBB", SNAPLEN, NFULNL_COPY_PACKET, 0))
+    body += _attribute(NFULA_CFG_FLAGS, struct.pack("!H", NFULNL_CFG_F_SEQ))
     header = struct.pack(
         "IHHII", 16 + len(body), NFULNL_MSG_CONFIG, NLM_F_REQUEST | NLM_F_ACK, sequence, 0,
     )
@@ -128,6 +172,7 @@ def _acknowledge(sock: socket.socket, sequence: int) -> None:
 def open_nflog(group: int) -> socket.socket:
     sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, NETLINK_NETFILTER)
     try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, RECEIVE_BUFFER)
         sock.bind((0, 0))
         sock.settimeout(5.0)
         sequence = int(time.monotonic_ns() & 0x7FFF_FFFF)
@@ -204,6 +249,7 @@ def event_from_packet_message(
     expected_group: int,
     expected_uid: int,
     expected_gid: int,
+    sequence_callback: Callable[[int], None] | None = None,
 ) -> dict[str, Any]:
     if len(payload) < 4:
         raise NetworkAuditError("truncated NFLOG packet header")
@@ -211,9 +257,9 @@ def event_from_packet_message(
     if version != 0 or socket.ntohs(resource) != expected_group:
         raise NetworkAuditError("unexpected NFLOG version or group")
     attributes = dict(_attributes(payload[4:]))
-    required = {NFULA_PREFIX, NFULA_PAYLOAD, NFULA_UID, NFULA_GID}
+    required = {NFULA_PREFIX, NFULA_PAYLOAD, NFULA_UID, NFULA_GID, NFULA_SEQ}
     if not required <= attributes.keys():
-        raise NetworkAuditError("NFLOG packet lacks payload or trusted identity")
+        raise NetworkAuditError("NFLOG packet lacks payload, sequence, or trusted identity")
     try:
         prefix = attributes[NFULA_PREFIX].rstrip(b"\0").decode("ascii")
     except UnicodeDecodeError as exc:
@@ -221,13 +267,16 @@ def event_from_packet_message(
     operation = PREFIX_OPERATIONS.get(prefix)
     if operation is None:
         raise NetworkAuditError("NFLOG packet has an unexpected prefix")
-    if len(attributes[NFULA_UID]) != 4 or len(attributes[NFULA_GID]) != 4:
-        raise NetworkAuditError("invalid NFLOG identity attribute")
-    uid = struct.unpack("I", attributes[NFULA_UID])[0]
-    gid = struct.unpack("I", attributes[NFULA_GID])[0]
+    if any(len(attributes[field]) != 4 for field in (NFULA_UID, NFULA_GID, NFULA_SEQ)):
+        raise NetworkAuditError("invalid NFLOG identity or sequence attribute")
+    uid = struct.unpack("!I", attributes[NFULA_UID])[0]
+    gid = struct.unpack("!I", attributes[NFULA_GID])[0]
+    sequence = struct.unpack("!I", attributes[NFULA_SEQ])[0]
     if uid != expected_uid or gid != expected_gid:
         raise NetworkAuditError("NFLOG packet identity does not match agent")
     destination, port, protocol = flow_from_packet(attributes[NFULA_PAYLOAD], family)
+    if sequence_callback is not None:
+        sequence_callback(sequence)
     return {
         "event": "network.flow",
         "component": "nftables",
@@ -247,6 +296,7 @@ def events_from_datagram(
     expected_group: int,
     expected_uid: int,
     expected_gid: int,
+    sequence_callback: Callable[[int], None] | None = None,
 ) -> list[dict[str, Any]]:
     events = []
     for kind, _sequence, payload in _messages(data):
@@ -254,7 +304,7 @@ def events_from_datagram(
             continue
         try:
             events.append(event_from_packet_message(
-                payload, expected_group, expected_uid, expected_gid,
+                payload, expected_group, expected_uid, expected_gid, sequence_callback,
             ))
         except UnsupportedPacket:
             continue
@@ -264,7 +314,7 @@ def events_from_datagram(
 def request(socket_path: str, event: dict[str, Any]) -> dict[str, Any]:
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        sock.settimeout(40.0)
+        sock.settimeout(AUDIT_TIMEOUT)
         sock.connect(socket_path)
         value = {"cmd": "write", "event": event}
         sock.sendall(json.dumps(value, separators=(",", ":")).encode("ascii") + b"\n")
@@ -306,6 +356,51 @@ def sd_notify(message: str) -> bool:
     return True
 
 
+def health_event(counts: dict[str, int]) -> dict[str, Any]:
+    operation = "receive" if any(counts.get(kind) for kind in LossTracker.KINDS[:3]) else "audit_write"
+    return {
+        "event": "network.audit_health",
+        "component": "nflog",
+        "operation": operation,
+        "decision": "error",
+        "lock_state": "not_applicable",
+        "reason": "observation_loss",
+        "unit": "diary-network-auditd.service",
+    }
+
+
+def _audit_worker(
+    work: queue.Queue[dict[str, Any]],
+    loss: LossTracker,
+    socket_path: str,
+    writer: Callable[[str, dict[str, Any]], dict[str, Any]],
+    health_interval: float,
+) -> None:
+    reported_version = 0
+    last_attempt = 0.0
+    while True:
+        version, counts = loss.snapshot()
+        now = time.monotonic()
+        if version != reported_version and now - last_attempt >= health_interval:
+            last_attempt = now
+            summary = " ".join(f"{kind}={count}" for kind, count in sorted(counts.items()))
+            print(f"diary-network-auditd: observation loss: {summary}", file=sys.stderr, flush=True)
+            try:
+                writer(socket_path, health_event(counts))
+            except (NetworkAuditError, OSError):
+                loss.add("audit_unavailable")
+            else:
+                reported_version = version
+        try:
+            event = work.get(timeout=0.5)
+        except queue.Empty:
+            continue
+        try:
+            writer(socket_path, event)
+        except (NetworkAuditError, OSError):
+            loss.add("audit_unavailable")
+
+
 def serve(
     group: int,
     uid: int,
@@ -313,14 +408,36 @@ def serve(
     socket_path: str,
     opener: Callable[[int], Any] = open_nflog,
     writer: Callable[[str, dict[str, Any]], dict[str, Any]] = request,
+    queue_size: int = QUEUE_SIZE,
+    health_interval: float = HEALTH_INTERVAL,
+    loss: LossTracker | None = None,
 ) -> None:
+    loss = loss or LossTracker()
+    work: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=queue_size)
     sock = opener(group)
+    worker = threading.Thread(
+        target=_audit_worker,
+        args=(work, loss, socket_path, writer, health_interval),
+        name="diary-network-audit-writer",
+        daemon=True,
+    )
+    worker.start()
     try:
         sd_notify("READY=1")
         while True:
-            data = sock.recv(MAX_NETLINK_DATAGRAM)
-            for event in events_from_datagram(data, group, uid, gid):
-                writer(socket_path, event)
+            try:
+                data = sock.recv(MAX_NETLINK_DATAGRAM)
+            except OSError as exc:
+                if exc.errno == errno.ENOBUFS:
+                    loss.add("enobufs")
+                    continue
+                raise
+            events = events_from_datagram(data, group, uid, gid, loss.sequence)
+            for event in events:
+                try:
+                    work.put_nowait(event)
+                except queue.Full:
+                    loss.add("queue_overflow")
     finally:
         sock.close()
 
