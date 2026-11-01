@@ -145,6 +145,10 @@ def test_urls_and_obfuscated_urls_are_removed(hostile: str):
         ("user@例子.测试", "user@"),
         ("user@例子。测试", "user@"),
         ("用户@bücher.de", "用户@"),
+        ("你好.世界", "你好"),
+        ("你好。世界", "你好"),
+        ("Visit 你好.世界", "你好"),
+        ("prefix 你好。世界 suffix", "你好"),
     ],
 )
 def test_international_and_protocol_relative_urls_are_removed(hostile: str, forbidden: str):
@@ -155,10 +159,7 @@ def test_international_and_protocol_relative_urls_are_removed(hostile: str, forb
 
 @pytest.mark.parametrize(
     "ordinary",
-    [
-        "Use // as a separator", "你好。世界", "你好.世界", "a。b", "Version 1。2",
-        "1.2", "path/to/file",
-    ],
+    ["Use // as a separator", "a。b", "Version 1。2", "1.2", "path/to/file"],
 )
 def test_url_detection_preserves_ordinary_text(ordinary: str):
     assert sanitize_field(ordinary, limit=MAX_SUMMARY) == ordinary

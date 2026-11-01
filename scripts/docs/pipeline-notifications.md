@@ -32,9 +32,12 @@ line. The sanitizer removes terminal escape/control sequences, bidi and
 zero-width formatting, private-use/surrogate code points, HTML and Markdown
 formatting, and URLs (including common obfuscated forms). Compatibility
 normalization prevents full-width or mathematical styled text from masquerading
-as template formatting. Summary/deadline/reference output is capped at
-500/80/120 characters respectively. Fixed templates supply all line breaks and
-labels.
+as template formatting. Domain-shaped text is always treated as a URL, including
+bare internationalized domains and Unicode dot separators, even when the same
+characters could be read as prose; there are no literal exceptions. Text without
+a valid domain shape is preserved. Summary/deadline/reference output is capped
+at 500/80/120 characters respectively. Fixed templates supply all line breaks
+and labels.
 
 ## Durable decisions and frequency limits
 
