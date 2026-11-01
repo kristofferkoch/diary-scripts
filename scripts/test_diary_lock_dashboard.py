@@ -7,6 +7,8 @@ import http.client
 import json
 import os
 import pwd
+import socket
+import stat
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -139,6 +141,36 @@ def test_snapshot_uses_only_fixed_read_requests_and_groups_findings() -> None:
     assert all(component["available"] for component in snapshot["components"])
 
 
+def test_actual_summarize_output_normalizes_journal_numeric_strings() -> None:
+    entry = {
+        "DIARY_AUDIT_SCHEMA_VERSION": "1",
+        "DIARY_AUDIT_EVENT": "network.flow",
+        "DIARY_AUDIT_COMPONENT": "network-observer",
+        "DIARY_AUDIT_OPERATION": "connect",
+        "DIARY_AUDIT_DECISION": "would_deny",
+        "DIARY_AUDIT_LOCK_STATE": "locked",
+        "DIARY_AUDIT_DESTINATION_IP": "192.0.2.10",
+        "DIARY_AUDIT_DESTINATION_PORT": "443",
+        "DIARY_AUDIT_PROTOCOL": "tcp",
+        "DIARY_AUDIT_CALLER_UID": "1001",
+        "DIARY_AUDIT_FINGERPRINT": "e" * 64,
+        "DIARY_AUDIT_EMISSION_ID": "f" * 32,
+        "DIARY_AUDIT_NEW_COUNT": "2",
+        "DIARY_AUDIT_FIRST_SEEN_US": "1000000",
+        "DIARY_AUDIT_LAST_SEEN_US": "2000000",
+        "__REALTIME_TIMESTAMP": "2000000",
+    }
+    summarized = audit.summarize([entry], "baseline", NOW - dt.timedelta(days=1), NOW, 100)
+    summarized["ok"] = True
+    assert summarized["groups"][0]["destination_port"] == "443"
+    assert summarized["groups"][0]["caller_uid"] == "1001"
+    snapshot = reader(FakeSources(report=summarized)).snapshot()
+    assert snapshot["report"]["available"] is True
+    group = snapshot["report"]["groups"]["network"][0]
+    assert group["destination_port"] == 443
+    assert group["caller_uid"] == 1001
+
+
 @pytest.mark.parametrize("state", ["LOCKING", "LOCKED", "ATTENDED"])
 def test_authoritative_states_and_attendance_are_preserved(state: str) -> None:
     snapshot = reader(FakeSources(controller=controller_reply(state))).snapshot()
@@ -181,6 +213,24 @@ def test_malformed_report_and_group_fail_visibly() -> None:
     malformed = clean_report()
     malformed["groups"][0]["count"] = -1
     assert reader(FakeSources(report=malformed)).snapshot()["report"]["available"] is False
+    malformed = clean_report()
+    malformed["groups"][0]["destination_port"] = "443x"
+    assert reader(FakeSources(report=malformed)).snapshot()["report"]["available"] is False
+
+
+def test_truncated_report_warns_and_does_not_imply_categories_are_empty() -> None:
+    report = clean_report()
+    report["groups"] = []
+    report["event_count"] = 0
+    report["record_count"] = 10_000
+    report["truncated"] = True
+    page = dashboard.render(reader(FakeSources(report=report)).snapshot())
+    assert '<p class="truncation"><strong>Report truncated:</strong>' in page
+    assert "Only returned records are shown; omitted records may contain additional findings." in page
+    assert page.count("No findings in the returned records.") == 4
+    assert page.count("omitted records may contain findings") == 4
+    assert "No findings in this 24-hour report" not in page
+    assert "10000 returned records" in page
 
 
 def test_html_escapes_metadata_and_has_no_state_changing_controls() -> None:
@@ -194,12 +244,32 @@ def test_html_escapes_metadata_and_has_no_state_changing_controls() -> None:
     assert "Enforcement: dark / audit-only" in page
 
 
+class UnixHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, path: str) -> None:
+        super().__init__("localhost", timeout=5)
+        self.socket_path = path
+
+    def connect(self) -> None:
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(5)
+        self.sock.connect(self.socket_path)
+
+
 class RunningServer:
-    def __init__(self, sources: FakeSources) -> None:
-        self.server = dashboard.DashboardServer(("127.0.0.1", 0), reader(sources))
+    def __init__(
+        self,
+        tmp_path: Path,
+        sources: FakeSources,
+        caddy_uid: int | None = None,
+    ) -> None:
+        self.server = dashboard.DashboardServer(
+            str(tmp_path / "dashboard.sock"),
+            reader(sources),
+            os.geteuid() if caddy_uid is None else caddy_uid,
+            os.getegid(),
+        )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
-        self.port = self.server.server_address[1]
 
     def request(
         self,
@@ -207,7 +277,7 @@ class RunningServer:
         path: str,
         headers: dict[str, str] | None = None,
     ) -> tuple[int, dict[str, str], bytes]:
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        connection = UnixHTTPConnection(self.server.path)
         connection.request(method, path, headers=headers or {})
         response = connection.getresponse()
         body = response.read()
@@ -222,9 +292,9 @@ class RunningServer:
 
 
 @pytest.fixture
-def web() -> Any:
+def web(tmp_path: Path) -> Any:
     sources = FakeSources()
-    server = RunningServer(sources)
+    server = RunningServer(tmp_path, sources)
     try:
         yield server, sources
     finally:
@@ -233,6 +303,22 @@ def web() -> Any:
 
 def owner_headers() -> dict[str, str]:
     return {"Remote-User": "kek", "Remote-Groups": "other,lock-owner"}
+
+
+def test_unix_socket_denies_forged_headers_from_non_caddy_peer(tmp_path: Path) -> None:
+    sources = FakeSources()
+    server = RunningServer(tmp_path, sources, caddy_uid=os.geteuid() + 1)
+    try:
+        info = os.stat(server.server.path)
+        assert stat.S_IMODE(info.st_mode) == 0o660
+        assert info.st_gid == os.getegid()
+        status, _, _ = server.request("GET", "/lock/api/status", owner_headers())
+        assert status == 403
+        status, _, _ = server.request("POST", "/lock/api/status", owner_headers())
+        assert status == 403
+        assert sources.calls == []
+    finally:
+        server.close()
 
 
 def test_http_api_and_ui_require_independent_owner_headers(web: Any) -> None:

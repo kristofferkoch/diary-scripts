@@ -8,17 +8,21 @@ import html
 import json
 import math
 import os
+import pwd
 import re
 import socket
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import socketserver
+import struct
+from http.server import BaseHTTPRequestHandler
+from pathlib import Path
 from typing import Any, Callable, cast
 from urllib.parse import urlsplit
 
 SCHEMA_VERSION = 1
-DEFAULT_LISTEN = "127.0.0.1"
-DEFAULT_PORT = 9093
+DEFAULT_SOCKET = "/run/diary-lock-dashboard/http.sock"
 DEFAULT_CONTROLLER_SOCKET = "/run/diary-lock/socket"
 DEFAULT_AUDIT_SOCKET = "/run/diary-audit/socket"
+DEFAULT_CADDY_USER = "caddy"
 DEFAULT_OWNER = "kek"
 DEFAULT_OWNER_GROUP = "lock-owner"
 ENFORCEMENT_LABEL = "Enforcement: dark / audit-only"
@@ -70,6 +74,8 @@ def _number(value: object, field: str) -> float | int | None:
 
 
 def _count(value: object, field: str) -> int:
+    if isinstance(value, str) and re.fullmatch(r"[0-9]+", value):
+        value = int(value)
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise DashboardError(f"invalid {field}")
     return value
@@ -302,17 +308,25 @@ def render(snapshot: dict[str, Any]) -> str:
         if not report["available"]:
             content = "<p class=\"bad\">Findings unavailable: the trusted audit report could not be read.</p>"
         elif not report["groups"][kind]:
-            content = "<p>No findings in this 24-hour report.</p>"
+            content = "<p>No findings in the returned records."
+            if report["truncated"]:
+                content += " The report is truncated, so omitted records may contain findings."
+            content += "</p>"
         else:
             content = "".join(_group_html(group) for group in report["groups"][kind])
         sections.append(f"<section><h3>{title} findings</h3>{content}</section>")
-    report_status = (
-        "<p class=\"bad\">Audit report unavailable. Empty findings are not being inferred.</p>"
-        if not report["available"] else
-        f"<p>Window {_escape(report['since'])} to {_escape(report['until'])}; "
-        f"{_escape(report['event_count'])} events in {_escape(report['record_count'])} records. "
-        f"Truncated: {_escape(str(report['truncated']).lower())}.</p>"
-    )
+    if not report["available"]:
+        report_status = "<p class=\"bad\">Audit report unavailable. Empty findings are not being inferred.</p>"
+    else:
+        report_status = (
+            f"<p>Window {_escape(report['since'])} to {_escape(report['until'])}; "
+            f"{_escape(report['event_count'])} events in {_escape(report['record_count'])} returned records.</p>"
+        )
+        if report["truncated"]:
+            report_status += (
+                "<p class=\"truncation\"><strong>Report truncated:</strong> "
+                "Only returned records are shown; omitted records may contain additional findings.</p>"
+            )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -322,6 +336,7 @@ def render(snapshot: dict[str, Any]) -> str:
 body {{ max-width: 1100px; margin: 0 auto; padding: 1rem; line-height: 1.45; }}
 .banner {{ padding: 1rem; border: 3px solid #b45309; background: #fef3c7; color: #451a03; }}
 .banner strong {{ display:block; font-size:1.5rem; }}
+.truncation {{ padding:1rem; border:3px solid #b91c1c; font-size:1.15rem; }}
 .state {{ font-size: clamp(2.5rem,8vw,5rem); margin:.4rem 0; font-weight:800; }}
 .state.unavailable,.bad {{ color:#b91c1c; }} .ok {{ color:#15803d; }}
 .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:1rem; }}
@@ -346,25 +361,57 @@ enforcement remain dark until ACT-01. This dashboard is read-only.</div></header
 </main></body></html>"""
 
 
-class DashboardServer(ThreadingHTTPServer):
+class DashboardServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
 
     def __init__(
         self,
-        address: tuple[str, int],
+        path: str,
         reader: SnapshotReader,
+        caddy_uid: int,
+        socket_gid: int,
         owner: str = DEFAULT_OWNER,
         owner_group: str = DEFAULT_OWNER_GROUP,
     ) -> None:
+        self.path = path
         self.reader = reader
+        self.caddy_uid = caddy_uid
         self.owner = owner
         self.owner_group = owner_group
-        super().__init__(address, DashboardHandler)
+        parent = Path(path).parent.stat()
+        if parent.st_uid != os.geteuid() or parent.st_mode & 0o022:
+            raise DashboardError("dashboard socket directory must be private to the service and Caddy")
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            pass
+        else:
+            if info.st_mode & 0o170000 != 0o140000 or info.st_uid != os.geteuid():
+                raise DashboardError("refusing to replace a non-socket or foreign socket")
+            os.unlink(path)
+        super().__init__(path, DashboardHandler)
+        os.chown(path, -1, socket_gid)
+        os.chmod(path, 0o660)
+
+    def server_close(self) -> None:
+        super().server_close()
+        try:
+            os.unlink(self.path)
+        except FileNotFoundError:
+            pass
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
     server: DashboardServer
     protocol_version = "HTTP/1.1"
+
+    def setup(self) -> None:
+        super().setup()
+        raw = self.connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+        _pid, self.peer_uid, _gid = struct.unpack("3i", raw)
+
+    def address_string(self) -> str:
+        return "unix-peer"
 
     def _send(self, status: int, content_type: str, payload: bytes, head: bool = False) -> None:
         self.close_connection = True
@@ -384,7 +431,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self._send(403, "text/plain; charset=utf-8", b"Owner two-factor session required\n")
 
     def _read(self, head: bool) -> None:
-        if not authorized(self.headers, self.server.owner, self.server.owner_group):
+        if self.peer_uid != self.server.caddy_uid or not authorized(
+            self.headers, self.server.owner, self.server.owner_group,
+        ):
             self._deny()
             return
         path = urlsplit(self.path)
@@ -405,6 +454,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self._read(True)
 
     def _method_not_allowed(self) -> None:
+        if self.peer_uid != self.server.caddy_uid:
+            self._deny()
+            return
         self._send(405, "text/plain; charset=utf-8", b"Read-only dashboard: GET or HEAD required\n")
 
     do_POST = _method_not_allowed
@@ -415,8 +467,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
-    parser.add_argument("--listen", default=DEFAULT_LISTEN)
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--socket", default=DEFAULT_SOCKET)
+    parser.add_argument("--caddy-user", default=DEFAULT_CADDY_USER)
     parser.add_argument("--controller-socket", default=DEFAULT_CONTROLLER_SOCKET)
     parser.add_argument("--audit-socket", default=DEFAULT_AUDIT_SOCKET)
     parser.add_argument("--owner", default=DEFAULT_OWNER)
@@ -424,9 +476,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if os.geteuid() == 0:
         parser.error("diary-lock-dashboard must run as an unprivileged service identity")
+    try:
+        caddy = pwd.getpwnam(args.caddy_user)
+    except KeyError:
+        parser.error(f"unknown Caddy identity: {args.caddy_user}")
     server = DashboardServer(
-        (args.listen, args.port),
+        args.socket,
         SnapshotReader(args.controller_socket, args.audit_socket),
+        caddy.pw_uid,
+        caddy.pw_gid,
         args.owner,
         args.owner_group,
     )
