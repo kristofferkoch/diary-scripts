@@ -6,6 +6,7 @@ import json
 import os
 import socket
 import struct
+import subprocess
 import threading
 from pathlib import Path
 
@@ -65,16 +66,18 @@ def packet_message(
     packet: bytes,
     family: int = socket.AF_INET,
     prefix: bytes = b"diary-audit-new\0",
-    uid: int = UID,
-    gid: int = GID,
+    uid: int | None = UID,
+    gid: int | None = GID,
     group: int = GROUP,
     sequence: int = 7,
 ) -> bytes:
     body = struct.pack("BBH", family, 0, socket.htons(group))
     body += network._attribute(network.NFULA_PACKET_HDR, bytes(4))
     body += network._attribute(network.NFULA_PREFIX, prefix)
-    body += network._attribute(network.NFULA_UID, struct.pack("!I", uid))
-    body += network._attribute(network.NFULA_GID, struct.pack("!I", gid))
+    if uid is not None:
+        body += network._attribute(network.NFULA_UID, struct.pack("!I", uid))
+    if gid is not None:
+        body += network._attribute(network.NFULA_GID, struct.pack("!I", gid))
     body += network._attribute(network.NFULA_SEQ, struct.pack("!I", sequence))
     body += network._attribute(network.NFULA_PAYLOAD, packet)
     return network._message(network.NFULNL_MSG_PACKET, body, sequence=7)
@@ -95,6 +98,8 @@ def test_bind_request_subscribes_to_bounded_packet_copy() -> None:
     assert struct.unpack("!IBB", attributes[network.NFULA_CFG_MODE]) == (
         network.SNAPLEN, network.NFULNL_COPY_PACKET, 0,
     )
+    assert network.NFULA_CFG_FLAGS == 6
+    assert len(attributes[network.NFULA_CFG_FLAGS]) == 2
     assert struct.unpack("!H", attributes[network.NFULA_CFG_FLAGS])[0] == network.NFULNL_CFG_F_SEQ
 
 
@@ -182,6 +187,13 @@ def test_missing_kernel_identity_is_not_replaced_with_writer_identity() -> None:
     with pytest.raises(network.NetworkAuditError):
         network.event_from_packet_message(b"\x02\x00\x00\x00", GROUP, UID, GID)
     assert message
+
+
+def test_optional_kernel_identity_falls_back_to_nft_selected_agent() -> None:
+    message = packet_message(ipv4(), uid=None, gid=None)
+    event = network.events_from_datagram(message, GROUP, UID, GID)[0]
+    assert event["caller"] == {"pid": 0, "uid": UID, "gid": GID}
+    assert event["caller"]["uid"] != os.geteuid()
 
 
 @pytest.mark.parametrize(
@@ -648,3 +660,49 @@ def test_real_audit_socket_preserves_kernel_flow_attribution(
         server.server_close()
         thread.join(timeout=5)
         journal.close()
+
+
+@pytest.mark.skipif(
+    os.geteuid() != 0 or os.environ.get("DIARY_TEST_NFLOG") != "1",
+    reason="opt-in real NFLOG test; run in a disposable user/network namespace",
+)
+def test_real_nflog_config_sequence_and_kernel_identity() -> None:
+    uid = os.geteuid()
+    gid = os.getegid()
+    table = f"""table inet diary_network_audit_test {{
+        chain output {{
+            type filter hook output priority filter - 20; policy accept;
+            meta skuid {uid} meta l4proto tcp ct state new \
+                log prefix \"diary-audit-new\" group 30 snaplen 256
+        }}
+    }}
+    """
+    subprocess.run(["/usr/bin/ip", "link", "set", "lo", "up"], check=True)
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 4242))
+    listener.listen(1)
+    sock = network.open_nflog(GROUP)
+    sender = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(2)
+        subprocess.run(["/usr/bin/nft", "-f", "-"], input=table, text=True, check=True)
+        sender.connect(("127.0.0.1", 4242))
+        sequences = []
+        events = network.events_from_datagram(
+            sock.recv(network.MAX_NETLINK_DATAGRAM), GROUP, uid, gid, sequences.append,
+        )
+        assert sequences == [0]
+        assert len(events) == 1
+        assert events[0]["operation"] == "connect"
+        assert events[0]["destination_ip"] == "127.0.0.1"
+        assert events[0]["destination_port"] == 4242
+        assert events[0]["protocol"] == "tcp"
+        assert events[0]["caller"] == {"pid": 0, "uid": uid, "gid": gid}
+    finally:
+        listener.close()
+        sender.close()
+        sock.close()
+        subprocess.run(
+            ["/usr/bin/nft", "destroy", "table", "inet", "diary_network_audit_test"],
+            check=False, capture_output=True,
+        )

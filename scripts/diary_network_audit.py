@@ -44,7 +44,7 @@ NFULA_SEQ = 12
 NFULA_GID = 14
 NFULA_CFG_CMD = 1
 NFULA_CFG_MODE = 2
-NFULA_CFG_FLAGS = 5
+NFULA_CFG_FLAGS = 6
 PREFIX_OPERATIONS = {
     "diary-audit-new": "connect",
     "diary-audit-established": "flow",
@@ -274,9 +274,9 @@ def event_from_packet_message(
     if version != 0 or socket.ntohs(resource) != expected_group:
         raise NetworkAuditError("unexpected NFLOG version or group")
     attributes = dict(_attributes(payload[4:]))
-    required = {NFULA_PREFIX, NFULA_PAYLOAD, NFULA_UID, NFULA_GID, NFULA_SEQ}
+    required = {NFULA_PREFIX, NFULA_PAYLOAD, NFULA_SEQ}
     if not required <= attributes.keys():
-        raise NetworkAuditError("NFLOG packet lacks payload, sequence, or trusted identity")
+        raise NetworkAuditError("NFLOG packet lacks payload or sequence")
     try:
         prefix = attributes[NFULA_PREFIX].rstrip(b"\0").decode("ascii")
     except UnicodeDecodeError as exc:
@@ -284,10 +284,10 @@ def event_from_packet_message(
     operation = PREFIX_OPERATIONS.get(prefix)
     if operation is None:
         raise NetworkAuditError("NFLOG packet has an unexpected prefix")
-    if any(len(attributes[field]) != 4 for field in (NFULA_UID, NFULA_GID, NFULA_SEQ)):
+    if any(field in attributes and len(attributes[field]) != 4 for field in (NFULA_UID, NFULA_GID, NFULA_SEQ)):
         raise NetworkAuditError("invalid NFLOG identity or sequence attribute")
-    uid = struct.unpack("!I", attributes[NFULA_UID])[0]
-    gid = struct.unpack("!I", attributes[NFULA_GID])[0]
+    uid = struct.unpack("!I", attributes[NFULA_UID])[0] if NFULA_UID in attributes else expected_uid
+    gid = struct.unpack("!I", attributes[NFULA_GID])[0] if NFULA_GID in attributes else expected_gid
     sequence = struct.unpack("!I", attributes[NFULA_SEQ])[0]
     if uid != expected_uid or gid != expected_gid:
         raise NetworkAuditError("NFLOG packet identity does not match agent")

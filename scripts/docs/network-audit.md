@@ -23,8 +23,11 @@ suppression deliberately make those totals different.
 `diary-network-auditd` binds NFLOG group 30 with `CAP_NET_ADMIN`, a 4 MiB
 requested receive buffer, and `NFULNL_CFG_F_SEQ`. It accepts only the two fixed
 prefixes installed by the approved rules. Kernel NFLOG UID/GID and sequence
-attributes are decoded as big-endian `!I` values; UID/GID must exactly match
-the resolved agent identity. Sequence gaps and received `ENOBUFS` errors
+attributes are decoded as big-endian `!I` values; when optional UID/GID
+attributes are present, they must exactly match the resolved agent identity.
+When the kernel omits them, the reader uses the root-configured agent UID/GID
+selected by the dedicated nftables rule, never the root writer identity.
+Sequence gaps and received `ENOBUFS` errors
 increment observation-loss counters. The reader parses only destination IP,
 destination port, and TCP/UDP protocol from at most 256 copied bytes. Payloads,
 URLs, queries, commands, interface names, and packet sources are never sent to
@@ -36,8 +39,9 @@ The reader calls the existing root-owned `diary-auditd` Unix socket. It writes
 lock state `not_applicable`: this is a simulated locked-policy baseline, not a
 claim that the future controller is locked or attended. `connect` identifies a
 new flow and `flow` an established-flow sample. Caller PID is zero because
-NFLOG supplies trusted socket UID/GID but no stable process identity; the
-audit daemon resolves the kernel UID to `agent`. The writer itself remains
+NFLOG has no stable process identity. Caller UID/GID comes from kernel socket
+credentials when available or the root-configured nftables-selected identity
+otherwise; the audit daemon resolves that UID to `agent`. The writer itself remains
 root, and the agent cannot call it directly. AUD-01 supplies schema
 validation, redaction, 60-second duplicate counters, structured journal
 fields, reports, and 30-day retention in the existing `diary-lock` namespace.
