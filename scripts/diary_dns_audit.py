@@ -13,6 +13,7 @@ import socketserver
 import struct
 import sys
 import threading
+import time
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -163,8 +164,10 @@ class AuditSink:
         self.sentinel = object()
         self.thread = threading.Thread(target=self._run, name="diary-dns-audit-writer", daemon=True)
         self.lock = threading.Lock()
+        self.accepting = True
         self.dropped = 0
         self.unavailable = 0
+        self.shutdown_loss = 0
 
     def start(self) -> None:
         self.thread.start()
@@ -172,10 +175,13 @@ class AuditSink:
     def observe(self, event: dict[str, Any] | None) -> None:
         if event is None:
             return
-        try:
-            self.work.put_nowait(event)
-        except queue.Full:
-            with self.lock:
+        with self.lock:
+            if not self.accepting:
+                self.shutdown_loss += 1
+                return
+            try:
+                self.work.put_nowait(event)
+            except queue.Full:
                 self.dropped += 1
 
     def _run(self) -> None:
@@ -193,25 +199,35 @@ class AuditSink:
                 self.work.task_done()
 
     def close(self) -> None:
-        discarded = 0
-        try:
-            self.work.put_nowait(self.sentinel)
-        except queue.Full:
+        with self.lock:
+            if not self.accepting:
+                return
+            self.accepting = False
+            discarded = 0
             try:
-                self.work.get_nowait()
-                self.work.task_done()
-                discarded = 1
-            except queue.Empty:
-                pass
-            self.work.put_nowait(self.sentinel)
+                self.work.put_nowait(self.sentinel)
+            except queue.Full:
+                try:
+                    self.work.get_nowait()
+                    self.work.task_done()
+                    discarded = 1
+                except queue.Empty:
+                    pass
+                self.work.put_nowait(self.sentinel)
         self.thread.join(SHUTDOWN_TIMEOUT)
         alive = self.thread.is_alive()
+        with self.work.mutex:
+            queued = self.work._qsize()
+            unfinished = self.work.unfinished_tasks
+        queued_events = max(0, queued - 1)
+        in_flight = int(alive and unfinished > queued)
         with self.lock:
-            if self.dropped or self.unavailable or discarded or alive:
+            self.shutdown_loss += discarded + queued_events + in_flight
+            if self.dropped or self.unavailable or self.shutdown_loss:
                 print(
                     "diary-dns-auditd: audit loss: "
                     f"queue_overflow={self.dropped} audit_unavailable={self.unavailable} "
-                    f"shutdown_loss={self.work.qsize() + discarded + int(alive)}",
+                    f"shutdown_loss={self.shutdown_loss}",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -255,19 +271,30 @@ def exchange_tcp(message: bytes, upstream: tuple[str, int]) -> bytes | None:
 
 class _BoundedThreads(socketserver.ThreadingMixIn):
     daemon_threads = True
-    block_on_close = True
+    block_on_close = False
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self.client_slots = threading.BoundedSemaphore(MAX_CLIENTS)
+        self.active_condition = threading.Condition()
+        self.active = 0
         super().__init__(*args, **kwargs)
+
+    def _request_done(self) -> None:
+        with self.active_condition:
+            self.active -= 1
+            if self.active == 0:
+                self.active_condition.notify_all()
 
     def process_request(self, request: Any, client_address: Any) -> None:
         if not self.client_slots.acquire(blocking=False):
             cast(Any, self).shutdown_request(request)
             return
+        with self.active_condition:
+            self.active += 1
         try:
             super().process_request(request, client_address)
         except BaseException:
+            self._request_done()
             self.client_slots.release()
             raise
 
@@ -275,11 +302,23 @@ class _BoundedThreads(socketserver.ThreadingMixIn):
         try:
             super().process_request_thread(request, client_address)
         finally:
+            self._request_done()
             self.client_slots.release()
+
+    def wait_idle(self, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        with self.active_condition:
+            while self.active:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self.active_condition.wait(remaining)
+            return True
 
 
 class _UDPServer(_BoundedThreads, socketserver.UDPServer):
     allow_reuse_address = True
+    max_packet_size = 65_535
     owner: Any
 
 
@@ -317,6 +356,9 @@ class DNSProxy:
         self.uid = uid
         self.gid = gid
         self.sink = AuditSink(audit_socket, writer)
+        self.stopping = threading.Event()
+        self.tcp_lock = threading.Lock()
+        self.tcp_clients: set[socket.socket] = set()
         self.udp = _UDPServer((self.listen, port), _UDPHandler)
         try:
             self.tcp = _TCPServer((self.listen, self.udp.server_address[1]), _TCPHandler)
@@ -355,9 +397,13 @@ class DNSProxy:
             listener.sendto(response, client)
 
     def handle_tcp(self, client: socket.socket) -> None:
-        client.settimeout(UPSTREAM_TIMEOUT)
+        with self.tcp_lock:
+            if self.stopping.is_set():
+                return
+            self.tcp_clients.add(client)
         try:
-            while True:
+            client.settimeout(UPSTREAM_TIMEOUT)
+            while not self.stopping.is_set():
                 header = _receive_exact(client, 2)
                 if header is None:
                     return
@@ -374,8 +420,21 @@ class DNSProxy:
                 client.sendall(struct.pack("!H", len(response)) + response)
         except OSError:
             return
+        finally:
+            with self.tcp_lock:
+                self.tcp_clients.discard(client)
+
+    def _close_tcp_clients(self) -> None:
+        with self.tcp_lock:
+            clients = list(self.tcp_clients)
+        for client in clients:
+            try:
+                client.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
     def close(self) -> None:
+        self.stopping.set()
         if not self.started:
             self.udp.server_close()
             self.tcp.server_close()
@@ -384,8 +443,10 @@ class DNSProxy:
         self.tcp.shutdown()
         self.udp.server_close()
         self.tcp.server_close()
-        for thread in self.threads:
-            thread.join(SHUTDOWN_TIMEOUT)
+        self._close_tcp_clients()
+        deadline = time.monotonic() + SHUTDOWN_TIMEOUT
+        self.udp.wait_idle(max(0, deadline - time.monotonic()))
+        self.tcp.wait_idle(max(0, deadline - time.monotonic()))
         self.sink.close()
         self.started = False
 

@@ -29,6 +29,16 @@ def query(name: str = "Example.COM") -> bytes:
     return struct.pack("!HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0) + wire_name(name) + struct.pack("!HH", 1, 1)
 
 
+def large_query() -> bytes:
+    header = struct.pack("!HHHHHH", 0x1234, 0x0100, 1, 0, 0, 18)
+    question = wire_name("Example.COM") + struct.pack("!HH", 1, 1)
+    rdata = bytes([255]) + b"a" * 255 + bytes([243]) + b"b" * 243
+    additional = b"\0" + struct.pack("!HHIH", 16, 1, 0, len(rdata)) + rdata
+    message = header + question + additional * 18
+    assert 8192 < len(message) < 65_535
+    return message
+
+
 def ipv4(message: bytes, protocol: int = network.UDP, port: int = 53) -> bytes:
     transport = struct.pack("!HH", 4242, port)
     if protocol == network.UDP:
@@ -43,6 +53,25 @@ def ipv4(message: bytes, protocol: int = network.UDP, port: int = 53) -> bytes:
     packet[9] = protocol
     packet[12:16] = socket.inet_aton("192.0.2.10")
     packet[16:20] = socket.inet_aton("198.51.100.20")
+    return bytes(packet) + transport
+
+
+def ipv6(message: bytes, protocol: int = network.UDP, port: int = 53, extension: bool = False) -> bytes:
+    transport = struct.pack("!HH", 4242, port)
+    if protocol == network.UDP:
+        transport += struct.pack("!HH", 8 + len(message), 0) + message
+    else:
+        transport += bytes(8) + bytes([5 << 4, 0]) + bytes(6) + struct.pack("!H", len(message))
+        transport += message
+    packet = bytearray(40)
+    packet[0] = 0x60
+    packet[2:4] = struct.pack("!H", len(transport) + (8 if extension else 0))
+    packet[6] = 0 if extension else protocol
+    packet[7] = 64
+    packet[8:24] = socket.inet_pton(socket.AF_INET6, "2001:db8::10")
+    packet[24:40] = socket.inet_pton(socket.AF_INET6, "2001:db8::20")
+    if extension:
+        packet.extend(bytes([protocol, 0]) + bytes(6))
     return bytes(packet) + transport
 
 
@@ -154,6 +183,45 @@ def test_alternate_resolution_paths_are_would_block(
         assert event["dns_name"] == "example.com"
 
 
+@pytest.mark.parametrize(
+    ("prefix", "protocol", "port", "operation"),
+    [
+        (b"diary-dns-direct\0", network.UDP, 53, "direct"),
+        (b"diary-dns-dot\0", network.TCP, 853, "dot"),
+        (b"diary-dns-doh\0", network.TCP, 443, "doh_path"),
+        (b"diary-dns-mdns\0", network.UDP, 5353, "mdns"),
+        (b"diary-dns-llmnr\0", network.UDP, 5355, "llmnr"),
+    ],
+)
+def test_ipv6_alternate_resolution_paths_and_plaintext_names(
+    prefix: bytes, protocol: int, port: int, operation: str,
+) -> None:
+    payload = b"private TLS or HTTP payload" if protocol == network.TCP else query()
+    event = network.events_from_datagram(
+        packet_message(ipv6(payload, protocol, port), prefix, socket.AF_INET6), GROUP, UID, GID,
+    )[0]
+    assert event["event"] == "dns.alternate"
+    assert event["operation"] == operation
+    assert event["destination_ip"] == "2001:db8::20"
+    assert event["destination_port"] == port
+    assert event["caller"] == {"pid": 0, "uid": UID, "gid": GID}
+    if protocol == network.TCP:
+        assert "dns_name" not in event
+    else:
+        assert event["dns_name"] == "example.com"
+
+
+def test_ipv6_direct_dns_name_survives_extension_header() -> None:
+    event = network.events_from_datagram(
+        packet_message(
+            ipv6(query(), extension=True), b"diary-dns-direct\0", socket.AF_INET6,
+        ),
+        GROUP, UID, GID,
+    )[0]
+    assert event["destination_ip"] == "2001:db8::20"
+    assert event["dns_name"] == "example.com"
+
+
 def test_truncated_direct_dns_still_has_flow_evidence_but_no_invented_name() -> None:
     event = network.events_from_datagram(
         packet_message(ipv4(query()[:20]), b"diary-dns-direct\0"), GROUP, UID, GID,
@@ -200,6 +268,47 @@ def test_udp_proxy_forwards_unchanged_when_audit_is_unavailable() -> None:
         assert client.recv(65_535) == b"response bytes"
         assert received == [message]
         assert proxy.sink.unavailable == 1
+    finally:
+        client.close()
+        proxy.close()
+        upstream.close()
+        thread.join(2)
+
+
+def test_udp_proxy_forwards_valid_query_larger_than_8192_bytes() -> None:
+    upstream = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    upstream.bind(("127.0.0.1", 0))
+    upstream.settimeout(2)
+    received = []
+    written = []
+    delivered = threading.Event()
+
+    def serve_upstream() -> None:
+        message, client = upstream.recvfrom(65_535)
+        received.append(message)
+        upstream.sendto(b"large query response", client)
+
+    def writer(_path, event):
+        written.append(event)
+        delivered.set()
+        return {"ok": True}
+
+    thread = threading.Thread(target=serve_upstream)
+    thread.start()
+    proxy = dns.DNSProxy(
+        "127.0.0.1", 0, "127.0.0.1", upstream.getsockname()[1], UID, GID, writer=writer,
+    )
+    proxy.start()
+    client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    client.settimeout(2)
+    try:
+        message = large_query()
+        client.sendto(message, ("127.0.0.1", proxy.port))
+        assert client.recv(65_535) == b"large query response"
+        assert received == [message]
+        assert delivered.wait(2)
+        assert written[0]["dns_name"] == "example.com"
+        assert "aaaa" not in json.dumps(written[0])
     finally:
         client.close()
         proxy.close()
@@ -309,8 +418,72 @@ def test_full_stalled_audit_queue_has_bounded_shutdown(
         assert writer_started.wait(2)
         sink.observe({"event": "second"})
         sink.close()
-        assert "shutdown_loss=" in capsys.readouterr().err
+        assert sink.shutdown_loss == 2
+        assert "shutdown_loss=2" in capsys.readouterr().err
+        sink.observe({"event": "late producer"})
+        assert sink.shutdown_loss == 3
     finally:
         release_writer.set()
         sink.thread.join(2)
     assert not sink.thread.is_alive()
+
+
+def test_persistent_tcp_shutdown_drains_handlers_and_accounts_residual_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(2)
+    listener.settimeout(2)
+
+    def serve_upstream() -> None:
+        for _ in range(2):
+            connection, _address = listener.accept()
+            with connection:
+                header = dns._receive_exact(connection, 2)
+                assert header is not None
+                message = dns._receive_exact(connection, struct.unpack("!H", header)[0])
+                assert message == query()
+                connection.sendall(struct.pack("!H", 8) + b"response")
+
+    upstream_thread = threading.Thread(target=serve_upstream)
+    upstream_thread.start()
+    writer_started = threading.Event()
+    release_writer = threading.Event()
+
+    def stalled_writer(_path, _event):
+        writer_started.set()
+        release_writer.wait(2)
+        return {"ok": True}
+
+    monkeypatch.setattr(dns, "SHUTDOWN_TIMEOUT", 0.05)
+    proxy = dns.DNSProxy(
+        "127.0.0.1", 0, "127.0.0.1", listener.getsockname()[1], UID, GID,
+        writer=stalled_writer,
+    )
+    proxy.sink.work = dns.queue.Queue(maxsize=1)
+    proxy.start()
+    client = socket.create_connection(("127.0.0.1", proxy.port), timeout=2)
+    client.settimeout(2)
+    try:
+        for _ in range(2):
+            message = query()
+            client.sendall(struct.pack("!H", len(message)) + message)
+            assert dns._receive_exact(client, 2) == struct.pack("!H", 8)
+            assert dns._receive_exact(client, 8) == b"response"
+        assert writer_started.wait(2)
+        assert proxy.tcp.active == 1
+        proxy.close()
+        assert proxy.tcp.active == 0
+        assert not proxy.tcp_clients
+        assert proxy.sink.shutdown_loss == 2
+    finally:
+        release_writer.set()
+        client.close()
+        proxy.close()
+        listener.close()
+        proxy.sink.thread.join(2)
+        upstream_thread.join(2)
+    assert not proxy.sink.thread.is_alive()
+    assert not upstream_thread.is_alive()

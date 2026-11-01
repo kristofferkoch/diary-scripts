@@ -10,8 +10,10 @@ The root installer requires an owner-selected numeric IPv4 upstream resolver
 and resolves the current `agent` UID/GID. Those values are rendered into
 root-owned rules and a root-owned unit; neither DNS packets nor proxy requests
 can select a policy identity. The proxy listens on `127.0.0.1:1053` for UDP and
-TCP and forwards each request unchanged to the configured upstream. It relays
-only upstream responses and never synthesizes an allow/deny DNS answer.
+TCP and forwards each request unchanged to the configured upstream. UDP receives
+use a full 65,535-byte bound rather than `socketserver`'s 8,192-byte default.
+The proxy relays only upstream responses and never synthesizes an allow/deny
+DNS answer.
 
 A dedicated NAT output rule redirects only the selected agent UID's UDP/TCP
 port-53 traffic to that exact upstream. Other agent DNS servers remain direct
@@ -34,8 +36,11 @@ Audit writes use the existing AUD-01 trusted socket and a bounded 1,024-event
 asynchronous queue. A stalled or unavailable audit writer cannot delay or
 prevent forwarding, and failed events are not retried into a later policy
 state. Queue/writer loss and bounded-shutdown residue are counted on the
-namespaced stderr journal. At most 128 concurrent client handlers are accepted;
-excess datagrams/connections retain ordinary DNS timeout/retry behavior.
+namespaced stderr journal. Shutdown stops listeners, wakes persistent TCP
+clients, and waits a bounded period for active handlers before closing the
+audit queue. The closed queue rejects and counts any late producer without a
+sentinel race. At most 128 concurrent client handlers are accepted; excess
+datagrams/connections retain ordinary DNS timeout/retry behavior.
 
 ## Direct and alternate paths
 
