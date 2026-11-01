@@ -1,6 +1,8 @@
 """Persistence integration tests for the embed writers."""
 from __future__ import annotations
 
+import psycopg
+
 from scripts import embed_images as ei
 from scripts import embed_messages as em
 
@@ -34,21 +36,26 @@ def _payload(record: dict) -> em.SourcePayload:
     return payload
 
 
-def test_embed_messages_insert_replace_skip_and_cascade(db_conn, monkeypatch):
+def test_embed_messages_insert_replace_skip_and_cascade(
+        writer_conn, test_pg_dsn, monkeypatch):
     monkeypatch.setattr(em, "_embed_pending", _fake_embed_pending)
     records = [_event("unansweredIds")]
     monkeypatch.setattr(em, "iter_records", lambda source, verbose: iter(records))
 
-    assert em.process(db_conn, "spond", None, False) == (1, 0, 0)
-    with db_conn.cursor() as cur:
+    assert em.process(writer_conn, "spond", None, False) == (1, 0, 0)
+    with writer_conn.cursor() as cur:
         cur.execute(
             "SELECT id, content_hash FROM messages WHERE message_id = 'spond:event:event-1'"
         )
         first_id, first_hash = cur.fetchone()
+    with psycopg.connect(test_pg_dsn) as check:
+        with check.cursor() as cur:
+            cur.execute("SELECT count(*) FROM messages WHERE id = %s", (first_id,))
+            assert cur.fetchone()[0] == 1
 
     records[:] = [_event("acceptedIds")]
-    assert em.process(db_conn, "spond", None, False) == (1, 0, 0)
-    with db_conn.cursor() as cur:
+    assert em.process(writer_conn, "spond", None, False) == (1, 0, 0)
+    with writer_conn.cursor() as cur:
         cur.execute(
             "SELECT id, content_hash FROM messages WHERE message_id = 'spond:event:event-1'"
         )
@@ -62,13 +69,13 @@ def test_embed_messages_insert_replace_skip_and_cascade(db_conn, monkeypatch):
     assert "accepted 1" in chunks[0]
     assert "unanswered 1" not in chunks[0]
 
-    assert em.process(db_conn, "spond", None, False) == (0, 1, 0)
-    with db_conn.cursor() as cur:
+    assert em.process(writer_conn, "spond", None, False) == (0, 1, 0)
+    with writer_conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM messages WHERE message_id = 'spond:event:event-1'")
         assert cur.fetchone()[0] == 1
 
 
-def test_embed_messages_failed_insert_rolls_back_all_chunks(db_conn, monkeypatch):
+def test_embed_messages_failed_insert_rolls_back_all_chunks(writer_conn, monkeypatch):
     payload = _payload(_event("unansweredIds"))
     payload["body_chunks"] = ["first chunk", "second chunk"]
 
@@ -76,17 +83,17 @@ def test_embed_messages_failed_insert_rolls_back_all_chunks(db_conn, monkeypatch
         return {0: {("body", 0): _vector(), ("body", 1): [0.1]}}
 
     monkeypatch.setattr(em, "_embed_pending", bad_second_vector)
-    assert em._flush_batch(db_conn, [payload], False) == (0, 1)
+    assert em._flush_batch(writer_conn, [payload], False) == (0, 1)
 
-    with db_conn.cursor() as cur:
+    with writer_conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM messages WHERE message_id = %s", (payload["mid"],))
         assert cur.fetchone()[0] == 0
         cur.execute("SELECT count(*) FROM chunks")
         assert cur.fetchone()[0] == 0
 
 
-def _pending_image(db_conn) -> ei.PendingRow:
-    with db_conn.cursor() as cur:
+def _pending_image(writer_conn) -> ei.PendingRow:
+    with writer_conn.cursor() as cur:
         cur.execute(
             "INSERT INTO messages (message_id, source, tier) "
             "VALUES ('image@example.invalid', 'mail', 1) RETURNING id"
@@ -114,16 +121,16 @@ def _pending_image(db_conn) -> ei.PendingRow:
     }
 
 
-def test_embed_images_store_persists_vector_and_description(db_conn):
-    row = _pending_image(db_conn)
+def test_embed_images_store_persists_vector_and_description(writer_conn):
+    row = _pending_image(writer_conn)
     prepared: ei.Prepared = {
         "row": row,
         "description": "A receipt",
         "chunks": ["Vedlegg photo.png (bilde): A receipt"],
     }
 
-    assert ei._store(db_conn, [prepared], [_vector()], False) == (1, 0)
-    with db_conn.cursor() as cur:
+    assert ei._store(writer_conn, [prepared], [_vector()], False) == (1, 0)
+    with writer_conn.cursor() as cur:
         cur.execute(
             "SELECT text, vector_dims(embedding) FROM chunks WHERE attachment_id = %s",
             (row["att_id"],),
@@ -136,16 +143,16 @@ def test_embed_images_store_persists_vector_and_description(db_conn):
         assert cur.fetchone() == (len("A receipt"), ei.VLM_MODEL)
 
 
-def test_embed_images_failed_store_rolls_back_and_counts_attempt(db_conn):
-    row = _pending_image(db_conn)
+def test_embed_images_failed_store_rolls_back_and_counts_attempt(writer_conn):
+    row = _pending_image(writer_conn)
     prepared: ei.Prepared = {
         "row": row,
         "description": "A receipt",
         "chunks": ["first chunk", "second chunk"],
     }
 
-    assert ei._store(db_conn, [prepared], [_vector(), [0.1]], False) == (0, 1)
-    with db_conn.cursor() as cur:
+    assert ei._store(writer_conn, [prepared], [_vector(), [0.1]], False) == (0, 1)
+    with writer_conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM chunks WHERE attachment_id = %s", (row["att_id"],))
         assert cur.fetchone()[0] == 0
         cur.execute(

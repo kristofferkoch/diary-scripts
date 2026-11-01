@@ -38,15 +38,15 @@ diary_config.reload()
 
 @pytest.fixture(scope="session")
 def test_pg_dsn() -> Iterator[str]:
-    """A migrated, disposable schema; never the application's tables."""
-    base_dsn = os.environ.get("DIARY_TEST_PG_DSN")
-    if not base_dsn:
+    """A newly created, migrated database dropped after the test session."""
+    admin_dsn = os.environ.get("DIARY_TEST_PG_DSN")
+    if not admin_dsn:
         pytest.skip("set DIARY_TEST_PG_DSN to run PostgreSQL integration tests")
 
-    schema = f"diary_test_{os.getpid()}_{uuid.uuid4().hex[:12]}"
-    test_dsn = make_conninfo(base_dsn, options=f"-csearch_path={schema},public")
-    with psycopg.connect(base_dsn, autocommit=True) as admin:
-        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    database = f"diary_test_{os.getpid()}_{uuid.uuid4().hex[:12]}"
+    test_dsn = make_conninfo(admin_dsn, dbname=database)
+    with psycopg.connect(admin_dsn, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database)))
     try:
         with psycopg.connect(test_dsn) as conn:
             for migration in sorted((Path(__file__).parent / "migrations").glob("*.sql")):
@@ -54,10 +54,19 @@ def test_pg_dsn() -> Iterator[str]:
             conn.commit()
         yield test_dsn
     finally:
-        with psycopg.connect(base_dsn, autocommit=True) as admin:
+        with psycopg.connect(admin_dsn, autocommit=True) as admin:
             admin.execute(
-                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema))
+                sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
+                    sql.Identifier(database)
+                )
             )
+
+
+def _clean_test_connection(conn: psycopg.Connection) -> None:
+    conn.rollback()
+    conn.execute("TRUNCATE messages, entities, themes, agenda_dismissed CASCADE")
+    conn.commit()
+    conn.close()
 
 
 @pytest.fixture
@@ -66,7 +75,13 @@ def db_conn(test_pg_dsn: str) -> Iterator[psycopg.Connection]:
     try:
         yield conn
     finally:
-        conn.rollback()
-        conn.execute("TRUNCATE messages, entities, themes, agenda_dismissed CASCADE")
-        conn.commit()
-        conn.close()
+        _clean_test_connection(conn)
+
+
+@pytest.fixture
+def writer_conn(test_pg_dsn: str) -> Iterator[psycopg.Connection]:
+    conn = psycopg.connect(test_pg_dsn, autocommit=True)
+    try:
+        yield conn
+    finally:
+        _clean_test_connection(conn)
