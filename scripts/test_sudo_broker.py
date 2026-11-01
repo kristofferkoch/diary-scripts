@@ -237,6 +237,21 @@ class PromptProbe:
             pass
 
 
+def test_help_is_concise() -> None:
+    res = subprocess.run(
+        [sys.executable, str(DAEMON), "--help"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert res.returncode == 0, res.stderr
+    assert "Execute commands through operator-controlled approval." in res.stdout
+    assert "--auto-accept-all" in res.stdout
+    assert len(res.stdout.splitlines()) <= 15
+    assert "Protocol:" not in res.stdout
+
+
 def test_auto_accept_all_approves_without_prompting() -> None:
     prompt = PromptProbe()
     try:

@@ -398,7 +398,9 @@ def handle(conn: socket.socket) -> None:
 def main() -> int:
     global AUTO_ACCEPT_ALL
 
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description="Execute commands through operator-controlled approval."
+    )
     parser.add_argument(
         "--auto-accept-all",
         action="store_true",
