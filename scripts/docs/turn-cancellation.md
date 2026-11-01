@@ -66,26 +66,31 @@ process identities, and uses pidfds to SIGSTOP and SIGKILL workload candidates
 until none remain. UID matching alone is not eligibility. A process must also
 be under the real `user@<uid>.service` cgroup and either:
 
-- any `app.slice/*.service` subtree, including D-Bus, DSH/Kimi, token units,
-  arbitrary services, attached workloads, and their children;
+- any `app.slice/*.service` or `session.slice/*.service` subtree, including
+  D-Bus, DSH/Kimi, token units, arbitrary services, attached workloads, and
+  their children;
 - a non-`init.scope` user scope, including controller and tool-created scopes;
-- `init.scope` when the PID is not the exact user-manager PID pinned through
-  the system manager.
+- `init.scope` when the complete PID/parent/start-time/UID identity does not
+  match the current user manager pinned through the system manager.
 
-Thus only the manager process itself is preserved. D-Bus and any workload
-attached to D-Bus or `init.scope` are contained; there is no cgroup-level
-infrastructure bypass. Zombies are not treated as running work. After PID
-quiescence the controller performs the service/non-init-scope loop again. A
-stop or lingering-process failure retains durable `LOCKING`, never `LOCKED`.
-If the user manager itself is unavailable but PID containment proves no
-eligible workload remains, lock may complete in degraded mode.
+Thus only the current manager process identity is preserved. D-Bus and any
+workload attached to D-Bus or `init.scope` are contained; there is no
+cgroup-level infrastructure bypass. Manager identity is refreshed at lock and
+immediately after manager recovery, before any PID quiescence, so a replacement
+manager cannot be killed because of a stale PID or start time. Zombies are not
+treated as running work. After PID quiescence the controller performs the
+service/non-init-scope loop again. A stop or lingering-process failure retains
+durable `LOCKING`, never `LOCKED`. If the user manager itself is unavailable
+but PID containment proves no eligible workload remains, lock may complete in
+degraded mode.
 
 Before attended mode or its egress policy is activated, unlock explicitly
 checks and, if necessary, starts `user@<uid>.service` through the system
-manager; it never kills the manager to recover it. Manager startup may activate
-`default.target` and its enabled web services. The controller first quiesces
-all auto-started services and scopes and requires every workload to be
-inactive and every eligible process gone; it never attends the auto-started
+manager; it never kills the manager to recover it. The controller immediately
+re-pins and verifies the replacement manager's identity. Manager startup may
+activate `default.target` and its enabled web services. The controller first
+quiesces all auto-started services and scopes and requires every workload to
+be inactive and every eligible process gone; it never attends the auto-started
 PIDs. It then explicitly starts and verifies `dbus-broker.service` before
 starting each DSH/Kimi service and verifying a fresh supervisor PID, fresh
 runtime PID, and valid pinned parentage. Only after all services pass does the
@@ -148,21 +153,24 @@ verifies the workload and arbitrary-service PIDs die, on-disk state remains,
 the real user-manager PID stays alive, fresh supervisor/runtime PIDs appear,
 and the fresh service does not recreate the old child. Its manager uses
 `contain_all_scopes=False` and a two-test-service lister; production contains
-every non-init scope and every service, including D-Bus. The probe also attempts
-D-Bus and `init.scope` attachment. On systemd 259 in the current environment
-both API attempts are denied; if policy changes, the fake-`/proc` attached-
-workload regressions require those PIDs to remain eligible.
+every non-init scope and every app.slice/session.slice service, including
+D-Bus. The probe verifies the deployed D-Bus path is
+`session.slice/dbus-broker.service` and attempts D-Bus and `init.scope`
+attachment. On systemd 259 in the current environment both API attempts are
+denied; if policy changes, the fake-`/proc` attached-workload regressions
+require those PIDs to remain eligible.
 
 The ordinary suite performs a real PID-level user-manager-outage test with an
 allow-list containing only its two synthetic PIDs. It verifies the `/proc` and
-pidfd fallback kills the process tree without touching other processes. A
-fake-`/proc` regression proves only the exact manager PID is ineligible, while
-D-Bus, DSH/Kimi, token units, arbitrary services, attached workloads, and
-non-init scopes are eligible. Fake-systemd race tests inject a new scope during
-cancellation and require a later rescan to remove it; identity tests reject
-replacement before scope start and reattach. Outage lock→unlock separately
-models `default.target` auto-start and proves those PIDs are quiesced, D-Bus is
-restored, and only then do fresh supervisor/runtime processes start.
+pidfd fallback kills the process tree without touching other processes.
+Fake-`/proc` regressions prove only the current manager identity is ineligible,
+cover D-Bus/session.slice attachments, and re-pin a replacement manager by PID
+and start time. Fake-systemd race tests inject a new scope during cancellation
+and require a later rescan to remove it; identity tests reject replacement
+before scope start and reattach. Outage lock→unlock separately models manager
+replacement and `default.target` auto-start, proves the new manager is pinned
+before PID quiescence and auto-started PIDs are quiesced, restores D-Bus, and
+only then starts fresh supervisor/runtime processes.
 
 ## Required controlled live verification
 
@@ -201,13 +209,14 @@ For each runtime:
    continue. Create another tool scope and an arbitrary `escape.service` during
    cancellation and verify later passes remove both before `LOCKED`. Attempt
    D-Bus and `init.scope` attachment: the API must reject it or the attached PID
-   must be killed. Only the manager PID remains untouched.
+   must be killed. Only the current manager identity remains untouched.
 
 Inject a scope-stop failure: it must retain `LOCKING` even when other scopes
 were stopped. Separately stop the user manager during an active test turn: the
 independent PID fallback must kill every recorded workload PID before degraded
-lock can complete. Attended mode must explicitly recover the manager, quiesce
-any `default.target` auto-started PIDs, restore and verify D-Bus, and only then
+lock can complete. Attended mode must explicitly recover and re-pin the
+replacement manager before PID quiescence, quiesce any `default.target`
+auto-started PIDs, restore and verify D-Bus under `session.slice`, and only then
 start fresh supervisor/runtime processes; it must not kill the manager or
 attend the auto-started PIDs. Stop the controller during an active turn and verify its
 stop/failsafe path also cancels the complete tree.

@@ -33,16 +33,21 @@ class FakeSystemd:
         self.replaced_pids: set[int] = set()
         self.manager_available = True
         self.manager_recoveries = 0
+        self.current_manager_pid = 9001
         self.auto_started_pids: list[tuple[int, int]] = []
 
     def _require_manager(self) -> None:
         if not self.manager_available:
             raise lock.SystemdUnavailable("manager unavailable")
 
+    def manager_pid(self) -> int:
+        return self.current_manager_pid
+
     def ensure_manager(self) -> None:
         if not self.manager_available:
             self.manager_available = True
             self.manager_recoveries += 1
+            self.current_manager_pid += 1
             for service in self.services:
                 if service == "dbus-broker.service" or self.services[service]:
                     continue
@@ -139,6 +144,9 @@ class FakeSystemd:
 class FakeProcesses:
     def __init__(self) -> None:
         self.calls: list[str] = []
+
+    def pin_manager(self, pid: int | None) -> None:
+        self.calls.append(f"pin_manager:{pid}")
 
     def stop_and_kill(self) -> int:
         self.calls.append("stop_and_kill")
@@ -310,6 +318,10 @@ def test_outage_lock_unlock_quiesces_default_target_and_starts_fresh_processes()
     svc.attend()
     assert fake.manager_available
     assert fake.manager_recoveries == 1
+    calls = svc.processes.calls
+    pin_index = len(calls) - 1 - calls[::-1].index("pin_manager:9002")
+    kill_index = len(calls) - 1 - calls[::-1].index("stop_and_kill")
+    assert pin_index < kill_index
     assert fake.auto_started_pids == [(1100, 1101), (2200, 2201)]
     assert all(fake.services.values())
     assert fake.services["dbus-broker.service"]
@@ -578,10 +590,10 @@ def test_pid_fallback_preserves_only_manager_pid_and_contains_attached_workload(
     fake_process(tmp_path, 9002, f"{prefix}/app.slice/dsh-web.service")
     fake_process(tmp_path, 9003, f"{prefix}/app.slice/dsh-web-token.service")
     fake_process(tmp_path, 9004, f"{prefix}/app.slice/tool-created.scope")
-    fake_process(tmp_path, 9005, f"{prefix}/app.slice/dbus-broker.service")
+    fake_process(tmp_path, 9005, f"{prefix}/session.slice/dbus-broker.service")
     fake_process(tmp_path, 9006, f"{prefix}/app.slice/kimi-web.service/tool-child")
     fake_process(tmp_path, 9007, f"{prefix}/app.slice/escape.service")
-    fake_process(tmp_path, 9008, f"{prefix}/app.slice/dbus-broker.service/attached-workload")
+    fake_process(tmp_path, 9008, f"{prefix}/session.slice/dbus-broker.service/attached-workload")
     fake_process(tmp_path, 9009, f"{prefix}/init.scope/attached-workload")
     processes = lock.AgentProcesses(uid, proc_root=str(tmp_path), manager_pid=9001)
     assert not processes.is_workload(9001)
@@ -595,6 +607,21 @@ def test_pid_fallback_preserves_only_manager_pid_and_contains_attached_workload(
     }
 
 
+def test_replacement_manager_is_repinned_by_starttime_before_quiescence(tmp_path: Path) -> None:
+    uid = os.geteuid()
+    prefix = f"/user.slice/user-{uid}.slice/user@{uid}.service"
+    fake_process(tmp_path, 9001, f"{prefix}/init.scope")
+    fake_process(tmp_path, 9002, f"{prefix}/init.scope")
+    processes = lock.AgentProcesses(uid, proc_root=str(tmp_path), manager_pid=9001)
+    assert not processes.is_workload(9001)
+    assert processes.is_workload(9002)
+
+    processes.pin_manager(9002)
+    assert processes.manager_identity == lock.ProcessIdentity(9002, 1, 90020, uid)
+    assert processes.is_workload(9001)
+    assert not processes.is_workload(9002)
+
+
 def pid_running(pid: int) -> bool:
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
@@ -604,6 +631,9 @@ def pid_running(pid: int) -> bool:
 
 
 class OutageSystemd:
+    def manager_pid(self) -> None:
+        return None
+
     def __getattr__(self, _name: str):
         def unavailable(*_args, **_kwargs):
             raise lock.SystemdUnavailable("injected user-manager outage")
@@ -734,6 +764,9 @@ signal.pause()
             time.sleep(0.05)
         escape_pid = int(escape_pid_file.read_text())
         assert pid_running(escape_pid)
+        dbus_pid = systemd.main_pid("dbus-broker.service")
+        assert "/session.slice/dbus-broker.service" in lock.process_cgroup(dbus_pid)
+        assert processes.is_workload(dbus_pid)
         dbus_attached = True
         try:
             systemd.attach("dbus-broker.service", escape_pid)

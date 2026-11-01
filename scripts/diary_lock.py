@@ -521,7 +521,20 @@ class AgentProcesses:
         self.proc_root = proc_root
         self.eligible = eligible
         self.manager_pid = manager_pid
+        self.manager_identity: ProcessIdentity | None = None
         self.manager_prefix = f"/user.slice/user-{uid}.slice/user@{uid}.service/"
+        self.pin_manager(manager_pid)
+
+    def pin_manager(self, pid: int | None) -> None:
+        if pid is None:
+            self.manager_pid = None
+            self.manager_identity = None
+            return
+        identity = process_identity(pid, self.proc_root)
+        if identity.uid != self.uid:
+            raise LockError("agent user manager has an unexpected UID")
+        self.manager_pid = pid
+        self.manager_identity = identity
 
     def is_workload(self, pid: int) -> bool:
         cgroup = process_cgroup(pid, self.proc_root)
@@ -530,10 +543,10 @@ class AgentProcesses:
         relative = cgroup[len(self.manager_prefix):]
         parts = relative.split("/")
         if parts[0] == "init.scope":
-            return self.manager_pid is None or pid != self.manager_pid
+            return self.manager_identity is None or process_identity(pid, self.proc_root) != self.manager_identity
         if any(part.endswith(".scope") for part in parts):
             return True
-        if len(parts) >= 2 and parts[0] == "app.slice":
+        if len(parts) >= 2 and parts[0] in {"app.slice", "session.slice"}:
             return parts[1].endswith(".service")
         return False
 
@@ -850,6 +863,9 @@ class SystemdTurns:
         self.retired: dict[str, tuple[ProcessIdentity, ProcessIdentity]] = {}
         self.lock = threading.RLock()
 
+    def _refresh_manager(self) -> None:
+        self.processes.pin_manager(self.systemd.manager_pid())
+
     def managed_scopes(self) -> set[str]:
         if self.contain_all_scopes:
             return set(self.systemd.all_scopes())
@@ -935,6 +951,7 @@ class SystemdTurns:
 
     def cancel(self) -> int:
         with self.lock:
+            self._refresh_manager()
             try:
                 seen = self._cancel_systemd()
             except LockError:
@@ -953,6 +970,7 @@ class SystemdTurns:
     def attend(self) -> None:
         with self.lock:
             self.systemd.ensure_manager()
+            self._refresh_manager()
             self._cancel_systemd()
             self.processes.stop_and_kill()
             self.processes.require_empty()
