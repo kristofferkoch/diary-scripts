@@ -1,0 +1,348 @@
+#!/usr/bin/python3
+"""Forward trusted NFLOG flow metadata to the existing diary-lock audit writer."""
+from __future__ import annotations
+
+import argparse
+import ipaddress
+import json
+import os
+import socket
+import struct
+import sys
+import time
+from collections.abc import Callable, Iterator
+from typing import Any
+
+DEFAULT_GROUP = 30
+DEFAULT_SOCKET = "/run/diary-audit/socket"
+SNAPLEN = 256
+NETLINK_NETFILTER = 12
+NFNL_SUBSYS_ULOG = 4
+NFULNL_MSG_PACKET = (NFNL_SUBSYS_ULOG << 8)
+NFULNL_MSG_CONFIG = NFULNL_MSG_PACKET | 1
+NFULNL_CFG_CMD_BIND = 1
+NFULNL_COPY_PACKET = 2
+NLM_F_REQUEST = 0x01
+NLM_F_ACK = 0x04
+NLMSG_ERROR = 0x02
+NLA_TYPE_MASK = 0x3FFF
+NFULA_PACKET_HDR = 1
+NFULA_PAYLOAD = 9
+NFULA_PREFIX = 10
+NFULA_UID = 11
+NFULA_GID = 14
+NFULA_CFG_CMD = 1
+NFULA_CFG_MODE = 2
+PREFIX_OPERATIONS = {
+    "diary-audit-new": "connect",
+    "diary-audit-established": "flow",
+}
+TCP = 6
+UDP = 17
+EXTENSION_HEADERS = {0, 43, 60, 135, 139, 140}
+FRAGMENT = 44
+AUTHENTICATION = 51
+NO_NEXT_HEADER = 59
+MAX_NETLINK_DATAGRAM = 1024 * 1024
+MAX_AUDIT_RESPONSE = 64 * 1024
+
+
+class NetworkAuditError(ValueError):
+    """A kernel message or audit response failed closed validation."""
+
+
+class UnsupportedPacket(ValueError):
+    """A packet has no auditable transport flow in the copied bytes."""
+
+
+def _aligned(length: int) -> int:
+    return (length + 3) & ~3
+
+
+def _attribute(kind: int, payload: bytes) -> bytes:
+    length = 4 + len(payload)
+    return struct.pack("HH", length, kind) + payload + bytes(_aligned(length) - length)
+
+
+def _attributes(data: bytes) -> Iterator[tuple[int, bytes]]:
+    offset = 0
+    while offset < len(data):
+        if len(data) - offset < 4:
+            raise NetworkAuditError("truncated netlink attribute header")
+        length, kind = struct.unpack_from("HH", data, offset)
+        if length < 4 or length > len(data) - offset:
+            raise NetworkAuditError("invalid netlink attribute length")
+        yield kind & NLA_TYPE_MASK, data[offset + 4:offset + length]
+        next_offset = offset + _aligned(length)
+        if next_offset > len(data) and next_offset != _aligned(len(data)):
+            raise NetworkAuditError("truncated netlink attribute padding")
+        offset = next_offset
+
+
+def _message(kind: int, payload: bytes, sequence: int = 0) -> bytes:
+    length = 16 + len(payload)
+    return struct.pack("IHHII", length, kind, 0, sequence, 0) + payload
+
+
+def _messages(data: bytes) -> Iterator[tuple[int, int, bytes]]:
+    offset = 0
+    while offset < len(data):
+        if len(data) - offset < 16:
+            raise NetworkAuditError("truncated netlink message header")
+        length, kind, _flags, sequence, _pid = struct.unpack_from("IHHII", data, offset)
+        if length < 16 or length > len(data) - offset:
+            raise NetworkAuditError("invalid netlink message length")
+        yield kind, sequence, data[offset + 16:offset + length]
+        next_offset = offset + _aligned(length)
+        if next_offset > len(data) and next_offset != _aligned(len(data)):
+            raise NetworkAuditError("truncated netlink message padding")
+        offset = next_offset
+
+
+def bind_request(group: int, sequence: int) -> bytes:
+    if not 1 <= group <= 65_535:
+        raise NetworkAuditError("NFLOG group must be between 1 and 65535")
+    body = struct.pack("BBH", socket.AF_UNSPEC, 0, socket.htons(group))
+    body += _attribute(NFULA_CFG_CMD, bytes([NFULNL_CFG_CMD_BIND]))
+    body += _attribute(NFULA_CFG_MODE, struct.pack("!IBB", SNAPLEN, NFULNL_COPY_PACKET, 0))
+    header = struct.pack(
+        "IHHII", 16 + len(body), NFULNL_MSG_CONFIG, NLM_F_REQUEST | NLM_F_ACK, sequence, 0,
+    )
+    return header + body
+
+
+def _acknowledge(sock: socket.socket, sequence: int) -> None:
+    while True:
+        data = sock.recv(65_535)
+        for kind, received_sequence, payload in _messages(data):
+            if kind != NLMSG_ERROR or received_sequence != sequence:
+                continue
+            if len(payload) < 4:
+                raise NetworkAuditError("truncated netlink acknowledgement")
+            error = struct.unpack_from("i", payload)[0]
+            if error:
+                raise OSError(-error, os.strerror(-error))
+            return
+
+
+def open_nflog(group: int) -> socket.socket:
+    sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, NETLINK_NETFILTER)
+    try:
+        sock.bind((0, 0))
+        sock.settimeout(5.0)
+        sequence = int(time.monotonic_ns() & 0x7FFF_FFFF)
+        sock.sendto(bind_request(group, sequence), (0, 0))
+        _acknowledge(sock, sequence)
+        sock.settimeout(None)
+        return sock
+    except BaseException:
+        sock.close()
+        raise
+
+
+def flow_from_packet(packet: bytes, family: int) -> tuple[str, int, str]:
+    if family == socket.AF_INET:
+        if len(packet) < 20 or packet[0] >> 4 != 4:
+            raise UnsupportedPacket("invalid IPv4 packet")
+        header_length = (packet[0] & 0x0F) * 4
+        if header_length < 20 or len(packet) < header_length:
+            raise UnsupportedPacket("invalid IPv4 header length")
+        fragment = struct.unpack_from("!H", packet, 6)[0]
+        if fragment & 0x1FFF:
+            raise UnsupportedPacket("non-initial IPv4 fragment")
+        protocol_number = packet[9]
+        destination = str(ipaddress.IPv4Address(packet[16:20]))
+        offset = header_length
+    elif family == socket.AF_INET6:
+        if len(packet) < 40 or packet[0] >> 4 != 6:
+            raise UnsupportedPacket("invalid IPv6 packet")
+        destination = str(ipaddress.IPv6Address(packet[24:40]))
+        protocol_number = packet[6]
+        offset = 40
+        for _ in range(16):
+            if protocol_number in EXTENSION_HEADERS:
+                if len(packet) < offset + 2:
+                    raise UnsupportedPacket("truncated IPv6 extension header")
+                next_header = packet[offset]
+                length = (packet[offset + 1] + 1) * 8
+            elif protocol_number == FRAGMENT:
+                if len(packet) < offset + 8:
+                    raise UnsupportedPacket("truncated IPv6 fragment header")
+                next_header = packet[offset]
+                fragment = struct.unpack_from("!H", packet, offset + 2)[0]
+                if fragment & 0xFFF8:
+                    raise UnsupportedPacket("non-initial IPv6 fragment")
+                length = 8
+            elif protocol_number == AUTHENTICATION:
+                if len(packet) < offset + 2:
+                    raise UnsupportedPacket("truncated IPv6 authentication header")
+                next_header = packet[offset]
+                length = (packet[offset + 1] + 2) * 4
+            else:
+                break
+            if length < 8 or len(packet) < offset + length:
+                raise UnsupportedPacket("invalid IPv6 extension length")
+            protocol_number = next_header
+            offset += length
+        else:
+            raise UnsupportedPacket("too many IPv6 extension headers")
+        if protocol_number == NO_NEXT_HEADER:
+            raise UnsupportedPacket("IPv6 packet has no transport header")
+    else:
+        raise UnsupportedPacket("NFLOG packet is not IPv4 or IPv6")
+    if protocol_number not in (TCP, UDP) or len(packet) < offset + 4:
+        raise UnsupportedPacket("packet has no complete TCP/UDP header")
+    destination_port = struct.unpack_from("!H", packet, offset + 2)[0]
+    if destination_port == 0:
+        raise UnsupportedPacket("destination port is zero")
+    protocol = "tcp" if protocol_number == TCP else "udp"
+    return destination, destination_port, protocol
+
+
+def event_from_packet_message(
+    payload: bytes,
+    expected_group: int,
+    expected_uid: int,
+    expected_gid: int,
+) -> dict[str, Any]:
+    if len(payload) < 4:
+        raise NetworkAuditError("truncated NFLOG packet header")
+    family, version, resource = struct.unpack_from("BBH", payload)
+    if version != 0 or socket.ntohs(resource) != expected_group:
+        raise NetworkAuditError("unexpected NFLOG version or group")
+    attributes = dict(_attributes(payload[4:]))
+    required = {NFULA_PREFIX, NFULA_PAYLOAD, NFULA_UID, NFULA_GID}
+    if not required <= attributes.keys():
+        raise NetworkAuditError("NFLOG packet lacks payload or trusted identity")
+    try:
+        prefix = attributes[NFULA_PREFIX].rstrip(b"\0").decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise NetworkAuditError("NFLOG prefix is not ASCII") from exc
+    operation = PREFIX_OPERATIONS.get(prefix)
+    if operation is None:
+        raise NetworkAuditError("NFLOG packet has an unexpected prefix")
+    if len(attributes[NFULA_UID]) != 4 or len(attributes[NFULA_GID]) != 4:
+        raise NetworkAuditError("invalid NFLOG identity attribute")
+    uid = struct.unpack("I", attributes[NFULA_UID])[0]
+    gid = struct.unpack("I", attributes[NFULA_GID])[0]
+    if uid != expected_uid or gid != expected_gid:
+        raise NetworkAuditError("NFLOG packet identity does not match agent")
+    destination, port, protocol = flow_from_packet(attributes[NFULA_PAYLOAD], family)
+    return {
+        "event": "network.flow",
+        "component": "nftables",
+        "operation": operation,
+        "decision": "would_deny",
+        "lock_state": "not_applicable",
+        "reason": "audit_only",
+        "destination_ip": destination,
+        "destination_port": port,
+        "protocol": protocol,
+        "caller": {"pid": 0, "uid": uid, "gid": gid},
+    }
+
+
+def events_from_datagram(
+    data: bytes,
+    expected_group: int,
+    expected_uid: int,
+    expected_gid: int,
+) -> list[dict[str, Any]]:
+    events = []
+    for kind, _sequence, payload in _messages(data):
+        if kind != NFULNL_MSG_PACKET:
+            continue
+        try:
+            events.append(event_from_packet_message(
+                payload, expected_group, expected_uid, expected_gid,
+            ))
+        except UnsupportedPacket:
+            continue
+    return events
+
+
+def request(socket_path: str, event: dict[str, Any]) -> dict[str, Any]:
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(40.0)
+        sock.connect(socket_path)
+        value = {"cmd": "write", "event": event}
+        sock.sendall(json.dumps(value, separators=(",", ":")).encode("ascii") + b"\n")
+        data = b""
+        while not data.endswith(b"\n"):
+            chunk = sock.recv(65_535)
+            if not chunk:
+                break
+            data += chunk
+            if len(data) > MAX_AUDIT_RESPONSE:
+                raise NetworkAuditError("audit response is too large")
+        reply = json.loads(data)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise NetworkAuditError(f"cannot use trusted audit socket: {exc}") from exc
+    finally:
+        sock.close()
+    if not isinstance(reply, dict) or not reply.get("ok"):
+        error = reply.get("error", "audit request failed") if isinstance(reply, dict) else "audit request failed"
+        raise NetworkAuditError(str(error))
+    return reply
+
+
+def sd_notify(message: str) -> bool:
+    address = os.environ.get("NOTIFY_SOCKET")
+    if not address:
+        return False
+    if address.startswith("@"):
+        address = "\0" + address[1:]
+    elif not address.startswith("/"):
+        raise NetworkAuditError("NOTIFY_SOCKET must be an absolute path or abstract socket")
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    try:
+        sock.settimeout(2.0)
+        sock.sendto(message.encode("ascii"), address)
+    except OSError as exc:
+        raise NetworkAuditError("could not send systemd readiness notification") from exc
+    finally:
+        sock.close()
+    return True
+
+
+def serve(
+    group: int,
+    uid: int,
+    gid: int,
+    socket_path: str,
+    opener: Callable[[int], Any] = open_nflog,
+    writer: Callable[[str, dict[str, Any]], dict[str, Any]] = request,
+) -> None:
+    sock = opener(group)
+    try:
+        sd_notify("READY=1")
+        while True:
+            data = sock.recv(MAX_NETLINK_DATAGRAM)
+            for event in events_from_datagram(data, group, uid, gid):
+                writer(socket_path, event)
+    finally:
+        sock.close()
+
+
+def daemon_main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
+    parser.add_argument("--group", type=int, default=DEFAULT_GROUP)
+    parser.add_argument("--uid", type=int, required=True)
+    parser.add_argument("--gid", type=int, required=True)
+    parser.add_argument("--socket", default=DEFAULT_SOCKET)
+    args = parser.parse_args(argv)
+    if os.geteuid() != 0:
+        parser.error("diary-network-auditd must run as root")
+    if not 1 <= args.group <= 65_535 or not 0 <= args.uid <= 2_147_483_647 or not 0 <= args.gid <= 2_147_483_647:
+        parser.error("invalid NFLOG group or agent identity")
+    try:
+        serve(args.group, args.uid, args.gid, args.socket)
+    except (NetworkAuditError, OSError) as exc:
+        print(f"diary-network-auditd: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(daemon_main())
