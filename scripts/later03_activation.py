@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -139,6 +140,63 @@ def _unit_text(root: Path, relative: str) -> str:
         raise ActivationError(f"cannot read integration unit {path}") from exc
 
 
+def _exact_set_collection(actual: list[str], expected: list[str], component: str) -> None:
+    if len(actual) != len(set(actual)):
+        raise ActivationError(f"{component} contains duplicate cgroup sets")
+    missing = sorted(set(expected) - set(actual))
+    extra = sorted(set(actual) - set(expected))
+    if missing or extra:
+        details = []
+        if missing:
+            details.append("missing=" + ",".join(missing))
+        if extra:
+            details.append("extra=" + ",".join(extra))
+        raise ActivationError(f"{component} set collection mismatch ({'; '.join(details)})")
+
+
+def _slice_sets(unit_text: str) -> list[str]:
+    values: list[str] = []
+    for line in unit_text.splitlines():
+        line = line.strip()
+        if not line.startswith("NFTSet="):
+            continue
+        value = line.removeprefix("NFTSet=")
+        if not value.startswith("cgroup:") or not SET_RE.fullmatch(value.removeprefix("cgroup:")):
+            raise ActivationError("agent.slice contains a malformed or non-cgroup NFTSet")
+        values.append(value)
+    return values
+
+
+def _controller_sets(unit_text: str) -> list[str]:
+    values: list[str] = []
+    for line in unit_text.splitlines():
+        line = line.strip()
+        if not line.startswith("ExecStart="):
+            continue
+        try:
+            tokens = shlex.split(line.removeprefix("ExecStart="))
+        except ValueError as exc:
+            raise ActivationError("diary-lockd has malformed ExecStart quoting") from exc
+        index = 0
+        while index < len(tokens):
+            token = tokens[index]
+            if token == "--cgroup-set":
+                if index + 1 >= len(tokens):
+                    raise ActivationError("diary-lockd has an empty --cgroup-set argument")
+                value = tokens[index + 1]
+                index += 2
+            elif token.startswith("--cgroup-set="):
+                value = token.partition("=")[2]
+                index += 1
+            else:
+                index += 1
+                continue
+            if not SET_RE.fullmatch(value):
+                raise ActivationError("diary-lockd has a malformed --cgroup-set argument")
+            values.append(value)
+    return values
+
+
 def validate_units(
     diary_repo: Path,
     scripts_repo: Path,
@@ -146,12 +204,9 @@ def validate_units(
 ) -> None:
     slice_text = _unit_text(diary_repo, "systemd/units/agent.slice")
     controller_unit = _unit_text(diary_repo, "systemd/units/diary-lockd.service")
-    for selector in (AUDIT_SET, *required_sets):
-        family, table, name = selector.split(":")
-        if f"NFTSet=cgroup:{family}:{table}:{name}" not in slice_text.splitlines():
-            raise ActivationError(f"agent.slice lacks integrated set {selector}")
-        if f"--cgroup-set {selector}" not in controller_unit:
-            raise ActivationError(f"diary-lockd lacks integrated set {selector}")
+    expected = [AUDIT_SET, *required_sets]
+    _exact_set_collection(_slice_sets(slice_text), [f"cgroup:{item}" for item in expected], "agent.slice")
+    _exact_set_collection(_controller_sets(controller_unit), expected, "diary-lockd")
     for relative in ("dsh/dsh-web.service", "kimi/kimi-web.service"):
         if "Slice=agent.slice" not in _unit_text(diary_repo, relative).splitlines():
             raise ActivationError(f"{relative} is not integrated with agent.slice")

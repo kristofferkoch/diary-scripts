@@ -37,8 +37,9 @@ live CTL-01 controller and UID/user-unit baseline are unchanged by preparation.
 It accepts only root-owned mode-`0600` evidence with explicit ACT-01 acceptance
 and CTL-02 live-verification flags, exact prerequisite/integrated repository
 OIDs, and fixed scope prefixes. Approved HEADs and prerequisite ancestry are
-checked with fixed Git argv. Every declared enforcement set must be integrated
-into both `agent.slice` and the controller command before activation can proceed.
+checked with fixed Git argv. The slice and controller set collections must each
+exactly equal the audit set plus declared enforcement sets, with no missing,
+extra, or duplicate entries, before activation can proceed.
 
 ## Trust boundary and requests
 
