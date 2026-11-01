@@ -257,12 +257,37 @@ def fetch_expected(
     return fetched
 
 
+def request_advisory_review(paths: QueuePaths, reviewed: str) -> None:
+    """Atomically notify the scripts review path unit of the exact queue HEAD."""
+    if not OID_RE.fullmatch(reviewed):
+        raise QueueError("review notification requires a full queue commit OID")
+    trigger = paths.lock.parent / "review-request"
+    fd, temporary = tempfile.mkstemp(prefix=trigger.name + ".", dir=trigger.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(reviewed + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, trigger)
+    except OSError as exc:
+        raise QueueError(f"could not notify advisory reviewer: {exc}") from exc
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
 def queue_change(branch: str, expected: str, paths: QueuePaths, *, repo: str = "scripts") -> bool:
     """Merge one expected agent bundle into the isolated queue. Never push."""
     with queue_lock(paths):
         ensure_queue(paths)
         fetched = fetch_expected(paths.queue, paths, repo, branch, expected)
         if git(paths.queue, "merge-base", "--is-ancestor", fetched, QUEUE_BRANCH, check=False).returncode == 0:
+            if repo == "scripts":
+                current = git(paths.queue, "rev-parse", "HEAD").stdout.strip()
+                request_advisory_review(paths, current)
             print(f"agent-merge: {branch} is already queued")
             return False
 
@@ -278,6 +303,8 @@ def queue_change(branch: str, expected: str, paths: QueuePaths, *, repo: str = "
                 git(paths.queue, "merge", "--abort", check=False)
                 raise QueueError(f"queue merge conflict for {branch}")
         new = git(paths.queue, "rev-parse", "HEAD").stdout.strip()
+        if repo == "scripts":
+            request_advisory_review(paths, new)
         print(f"agent-merge: queued {branch} -> {new}; approved master is unchanged")
         print(f"review: git -C {shlex.quote(str(paths.queue))} diff master...{new}")
         print(f"approve: agent-merge-approve {repo} {new}")

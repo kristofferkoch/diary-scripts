@@ -120,6 +120,9 @@ def test_bundle_queue_and_agent_cleanup_do_not_touch_integration(paths: amq.Queu
     assert run("git", "rev-parse", "dev/change", cwd=paths.integration) == integration_head
     assert (paths.queue / ".git").is_dir(), "queue metadata is standalone"
     assert (paths.queue / "queued.txt").read_text() == "not yet approved\n"
+    trigger = paths.lock.parent / "review-request"
+    assert trigger.read_text() == reviewed(paths) + "\n"
+    assert trigger.stat().st_mode & 0o777 == 0o600
     for repo in (paths.approved, paths.integration):
         assert not (repo / "queued.txt").exists()
         assert run("git", "rev-parse", "master", cwd=repo) == approved_head
@@ -135,6 +138,20 @@ def test_bundle_queue_and_agent_cleanup_do_not_touch_integration(paths: amq.Queu
     )
     assert branch.returncode != 0, "agent cleanup deletes only the source branch"
     assert run("git", "rev-parse", "dev/change", cwd=paths.integration) == integration_head
+
+
+def test_already_queued_request_reemits_review_event(paths: amq.QueuePaths):
+    source_branch(paths)
+    source, expected, bundle = make_bundle(paths, "dev/change")
+    assert amq.queue_change("dev/change", expected, paths) is True
+    trigger = paths.lock.parent / "review-request"
+    trigger.unlink()
+
+    assert amq.queue_change("dev/change", expected, paths) is False
+    assert trigger.read_text() == reviewed(paths) + "\n"
+
+    amq.cleanup_agent_source(source_repo(paths), "dev/change", source)
+    bundle.unlink()
 
 
 def test_owner_can_approve_exact_reviewed_oid(paths: amq.QueuePaths):

@@ -96,11 +96,17 @@ shown here):
 git -C /path/to/diary-scripts-automatic log --oneline master..queue/automatic
 git -C /path/to/diary-scripts-automatic diff master...queue/automatic
 git -C /path/to/diary-scripts-automatic rev-parse HEAD
+agent-merge-review show <full-OID-from-rev-parse>
 agent-merge-approve scripts <full-OID-from-rev-parse>
 ```
 
 For diary, use `/path/to/diary-automatic` and `agent-merge-approve diary <OID>`.
 The legacy `agent-merge-approve <OID>` form still means scripts.
+
+For scripts, queue-triggered `agent-merge-review` adds an advisory local-model
+report with allowlist-based accidental-PII redaction. It never approves or
+executes queued code. The report supplements the diff and tests; it does not
+replace them. See [`agent-merge-review.md`](agent-merge-review.md).
 
 The human supplies the reviewed OID explicitly; the client never substitutes a
 newer queue HEAD. `agent-merge-approve` sends that OID with the request, so a
