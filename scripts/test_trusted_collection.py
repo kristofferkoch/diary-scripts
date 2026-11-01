@@ -190,6 +190,35 @@ def test_auth_expiry_before_first_success_does_not_replay_backfill_to_legacy(
     assert json.loads(state_path.read_text())["last_successful_run"]
 
 
+def test_vigilo_auth_expiry_discards_unexported_seen_markers(
+    spool_path: Path, state_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    _patch_legacy(vigilo_sync, tmp_path, monkeypatch)
+    old_run = "2026-10-01T06:00:00Z"
+    state_path = state_dir / "vigilo-state.json"
+    state_path.write_text(json.dumps({
+        "threads": {"known": {"sig": "old"}},
+        "last_successful_run": old_run,
+        "auth_required": False,
+    }))
+
+    def expired(kinds, state):
+        state["threads"]["unexported"] = {"sig": "new"}
+        raise vigilo_sync.AuthExpiredError("expired after a partial fetch")
+
+    monkeypatch.setattr(vigilo_sync, "run_once", expired)
+    args = [
+        "--once", "--force", "--event-spool", str(spool_path), "--state-dir", str(state_dir),
+    ]
+    assert vigilo_sync.main(args) == 0
+
+    trusted = json.loads(state_path.read_text())
+    assert set(trusted["threads"]) == {"known"}
+    assert trusted["last_successful_run"] == old_run
+    assert trusted["auth_required"] is True
+    assert list(EventSpool(spool_path)) == []
+
+
 def test_forged_legacy_spond_seen_marker_does_not_suppress_trusted_event(
     spool_path: Path, state_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):

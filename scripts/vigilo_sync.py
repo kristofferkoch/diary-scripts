@@ -946,7 +946,9 @@ def main(argv: list[str] | None = None) -> int:
         total, records, counts = run_once(kinds, state)
     except AuthExpiredError as e:
         # Normal end-of-life for a refresh token (30-90 days). Loud, but a
-        # success as far as the sjekk is concerned.
+        # success as far as the sjekk is concerned. Discard partial seen-marks:
+        # their records were not exported and must be selected again next run.
+        state = load_state(state_path)
         state["auth_required"] = True
         persist(bump=False)
         print("!! vigilo auth expired — run vigilo-login", file=sys.stderr)
