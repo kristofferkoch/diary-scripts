@@ -175,6 +175,7 @@ def _copy_missing(
             )
         except FileExistsError:
             return _copy_missing(source_parent_fd, destination_parent_fd, name, track, uid, gid)
+        os.unlink(temporary, dir_fd=destination_parent_fd)
         os.fsync(destination_parent_fd)
     finally:
         os.close(source_fd)
@@ -256,11 +257,15 @@ def migrate_legacy_state(
         os.fchmod(destination_fd, 0o3775)
         for track in TRACKS:
             os.close(_secure_dir(destination_fd, track, uid, gid, 0o2775))
-            source_track_fd = os.open(track, DIR_FLAGS, dir_fd=source_fd)
             try:
-                candidates = [f"{track}-state.json", *_source_files(source_track_fd)]
-            finally:
-                os.close(source_track_fd)
+                source_track_fd = os.open(track, DIR_FLAGS, dir_fd=source_fd)
+            except FileNotFoundError:
+                candidates = [f"{track}-state.json"]
+            else:
+                try:
+                    candidates = [f"{track}-state.json", *_source_files(source_track_fd)]
+                finally:
+                    os.close(source_track_fd)
             for relative in candidates:
                 parent_name = PurePosixPath(relative).name
                 if relative == f"{track}-state.json":

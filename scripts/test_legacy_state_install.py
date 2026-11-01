@@ -215,3 +215,56 @@ def test_write_all_handles_short_writes(monkeypatch):
     monkeypatch.setattr(os, "write", lambda fd, data: chunks.append(data) or min(2, len(data)))
     _write_all(1, b"abcdef")
     assert chunks == [b"abcdef", b"cdef", b"ef"]
+
+
+def test_all_source_tracks_absent_after_first_migration_preserve_destination(roots, tmp_path):
+    source, destination = roots
+    migrate(source, destination)
+    for track in ("spond", "vigilo", "skolemelding"):
+        (source / track).rename(tmp_path / f"deleted-{track}")
+
+    result = migrate(source, destination)
+
+    assert result["copied"] == 0
+    for track in ("spond", "vigilo", "skolemelding"):
+        assert (destination / f"{track}-state.json").read_text() == f'{{"track":"{track}"}}\n'
+        assert (destination / track / "2026-11-01.jsonl").read_text() == f'{{"track":"{track}"}}\n'
+
+
+def test_attachment_temp_is_unlinked_before_final_directory_sync(roots, monkeypatch):
+    source, destination = roots
+    attachment = source / "vigilo/attachments/crash.pdf"
+    attachment.parent.mkdir(parents=True)
+    attachment.write_bytes(b"attachment")
+    operations = []
+    linked = False
+    real_link = os.link
+    real_fsync = os.fsync
+    real_unlink = os.unlink
+
+    def link(*args, **kwargs):
+        nonlocal linked
+        if args[1] == "crash.pdf":
+            linked = True
+            operations.append("link")
+        return real_link(*args, **kwargs)
+
+    def fsync(fd):
+        if linked:
+            operations.append("dir-fsync")
+            raise OSError("simulated crash after attachment link")
+        return real_fsync(fd)
+
+    def unlink(path, **kwargs):
+        operations.append("unlink")
+        return real_unlink(path, **kwargs)
+
+    monkeypatch.setattr(os, "link", link)
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "unlink", unlink)
+    with pytest.raises(OSError, match="simulated crash"):
+        migrate(source, destination)
+    assert operations.index("unlink") < operations.index("dir-fsync")
+    final = destination / "vigilo/attachments/crash.pdf"
+    assert final.stat().st_nlink == 1
+    assert list(final.parent.glob("*.migrate.tmp")) == []
