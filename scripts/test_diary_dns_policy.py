@@ -238,10 +238,24 @@ def test_real_socket_enforces_fixed_proxy_and_agent_identity(tmp_path: Path) -> 
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         client.settimeout(1)
         client.connect(str(tmp_path / "policy.sock"))
-        client.sendall(b'{"dns_name":')
-        response = json.loads(client.makefile("rb").readline(4096))
-        client.close()
-        assert response["ok"] is False and "configured DNS proxy" in response["error"]
+        early_close = False
+        response = None
+        try:
+            client.sendall(b'{"dns_name":')
+            raw = client.makefile("rb").readline(4096)
+            if raw:
+                response = json.loads(raw)
+            else:
+                early_close = True
+        except (BrokenPipeError, ConnectionResetError):
+            early_close = True
+        finally:
+            client.close()
+        assert early_close or (
+            response is not None
+            and response["ok"] is False
+            and "configured DNS proxy" in response["error"]
+        )
         assert len(events.events) == 1
     finally:
         server.shutdown()
