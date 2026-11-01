@@ -308,8 +308,8 @@ class AutheliaClient:
             raise AuthorizationError("Authelia session invalidation failed")
         if old_session:
             old_status, _ = self._forward_auth(old_session, "GET", "/lock/auth-check")
-            if old_status == 200:
-                raise AuthorizationError("Authelia session remains valid after logout")
+            if old_status not in {302, 401}:
+                raise AuthorizationError("Authelia session invalidation could not be confirmed")
 
     def session_proof(self, cookie_header: str | None, created_at: int, method: str, uri: str) -> SessionProof:
         session = self._session_value(cookie_header)

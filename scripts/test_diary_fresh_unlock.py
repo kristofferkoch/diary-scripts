@@ -35,6 +35,7 @@ class FakeAutheliaState:
         self.logout_status = 200
         self.logout_body: dict[str, Any] | None = None
         self.destroy_on_logout = True
+        self.forward_auth_status: int | None = None
         self.logout_entered = threading.Event()
         self.logout_release = threading.Event()
         self.logout_release.set()
@@ -88,6 +89,9 @@ class FakeAutheliaHandler(BaseHTTPRequestHandler):
         session_name = self._session()
         session = self.state.sessions.get(session_name)
         if self.path.startswith("/api/authz/forward-auth?"):
+            if self.state.forward_auth_status is not None:
+                self._reply(self.state.forward_auth_status, {"status": "KO"})
+                return
             if session is None or session.level != 2:
                 self._reply(401, {"status": "KO"})
                 return
@@ -134,8 +138,8 @@ def service(
     state, auth_server = authelia
     config = fresh.Config(
         owner_username="owner",
-        public_origin="https://owner.example.test",
-        authelia_backend=f"http://127.0.0.1:{auth_server.server_port}",
+        public_origin="https://example.test",
+        authelia_backend=f"http://localhost:{auth_server.server_port}",
         session_cookie="diary_lock_authelia_session",
         transaction_ttl=300,
     )
@@ -166,7 +170,7 @@ def request(
 
 def browser_headers(action: str) -> dict[str, str]:
     return {
-        "Origin": "https://owner.example.test",
+        "Origin": "https://example.test",
         "Sec-Fetch-Site": "same-origin",
         action: "yes",
     }
@@ -199,7 +203,7 @@ def test_full_flow_binds_session_and_rejects_substitution_and_replay(
     assert state.logout_calls == 1
     assert "old" not in state.sessions
     location = dict(headers)["Location"]
-    assert location.startswith("https://owner.example.test/authelia/?rd=")
+    assert location.startswith("https://example.test/authelia/?rd=")
     assert "%2Flock%2Funlock%2Freturn" in location
 
     stale = {"diary_lock_authelia_session": "old", fresh.TRANSACTION_COOKIE: transaction}
@@ -301,6 +305,20 @@ def test_http_200_logout_failure_creates_no_transaction(
         assert connection.execute("SELECT count(*) FROM transactions").fetchone()[0] == 0
 
 
+def test_logout_probe_error_creates_no_transaction(
+    service: tuple[fresh.FreshUnlockServer, FakeAutheliaState],
+) -> None:
+    server, state = service
+    state.add("old")
+    state.forward_auth_status = 500
+    assert request(
+        server, "POST", "/lock/unlock/begin", {"diary_lock_authelia_session": "old"},
+        browser_headers("X-Diary-Unlock-Begin"),
+    )[0] == 403
+    with sqlite3.connect(server.transactions.path) as connection:
+        assert connection.execute("SELECT count(*) FROM transactions").fetchone()[0] == 0
+
+
 def test_global_creation_rate_limit_and_live_capacity(
     service: tuple[fresh.FreshUnlockServer, FakeAutheliaState],
 ) -> None:
@@ -389,8 +407,8 @@ def test_legacy_transactions_are_invalidated_on_schema_upgrade(tmp_path: Path) -
 def test_config_rejects_non_loopback_and_long_lived(tmp_path: Path) -> None:
     base = {
         "owner_username": "owner",
-        "public_origin": "https://owner.example.test",
-        "authelia_backend": "http://127.0.0.1:9091",
+        "public_origin": "https://example.test",
+        "authelia_backend": "http://localhost:9091",
         "session_cookie": "diary_lock_authelia_session",
     }
     path = tmp_path / "config.toml"
@@ -399,6 +417,6 @@ def test_config_rejects_non_loopback_and_long_lived(tmp_path: Path) -> None:
     path.write_text(path.read_text() + "\ntransaction_ttl_seconds = 301\n")
     with pytest.raises(fresh.AuthorizationError):
         fresh.load_config(path)
-    path.write_text(path.read_text().replace("http://127.0.0.1:9091", "https://auth.example.test"))
+    path.write_text(path.read_text().replace("http://localhost:9091", "http://example.test"))
     with pytest.raises(fresh.AuthorizationError):
         fresh.load_config(path)
