@@ -17,8 +17,8 @@ Entry-point names: `mailshow`, `search-mail`, `embed-mail`, `embed-messages`,
 `retire-calendar`, `sjekk-collect`, `kindle-dashboard`, `immich-recent`,
 `dsh-web-notify`, `vigilo-api`, `vigilo-login`, `vigilo-sync`, `vigiloshown`,
 `skolemelding-api`, `skolemelding-login`, `skolemelding-sync`,
-`skolemeldingshow`, `diary-sync`, `diary-sync-broker`, `agent-merge-review`,
-`diary-audit`, `diary-auditd`, `diary-production-baseline`, `diary-lock`, `diary-lockd`, `diary-network-auditd`, `diary-dns-auditd`, `diary-fresh-unlock`, `diary-lock-dashboard`. Server modules are invoked as `uv run python -m mail_reader.server` and
+`skolemeldingshow`, `diary-sync`, `diary-sync-broker`, `diary-pipeline-triage`,
+`agent-merge-review`, `diary-audit`, `diary-auditd`, `diary-production-baseline`, `diary-lock`, `diary-lockd`, `diary-network-auditd`, `diary-dns-auditd`, `diary-fresh-unlock`, `diary-lock-dashboard`. Server modules are invoked as `uv run python -m mail_reader.server` and
 `uv run python -m scripts.kindle_dashboard.serve`.
 
 `uv run` creates/syncs `.venv/` on demand; you never need to activate
@@ -35,8 +35,8 @@ names and the important-senders list) live in `config/local.toml` +
 `config/important_senders.txt` in the diary repo, read via `mail_reader.config`
 (`$DIARY_CONFIG` env var or the `~/.config/diary/config.toml` symlink).
 Non-secret host endpoints live in root-owned world-readable
-`/etc/diary/hosts.toml`; privileged collector settings stay in `root:kek` `0640`
-`/etc/diary/trusted.toml`. Neither has an env or local-config override. Legacy
+`/etc/diary/hosts.toml`; privileged collector and fixed-pipeline settings stay in
+`root:kek` `0640` `/etc/diary/trusted.toml`. Neither has an env or local-config override. Legacy
 Spond/Vigilo/Skolemelding cursors, JSONL, and attachments live only in
 `/var/lib/diary/legacy-state`; trusted collector state and immutable events stay
 in their separate `/var/lib/diary` roots. The submodule ships only placeholder
@@ -66,6 +66,7 @@ Per-tool detail and the triage SOPs live in `docs/`. This file is the index.
 | [`docs/diary-sync.md`](docs/diary-sync.md) | `diary-sync` / `diary-sync-broker`: allow-listed socket for the sjekk's privileged steps (spond/vigilo/skolemelding sync, `systemctl --user`) so the agent never holds those secrets |
 | [`docs/event-spool.md`](docs/event-spool.md) | independent trusted collection, immutable event IDs, atomic spool writes, and pipeline read/agent denial permissions |
 | [`docs/pipeline-identity.md`](docs/pipeline-identity.md) | PIPE-02 fixed-purpose `diary-pipeline` identity, root-owned numeric model endpoint, permanent UID egress, and live verification gates |
+| [`docs/pipeline-triage.md`](docs/pipeline-triage.md) | PIPE-03 fixed-local-model triage, strict result validation, local review, and restart-safe state |
 | [`docs/legacy-state.md`](docs/legacy-state.md) | manual collector runtime state and safe migration out of tracked `memory/` |
 | [`docs/agent-merge.md`](docs/agent-merge.md) | `agent-merge-queue` / `agent-merge-approve`: separate automatic and approved trees, exact-OID owner publication |
 | [`docs/agent-merge-review.md`](docs/agent-merge-review.md) | advisory local-model scripts-queue review, pre-queue allowlist rejection, owner-readable reports |
