@@ -32,13 +32,13 @@ def make_event(payload: dict[str, Any] | None = None) -> dict[str, Any]:
             "to": "private-recipient@example.test",
             "subject": "Permission form",
             "body": "Answer by Friday.",
-            "attachments": [{"filename": "private-name.pdf", "url": "https://private.invalid/a"}],
+            "attachments": [{"filename": "private-name.pdf", "url": "https://example.invalid/a"}],
             "childId": "private-child-id",
             "messages": [{
                 "sender": "Sender",
                 "body": "Nested detail",
                 "threadUid": "private-thread-id",
-                "url": "https://private.invalid/thread",
+                "url": "https://example.invalid/thread",
             }],
         },
         revision="notmuch-v1",
@@ -101,7 +101,8 @@ def model_server(
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield f"http://127.0.0.1:{server.server_port}", requests
+        base_url = "http://" + str(server.server_address[0])
+        yield f"{base_url}:{server.server_port}", requests
     finally:
         server.shutdown()
         server.server_close()
@@ -147,7 +148,7 @@ def test_valid_event_sends_minimum_content_and_commits_exact_result(tmp_path: Pa
     encoded = json.dumps(sent)
     for excluded in (
         "native-transport-id", "transport-message-id", "private-recipient@example.test",
-        "private-name.pdf", "private-child-id", "private-thread-id", "private.invalid",
+        "private-name.pdf", "private-child-id", "private-thread-id", "example.invalid",
     ):
         assert excluded not in encoded
     store = triage.TriageStore(state_dir)
@@ -180,7 +181,7 @@ def test_pipeline02_provisioned_0750_state_directory_is_accepted(tmp_path: Path)
         lambda value: value.update(extra=True),
         lambda value: value.pop("summary"),
         lambda value: value.update(event_id="evt_" + "0" * 64),
-        lambda value: value.update(review_reference="https://attacker.invalid/"),
+        lambda value: value.update(review_reference="https://example.invalid/"),
         lambda value: value.update(urgency="urgent"),
         lambda value: value.update(urgency=[]),
         lambda value: value.update(summary=""),
@@ -282,7 +283,7 @@ def test_transport_retry_defers_then_success_preserves_attempt_history(tmp_path:
         triage, "call_model",
         lambda *args: (_ for _ in ()).throw(triage.ModelTransportError("fixed endpoint unavailable")),
     )
-    config = model_config("http://127.0.0.1:9")
+    config = model_config("http://example.com:9")
     assert triage.run_once(spool, tmp_path / "state", config=config)["retry"] == 1
     assert triage.run_once(spool, tmp_path / "state", config=config)["deferred"] == 1
     monkeypatch.undo()
@@ -309,7 +310,7 @@ def test_slow_failure_backoff_starts_at_failure_commit_time(tmp_path: Path, monk
     monkeypatch.setattr(triage, "_now", lambda: current[0])
     monkeypatch.setattr(triage, "call_model", slow_failure)
     counts = triage.run_once(
-        spool, tmp_path / "state", config=model_config("http://127.0.0.1:9"),
+        spool, tmp_path / "state", config=model_config("http://example.com:9"),
     )
     assert counts["retry"] == 1
     state = triage.TriageStore(tmp_path / "state").load(event["event_id"])
@@ -317,7 +318,7 @@ def test_slow_failure_backoff_starts_at_failure_commit_time(tmp_path: Path, monk
     assert state is not None and state["updated_at"] == failure_time.isoformat()
     assert state["next_eligible_at"] == (failure_time + dt.timedelta(seconds=60)).isoformat()
     assert triage.run_once(
-        spool, tmp_path / "state", config=model_config("http://127.0.0.1:9"),
+        spool, tmp_path / "state", config=model_config("http://example.com:9"),
     )["deferred"] == 1
 
 
@@ -335,7 +336,7 @@ def test_persistent_attempt_ceiling_and_backoff_survive_restarts(tmp_path: Path,
 
     monkeypatch.setattr(triage, "_now", lambda: current[0])
     monkeypatch.setattr(triage, "call_model", fail)
-    config = model_config("http://127.0.0.1:9")
+    config = model_config("http://example.com:9")
     store = triage.TriageStore(tmp_path / "state")
     for attempt in range(1, triage.MAX_ATTEMPTS + 1):
         counts = triage.run_once(spool, tmp_path / "state", config=config)
@@ -369,7 +370,7 @@ def test_crash_recovery_persists_backoff_before_completing(tmp_path: Path, monke
 
     monkeypatch.setattr(triage, "_now", lambda: START)
     monkeypatch.setattr(triage, "call_model", crash)
-    config = model_config("http://127.0.0.1:9")
+    config = model_config("http://example.com:9")
     with pytest.raises(SimulatedCrash):
         triage.run_once(spool, tmp_path / "state", config=config)
     interrupted = triage.TriageStore(tmp_path / "state").load(event["event_id"])
@@ -393,7 +394,7 @@ def test_crash_recovery_persists_backoff_before_completing(tmp_path: Path, monke
 
 
 def test_empty_allowlisted_content_stays_in_review_without_model_call(tmp_path: Path, monkeypatch):
-    event = make_event({"message_id": "native", "childId": "private", "url": "https://private.invalid"})
+    event = make_event({"message_id": "native", "childId": "private", "url": "https://example.invalid"})
     spool = tmp_path / "events"
     write_event(spool, event)
 
@@ -402,7 +403,7 @@ def test_empty_allowlisted_content_stays_in_review_without_model_call(tmp_path: 
 
     monkeypatch.setattr(triage, "call_model", unexpected)
     counts = triage.run_once(
-        spool, tmp_path / "state", config=model_config("http://127.0.0.1:9"),
+        spool, tmp_path / "state", config=model_config("http://example.com:9"),
     )
     assert counts["review"] == 1
     state = triage.TriageStore(tmp_path / "state").load(event["event_id"])
@@ -422,7 +423,7 @@ def test_corrupt_state_fails_closed_without_calling_model(tmp_path: Path, monkey
 
     monkeypatch.setattr(triage, "call_model", unexpected)
     with pytest.raises(triage.StateError):
-        triage.run_once(spool, state_dir, config=model_config("http://127.0.0.1:9"))
+        triage.run_once(spool, state_dir, config=model_config("http://example.com:9"))
 
 
 def test_state_validation_rejects_unknown_status_type_and_missing_retry_time():
@@ -466,7 +467,7 @@ def test_fixed_config_and_state_paths_match_pipeline_contract(config_path: Path)
 def test_config_has_no_environment_or_collector_config_fallback(
     config_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    monkeypatch.setenv("PIPELINE_ENDPOINT", "https://attacker.invalid")
+    monkeypatch.setenv("PIPELINE_ENDPOINT", "https://example.invalid")
     monkeypatch.setenv("DIARY_CONFIG", "/attacker/config.toml")
     config = triage.load_config(config_path)
     assert (config.model, config.model_ip, config.model_port) == ("trusted-local", "127.0.0.1", 8080)
@@ -475,8 +476,8 @@ def test_config_has_no_environment_or_collector_config_fallback(
 @pytest.mark.parametrize(
     "extra",
     [
-        'endpoint = "http://127.0.0.1:8080"\n',
-        'alternate_endpoint = "http://127.0.0.1:8081"\n',
+        'endpoint = "http://example.com:8080"\n',
+        'alternate_endpoint = "http://example.com:8081"\n',
         '[collector]\ntoken = "must-not-be-here"\n',
     ],
 )
@@ -502,7 +503,7 @@ def test_config_accepts_model_identifier_ascii_boundaries():
         assert triage._parse_document(document).model == model
 
 
-@pytest.mark.parametrize("model_ip", [None, "model.local", "http://127.0.0.1", "::1", "0.0.0.0"])
+@pytest.mark.parametrize("model_ip", [None, "model.local", "http://example.com", "::1", "0.0.0.0"])
 def test_config_rejects_non_numeric_or_ambiguous_model_addresses(model_ip: Any):
     document = {"pipeline": {"model": "local", "model_ip": model_ip, "model_port": 8080}}
     with pytest.raises(triage.ConfigError):
