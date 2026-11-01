@@ -35,6 +35,10 @@ class QueueChanged(ConsoleError):
     """The displayed queue OID no longer identifies the current queued state."""
 
 
+class ApprovedBaseChanged(QueueChanged):
+    """Approved master no longer matches the reviewed diff base."""
+
+
 @dataclass(frozen=True)
 class OwnerGrant:
     """A trusted CTL-07 authorization result, never a browser-supplied claim."""
@@ -63,6 +67,7 @@ class DecisionRecord:
             "merge_failed": "error",
             "owner_denied": "deny",
             "queue_changed": "deny",
+            "base_changed": "deny",
         }
         if self.outcome not in decisions:
             raise ConsoleError("unknown console audit outcome")
@@ -74,6 +79,7 @@ class DecisionRecord:
             "lock_state": self.lock_state,
             "reason": self.outcome,
             "event_id": self.queue_oid,
+            "base_oid": self.base_oid,
         }
 
 
@@ -113,6 +119,7 @@ class QueueSnapshot:
 class DecisionResult:
     action: DecisionAction
     queue_oid: str
+    base_oid: str
     outcome: str
 
 
@@ -123,8 +130,19 @@ class _CurrentQueue:
     pending: bool
 
 
-OwnerAuthorizer = Callable[[DecisionAction, str], OwnerGrant]
-Publisher = Callable[[str, queue.QueuePaths], bool]
+OwnerAuthorizer = Callable[[DecisionAction, str, str], OwnerGrant]
+
+
+class Publisher(Protocol):
+    def __call__(
+        self,
+        reviewed: str,
+        paths: queue.QueuePaths,
+        /,
+        *,
+        expected_base: str | None = None,
+    ) -> bool:
+        """Publish only the reviewed queue/base pair."""
 
 
 class MergeConsole:
@@ -207,28 +225,38 @@ class MergeConsole:
     def _record(self, action: DecisionAction, oid: str, base: str, outcome: str) -> None:
         self.auditor.record(DecisionRecord(action, oid, base, outcome, self.lock_state))
 
-    def decide(self, action: DecisionAction, reviewed_oid: str) -> DecisionResult:
-        if action not in {"merge", "deny"} or not queue.OID_RE.fullmatch(reviewed_oid):
-            raise ConsoleError("decision requires merge or deny and a full reviewed queue OID")
-        grant = self.authorizer(action, reviewed_oid)
+    def decide(self, action: DecisionAction, reviewed_oid: str, reviewed_base: str) -> DecisionResult:
+        if (
+            action not in {"merge", "deny"}
+            or not queue.OID_RE.fullmatch(reviewed_oid)
+            or not queue.OID_RE.fullmatch(reviewed_base)
+        ):
+            raise ConsoleError("decision requires merge or deny and full reviewed queue and base OIDs")
+        grant = self.authorizer(action, reviewed_oid, reviewed_base)
         if not isinstance(grant, OwnerGrant):
             raise OwnerAuthorizationRequired("an independent owner grant is required")
         current = self._current()
-        if current.oid != reviewed_oid or not current.pending:
-            self._record(action, reviewed_oid, current.base, "queue_changed")
+        if current.oid != reviewed_oid:
+            self._record(action, reviewed_oid, reviewed_base, "queue_changed")
             raise QueueChanged("queue changed after review; no repository operation was performed")
+        if current.base != reviewed_base:
+            self._record(action, reviewed_oid, reviewed_base, "base_changed")
+            raise ApprovedBaseChanged("approved master changed after review; no repository operation was performed")
+        if not current.pending:
+            self._record(action, reviewed_oid, reviewed_base, "queue_changed")
+            raise QueueChanged("reviewed queue is already approved; no repository operation was performed")
         if action == "deny":
-            self._record(action, reviewed_oid, current.base, "owner_denied")
-            return DecisionResult(action, reviewed_oid, "denied")
+            self._record(action, reviewed_oid, reviewed_base, "owner_denied")
+            return DecisionResult(action, reviewed_oid, reviewed_base, "denied")
 
-        self._record(action, reviewed_oid, current.base, "owner_authorized")
+        self._record(action, reviewed_oid, reviewed_base, "owner_authorized")
         try:
-            self.publisher(reviewed_oid, self.paths)
+            self.publisher(reviewed_oid, self.paths, expected_base=reviewed_base)
         except Exception:
-            self._record(action, reviewed_oid, current.base, "merge_failed")
+            self._record(action, reviewed_oid, reviewed_base, "merge_failed")
             raise
-        self._record(action, reviewed_oid, current.base, "merge_completed")
-        return DecisionResult(action, reviewed_oid, "merged")
+        self._record(action, reviewed_oid, reviewed_base, "merge_completed")
+        return DecisionResult(action, reviewed_oid, reviewed_base, "merged")
 
 
 def render_console(snapshot: QueueSnapshot | None, action_path: str = "/lock/merge/decide") -> str:
@@ -255,11 +283,13 @@ def render_console(snapshot: QueueSnapshot | None, action_path: str = "/lock/mer
   <form method="post" action="{html.escape(action_path, quote=True)}">
     <input type="hidden" name="action" value="merge">
     <input type="hidden" name="queue_oid" value="{html.escape(snapshot.queue_oid, quote=True)}">
-    <button type="submit" name="confirm" value="merge"{disabled}>Merge exact reviewed OID</button>
+    <input type="hidden" name="base_oid" value="{html.escape(snapshot.base_oid, quote=True)}">
+    <button type="submit" name="confirm" value="merge"{disabled}>Merge exact reviewed queue/base OIDs</button>
   </form>
   <form method="post" action="{html.escape(action_path, quote=True)}">
     <input type="hidden" name="action" value="deny">
     <input type="hidden" name="queue_oid" value="{html.escape(snapshot.queue_oid, quote=True)}">
+    <input type="hidden" name="base_oid" value="{html.escape(snapshot.base_oid, quote=True)}">
     <button type="submit" name="confirm" value="deny"{disabled}>Deny without merge or push</button>
   </form>
 </section>"""

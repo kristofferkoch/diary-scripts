@@ -49,10 +49,10 @@ MAX_REPORT_RECORDS = 10_000
 REQUIRED_FIELDS = ("event", "component", "operation", "decision", "lock_state")
 TOKEN_FIELDS = (
     "event", "component", "operation", "decision", "lock_state", "reason",
-    "event_id", "session_id", "tool", "unit", "protocol",
+    "event_id", "base_oid", "session_id", "tool", "unit", "protocol",
 )
 OPTIONAL_FIELDS = (
-    "reason", "event_id", "session_id", "tool", "unit", "destination_ip",
+    "reason", "event_id", "base_oid", "session_id", "tool", "unit", "destination_ip",
     "destination_port", "protocol", "dns_name", "caller",
 )
 SENSITIVE_FIELDS = frozenset({
@@ -80,6 +80,7 @@ FIELD_MAP = {
     "lock_state": "DIARY_AUDIT_LOCK_STATE",
     "reason": "DIARY_AUDIT_REASON",
     "event_id": "DIARY_AUDIT_EVENT_ID",
+    "base_oid": "DIARY_AUDIT_BASE_OID",
     "session_id": "DIARY_AUDIT_SESSION_ID",
     "tool": "DIARY_AUDIT_TOOL",
     "unit": "DIARY_AUDIT_UNIT",

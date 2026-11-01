@@ -371,6 +371,16 @@ def sync_venv(paths: QueuePaths) -> None:
         raise QueueError(f"approved virtualenv sync failed: {(proc.stderr or proc.stdout).strip()}")
 
 
+def enforce_expected_base(paths: QueuePaths, expected_base: str | None) -> None:
+    if expected_base is None:
+        return
+    actual = git(paths.approved, "rev-parse", "master").stdout.strip()
+    if actual != expected_base:
+        raise QueueError(
+            f"approved master changed after review: reviewed base {expected_base}, current {actual}"
+        )
+
+
 def publish_fetched(
     reviewed: str,
     paths: QueuePaths,
@@ -378,6 +388,7 @@ def publish_fetched(
     push: bool,
     sync_environment: bool,
     synchronize_queue: bool,
+    expected_base: str | None = None,
 ) -> bool:
     if not (paths.approved / ".git").is_dir():
         raise QueueError("approved checkout must have private, standalone Git metadata")
@@ -390,6 +401,7 @@ def publish_fetched(
         raise QueueError("approved checkout is not on master")
 
     if git(paths.approved, "merge-base", "--is-ancestor", reviewed, "master", check=False).returncode == 0:
+        enforce_expected_base(paths, expected_base)
         sync_integration(paths)
         if sync_environment:
             sync_venv(paths)
@@ -403,6 +415,7 @@ def publish_fetched(
     base = git(paths.approved, "rev-parse", "--short", "master").stdout.strip()
     print(f"agent-merge: publishing {reviewed} into master (was {base})")
     print(git(paths.approved, "diff", "--stat", f"master...{reviewed}").stdout, end="")
+    enforce_expected_base(paths, expected_base)
     if git(paths.approved, "merge-base", "--is-ancestor", "master", reviewed, check=False).returncode == 0:
         git(paths.approved, "merge", "--ff-only", reviewed)
     else:
@@ -428,15 +441,19 @@ def approve_queue(
     *,
     push: bool = True,
     sync_environment: bool = True,
+    expected_base: str | None = None,
 ) -> bool:
-    """Publish exactly the reviewed queue commit; caller UID is checked by the CLI."""
+    """Publish exactly the reviewed queue commit and optional reviewed base."""
     if not OID_RE.fullmatch(reviewed):
         raise QueueError("approval requires the full reviewed queue commit OID")
+    if expected_base is not None and not OID_RE.fullmatch(expected_base):
+        raise QueueError("base enforcement requires the full reviewed approved-master OID")
     with queue_lock(paths):
         ensure_queue(paths)
         actual = git(paths.queue, "rev-parse", "HEAD").stdout.strip()
         if actual != reviewed:
             raise QueueError(f"queue changed after review: reviewed {reviewed}, current {actual}")
+        enforce_expected_base(paths, expected_base)
         git(paths.approved, "fetch", "--no-tags", str(paths.queue), reviewed)
         fetched = git(paths.approved, "rev-parse", "FETCH_HEAD").stdout.strip()
         if fetched != reviewed:
@@ -447,6 +464,7 @@ def approve_queue(
             push=push,
             sync_environment=sync_environment,
             synchronize_queue=True,
+            expected_base=expected_base,
         )
 
 

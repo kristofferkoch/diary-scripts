@@ -64,8 +64,10 @@ Required fields are `event`, `component`, `operation`, `decision`, and
 `lock_state`. Decisions are `allow`, `deny`, `would_allow`, `would_deny`,
 `observed`, or `error`; lock states are `locking`, `locked`, `attended`,
 `unknown`, or `not_applicable`. Optional metadata is limited to `reason`,
-`event_id`, `session_id`, `tool`, `unit`, `destination_ip`, `destination_port`,
-`protocol`, `dns_name`, and `caller`. Caller attribution may include trusted
+`event_id`, `base_oid`, `session_id`, `tool`, `unit`, `destination_ip`,
+`destination_port`, `protocol`, `dns_name`, and `caller`. The owner merge
+console uses `event_id` for its reviewed queue OID and `base_oid` for the exact
+approved-master base. Caller attribution may include trusted
 `unit`, `session_id`, and `tool` metadata. Unknown fields fail closed.
 
 Journal fields use the `DIARY_AUDIT_` prefix and schema version 1. Journald adds

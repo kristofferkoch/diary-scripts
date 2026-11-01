@@ -69,8 +69,8 @@ def environment(tmp_path: Path) -> tuple[queue.QueuePaths, Path, Path]:
     return paths, remote, tmp_path / "reports"
 
 
-def owner_grant(action: console.DecisionAction, oid: str) -> console.OwnerGrant:
-    return console.OwnerGrant("owner", f"{action}:{oid}")
+def owner_grant(action: console.DecisionAction, oid: str, base: str) -> console.OwnerGrant:
+    return console.OwnerGrant("owner", f"{action}:{oid}:{base}")
 
 
 def make_console(
@@ -137,6 +137,8 @@ def test_snapshot_shows_real_approved_master_diff_and_same_oid_report(
     rendered = console.render_console(snapshot)
     assert queued_oid in rendered
     assert approved_base in rendered
+    assert rendered.count('name="base_oid"') == 2
+    assert f'name="base_oid" value="{approved_base}"' in rendered
     assert "+VALUE = 1" in rendered
     assert "&lt;script" in rendered
     assert "alert(1)" in rendered
@@ -148,31 +150,47 @@ def test_locked_owner_merge_publishes_exact_oid_and_audits(
 ):
     paths, remote, reports = environment
     oid = git(paths.queue, "rev-parse", "HEAD")
+    base = git(paths.approved, "rev-parse", "master")
     audit = FakeAudit()
-    calls: list[tuple[console.DecisionAction, str]] = []
+    calls: list[tuple[console.DecisionAction, str, str]] = []
 
-    def authorize(action: console.DecisionAction, reviewed: str) -> console.OwnerGrant:
-        calls.append((action, reviewed))
-        return owner_grant(action, reviewed)
+    def authorize(action: console.DecisionAction, reviewed: str, reviewed_base: str) -> console.OwnerGrant:
+        calls.append((action, reviewed, reviewed_base))
+        return owner_grant(action, reviewed, reviewed_base)
 
-    publisher_calls: list[str] = []
+    publisher_calls: list[tuple[str, str | None]] = []
 
-    def publish(reviewed: str, actual_paths: queue.QueuePaths) -> bool:
-        publisher_calls.append(reviewed)
-        return queue.approve_queue(reviewed, actual_paths, sync_environment=False)
+    def publish(
+        reviewed: str,
+        actual_paths: queue.QueuePaths,
+        *,
+        expected_base: str | None = None,
+    ) -> bool:
+        publisher_calls.append((reviewed, expected_base))
+        return queue.approve_queue(
+            reviewed, actual_paths, sync_environment=False, expected_base=expected_base,
+        )
 
     result = console.MergeConsole(
         paths, authorize, audit, report_dir=reports, publisher=publish, lock_state="locked",
-    ).decide("merge", oid)
+    ).decide("merge", oid, base)
 
     assert result.outcome == "merged"
-    assert calls == [("merge", oid)]
-    assert publisher_calls == [oid]
+    assert result.base_oid == base
+    assert calls == [("merge", oid, base)]
+    assert publisher_calls == [(oid, base)]
     assert remote_head(remote) == oid
     assert git(paths.integration, "rev-parse", "master") == oid
     assert [item.outcome for item in audit.records] == ["owner_authorized", "merge_completed"]
-    assert all(item.queue_oid == oid and item.lock_state == "locked" for item in audit.records)
-    assert audit.records[-1].as_audit_event()["event_id"] == oid
+    assert all(
+        item.queue_oid == oid and item.base_oid == base and item.lock_state == "locked"
+        for item in audit.records
+    )
+    event = audit.records[-1].as_audit_event()
+    assert event["event_id"] == oid
+    assert event["base_oid"] == base
+    normalized, _ = console.diary_audit.normalize_event(event)
+    assert normalized["base_oid"] == base
 
 
 def test_stale_oid_merge_fails_without_merge_or_push(
@@ -186,12 +204,39 @@ def test_stale_oid_merge_fails_without_merge_or_push(
     audit = FakeAudit()
 
     with pytest.raises(console.QueueChanged, match="changed after review"):
-        make_console(paths, reports, audit).decide("merge", reviewed)
+        make_console(paths, reports, audit).decide("merge", reviewed, approved)
 
     assert git(paths.approved, "rev-parse", "master") == approved
     assert remote_head(remote) == published
     assert not (paths.approved / "queued.py").exists()
     assert [item.outcome for item in audit.records] == ["queue_changed"]
+    assert audit.records[0].base_oid == approved
+
+
+def test_base_only_change_fails_without_unreviewed_merge(
+    environment: tuple[queue.QueuePaths, Path, Path],
+):
+    paths, remote, reports = environment
+    reviewed = git(paths.queue, "rev-parse", "HEAD")
+    reviewed_base = git(paths.approved, "rev-parse", "master")
+    published = remote_head(remote)
+    integration = git(paths.integration, "rev-parse", "master")
+    advanced_base = commit(paths.approved, "owner.py", "OWNER = True\n", "base advanced")
+    git(paths.queue, "fetch", "-q", str(paths.approved), "master")
+    audit = FakeAudit()
+
+    with pytest.raises(console.ApprovedBaseChanged, match="approved master changed"):
+        make_console(paths, reports, audit).decide("merge", reviewed, reviewed_base)
+
+    assert git(paths.queue, "rev-parse", "HEAD") == reviewed
+    assert git(paths.approved, "rev-parse", "master") == advanced_base
+    assert git(paths.integration, "rev-parse", "master") == integration
+    assert remote_head(remote) == published
+    assert not (paths.approved / "queued.py").exists()
+    assert [item.outcome for item in audit.records] == ["base_changed"]
+    assert audit.records[0].queue_oid == reviewed
+    assert audit.records[0].base_oid == reviewed_base
+    assert audit.records[0].as_audit_event()["reason"] == "base_changed"
 
 
 def test_agent_session_and_supplied_oid_have_no_authority(
@@ -199,19 +244,27 @@ def test_agent_session_and_supplied_oid_have_no_authority(
 ):
     paths, remote, reports = environment
     oid = git(paths.queue, "rev-parse", "HEAD")
+    base = git(paths.approved, "rev-parse", "master")
     published = remote_head(remote)
 
-    def agent_session(action: console.DecisionAction, reviewed: str) -> console.OwnerGrant:
+    def agent_session(
+        action: console.DecisionAction, reviewed: str, reviewed_base: str,
+    ) -> console.OwnerGrant:
         raise console.OwnerAuthorizationRequired("agent session is not owner authorization")
 
-    def unexpected_publish(reviewed: str, actual_paths: queue.QueuePaths) -> bool:
-        pytest.fail("an agent-supplied OID reached publication")
+    def unexpected_publish(
+        reviewed: str,
+        actual_paths: queue.QueuePaths,
+        *,
+        expected_base: str | None = None,
+    ) -> bool:
+        pytest.fail("agent-supplied OIDs reached publication")
 
     ui = console.MergeConsole(
         paths, agent_session, FakeAudit(), report_dir=reports, publisher=unexpected_publish,
     )
     with pytest.raises(console.OwnerAuthorizationRequired):
-        ui.decide("merge", oid)
+        ui.decide("merge", oid, base)
 
     assert remote_head(remote) == published
     assert not (paths.approved / "queued.py").exists()
@@ -222,6 +275,7 @@ def test_deny_only_records_decision_without_merge_or_push(
 ):
     paths, remote, reports = environment
     oid = git(paths.queue, "rev-parse", "HEAD")
+    base = git(paths.approved, "rev-parse", "master")
     before = {
         repo: git(repo, "rev-parse", "HEAD")
         for repo in (paths.queue, paths.approved, paths.integration)
@@ -229,14 +283,20 @@ def test_deny_only_records_decision_without_merge_or_push(
     published = remote_head(remote)
     audit = FakeAudit()
 
-    def unexpected_publish(reviewed: str, actual_paths: queue.QueuePaths) -> bool:
+    def unexpected_publish(
+        reviewed: str,
+        actual_paths: queue.QueuePaths,
+        *,
+        expected_base: str | None = None,
+    ) -> bool:
         pytest.fail("Deny reached merge/push")
 
     result = console.MergeConsole(
         paths, owner_grant, audit, report_dir=reports, publisher=unexpected_publish,
-    ).decide("deny", oid)
+    ).decide("deny", oid, base)
 
     assert result.outcome == "denied"
+    assert result.base_oid == base
     assert remote_head(remote) == published
     assert before == {
         repo: git(repo, "rev-parse", "HEAD")
@@ -248,6 +308,7 @@ def test_deny_only_records_decision_without_merge_or_push(
     assert event["operation"] == "deny"
     assert event["decision"] == "deny"
     assert event["event_id"] == oid
+    assert event["base_oid"] == base
 
 
 def test_audit_failure_prevents_merge(
@@ -255,10 +316,11 @@ def test_audit_failure_prevents_merge(
 ):
     paths, remote, reports = environment
     oid = git(paths.queue, "rev-parse", "HEAD")
+    base = git(paths.approved, "rev-parse", "master")
     published = remote_head(remote)
 
     with pytest.raises(OSError, match="audit failure"):
-        make_console(paths, reports, FailingAudit()).decide("merge", oid)
+        make_console(paths, reports, FailingAudit()).decide("merge", oid, base)
 
     assert remote_head(remote) == published
     assert not (paths.approved / "queued.py").exists()
@@ -281,10 +343,15 @@ def test_advisory_report_never_controls_or_blocks_owner_approval(
             stale=report_state == "stale",
             model_status="error" if report_state == "failed" else "completed",
         )
-    published: list[str] = []
+    published: list[tuple[str, str | None]] = []
 
-    def publish(reviewed: str, actual_paths: queue.QueuePaths) -> bool:
-        published.append(reviewed)
+    def publish(
+        reviewed: str,
+        actual_paths: queue.QueuePaths,
+        *,
+        expected_base: str | None = None,
+    ) -> bool:
+        published.append((reviewed, expected_base))
         return True
 
     ui = make_console(paths, reports, publisher=publish)
@@ -293,5 +360,5 @@ def test_advisory_report_never_controls_or_blocks_owner_approval(
     expected = {"missing": "missing", "stale": "stale", "malformed": "unavailable", "failed": "current"}
     assert snapshot.advisory.status == expected[report_state]
 
-    assert ui.decide("merge", oid).outcome == "merged"
-    assert published == [oid]
+    assert ui.decide("merge", oid, base).outcome == "merged"
+    assert published == [(oid, base)]

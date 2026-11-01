@@ -227,6 +227,59 @@ def test_new_queue_commit_after_review_is_rejected(paths: amq.QueuePaths):
     assert not (paths.approved / "queued.txt").exists()
 
 
+def test_expected_base_change_before_publication_is_rejected(paths: amq.QueuePaths):
+    source_branch(paths)
+    queue_source(paths)
+    oid = reviewed(paths)
+    reviewed_base = run("git", "rev-parse", "master", cwd=paths.approved)
+    integration = run("git", "rev-parse", "master", cwd=paths.integration)
+    remote = run("git", "config", "--get", "remote.origin.url", cwd=paths.approved)
+    published = run("git", "--git-dir", remote, "rev-parse", "master")
+    commit(paths.approved, "owner.txt", "base advanced\n")
+    advanced = run("git", "rev-parse", "master", cwd=paths.approved)
+
+    with pytest.raises(amq.QueueError, match="approved master changed after review"):
+        amq.approve_queue(oid, paths, expected_base=reviewed_base)
+
+    assert run("git", "rev-parse", "master", cwd=paths.approved) == advanced
+    assert run("git", "rev-parse", "master", cwd=paths.integration) == integration
+    assert run("git", "--git-dir", remote, "rev-parse", "master") == published
+    assert reviewed(paths) == oid
+    assert not (paths.approved / "queued.txt").exists()
+
+
+def test_base_race_at_locked_publication_recheck_is_rejected(
+    paths: amq.QueuePaths, monkeypatch: pytest.MonkeyPatch,
+):
+    source_branch(paths)
+    queue_source(paths)
+    oid = reviewed(paths)
+    reviewed_base = run("git", "rev-parse", "master", cwd=paths.approved)
+    integration = run("git", "rev-parse", "master", cwd=paths.integration)
+    remote = run("git", "config", "--get", "remote.origin.url", cwd=paths.approved)
+    published = run("git", "--git-dir", remote, "rev-parse", "master")
+    original_git = amq.git
+    advanced: list[str] = []
+
+    def racing_git(repo: Path, *args: str, safe: bool = False, check: bool = True):
+        proc = original_git(repo, *args, safe=safe, check=check)
+        if repo == paths.approved and args and args[0] == "fetch":
+            commit(paths.approved, "owner.txt", "base raced after freshness check\n")
+            advanced.append(run("git", "rev-parse", "master", cwd=paths.approved))
+        return proc
+
+    monkeypatch.setattr(amq, "git", racing_git)
+    with pytest.raises(amq.QueueError, match="approved master changed after review"):
+        amq.approve_queue(oid, paths, expected_base=reviewed_base)
+
+    assert len(advanced) == 1
+    assert run("git", "rev-parse", "master", cwd=paths.approved) == advanced[0]
+    assert run("git", "rev-parse", "master", cwd=paths.integration) == integration
+    assert run("git", "--git-dir", remote, "rev-parse", "master") == published
+    assert reviewed(paths) == oid
+    assert not (paths.approved / "queued.txt").exists()
+
+
 def test_client_uses_only_the_explicit_reviewed_oid(paths: amq.QueuePaths, monkeypatch: pytest.MonkeyPatch):
     oid = "a" * 40
     seen: list[str] = []

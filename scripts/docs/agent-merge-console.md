@@ -22,41 +22,46 @@ from the queue checkout's potentially stale `master` ref, and displays:
 `render_console()` places the advisory report beside, never instead of, the real
 diff. Its fixed HTML template escapes commit, diff, and model text. Missing,
 stale, malformed, and model-failed reports are labeled but never disable Merge
-or Deny and never participate in authorization. The hidden OID in a rendered
-form is only the reviewed-object identifier; it is not proof of ownership.
+or Deny and never participate in authorization. Both forms carry hidden queue
+and approved-base OIDs. Those values identify the reviewed pair; they are not
+proof of ownership.
 
 ## Decision and audit boundary
 
 CTL-07 must inject an owner-authorization callable. Every Merge or Deny decision
-must return an `OwnerGrant` for the requested action and exact OID before this
-module reads the queue for a decision. Browser fields, DSH/Kimi sessions or
-tokens, an ordinary two-factor cookie, and an agent-supplied OID must not be
-translated into a grant. The existing CTL-08 transaction is unlock-specific;
-CTL-07 must provide an action-and-OID-bound fresh authorization flow rather
-than presenting an unlock consumption as merge authority.
+must return an `OwnerGrant` for the requested action, exact queue OID, and exact
+approved-base OID before this module reads the queue for a decision. Browser
+fields, DSH/Kimi sessions or tokens, an ordinary two-factor cookie, and
+agent-supplied OIDs must not be translated into a grant. The existing CTL-08
+transaction is unlock-specific; CTL-07 must provide an
+action-queue-and-base-bound fresh authorization flow rather than presenting an
+unlock consumption as merge authority.
 
-After authorization, the console rechecks the current queue. A changed or
-already-published OID fails with no publication. Merge writes an
-`owner_authorized` audit event and then calls the unchanged
-`agent_merge_queue.approve_queue()` with the same OID. That existing path takes
-the queue lock, checks the exact OID again, merges approved `master`, and uses a
+After authorization, the console rechecks both the current queue and approved
+`master`. A changed queue produces `queue_changed`; a base-only change produces
+`base_changed`; either fails without publication. Merge writes an
+`owner_authorized` audit event and calls
+`agent_merge_queue.approve_queue(..., expected_base=reviewed_base)` with the
+same pair. While holding the queue lock, that path checks the queue and expected
+base before fetching, then rechecks the expected base immediately before merge.
+The optional base argument preserves existing local callers. Publication uses a
 normal non-forced push. A `merge_completed` event follows success; a
 `merge_failed` event follows failure. Failure of the pre-merge audit prevents
 any repository operation. If completion auditing fails after publication, the
-pre-merge event remains the exact-OID evidence and the UI must report an
+pre-merge event remains the exact queue/base evidence and the UI must report an
 unknown outcome rather than claiming a clean denial.
 
 Deny writes one `owner_denied` event and performs no merge, push, queue reset,
 integration synchronization, or environment operation. The queue remains
 available for inspection. Both decision types carry the queue OID in trusted
-audit `event_id`; the audit daemon derives writer identity from its socket peer,
-not from browser claims.
+audit `event_id` and approved base in `base_oid`; the audit daemon derives writer
+identity from its socket peer, not from browser claims.
 
 `DiaryDecisionAudit` writes to the existing metadata-only trusted audit socket
 and fails closed. The console does not query agent state or require an attended
 agent session, so the owner path remains independent when the agent is locked.
 The existing local `agent-merge-approve scripts <OID>` command remains unchanged
-and available.
+and available; it does not opt into base enforcement.
 
 ## CTL-07 and CTL-09 integration contract
 
@@ -81,19 +86,21 @@ These are integration steps, not work performed by the LATER-01 branch:
 
 `uv run pytest -q scripts/test_agent_merge_console.py` uses temporary Git
 repositories and a temporary bare remote. It covers real approved-master diffs,
-report/OID binding and safe rendering, exact-OID merge while marked locked,
-stale-OID rejection, agent-session rejection, deny without publication,
-pre-merge audit failure, and missing/stale/malformed/failed advisory fallback.
-It never contacts the real queue.
+report/OID binding and safe rendering, authorization and publication binding to
+both OIDs, exact-pair merge while marked locked, queue-only and base-only stale
+rejection, agent-session rejection, deny without publication, pre-merge audit
+failure, and missing/stale/malformed/failed advisory fallback. Queue tests also
+inject a base advance between the initial locked freshness check and the final
+pre-merge recheck. No test contacts the real queue.
 
 Before marking LATER-01 done, integrate with the completed CTL-07 UI and
 rebased CTL-09 dashboard, then pass controlled owner-approved live tests using
 a scratch queue:
 
-- real fresh owner Merge and Deny produce trusted audit records containing the
-  exact displayed OID;
-- changing the queue between render and POST rejects Merge without changing
-  approved `master` or its remote;
+- real fresh owner Merge and Deny produce trusted audit records containing both
+  exact displayed OIDs;
+- changing either the queue or approved base between render and POST rejects
+  Merge without an unreviewed merge or remote change;
 - Deny leaves queue, approved, integration, and remote OIDs unchanged;
 - both actions work during real general-agent lockdown, while stolen DSH/Kimi
   sessions, ordinary cookies, and bare agent-supplied OIDs receive no grant and

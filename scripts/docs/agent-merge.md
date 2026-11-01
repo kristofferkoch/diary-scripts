@@ -125,7 +125,11 @@ newer queue HEAD. `agent-merge-approve` sends that OID with the request, so a
 branch queued after review cannot slip into approval. The socket service uses
 `SO_PEERCRED` to require a caller with the account owner's UID; there is no token
 or Signal prompt. Queue and approval operations are serialized with an exclusive
-lock.
+lock. The console additionally supplies `expected_base` with the reviewed
+approved-master OID. `approve_queue()` checks it before fetching and rechecks it
+under the same lock immediately before merge, preventing base-only drift from
+creating an unreviewed merge. The argument is optional, so existing local CLI
+and unattended publication behavior is unchanged.
 
 The socket front-end also emits AUD-04 locked-mode decisions with kernel peer
 identity: diary/scripts requests are `would_deny`; approval is `allow` only when
