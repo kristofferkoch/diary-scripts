@@ -122,3 +122,96 @@ def test_missing_sources_get_empty_cursors_without_jsonl(roots):
     assert result["copied"] == 3
     for track in ("spond", "vigilo", "skolemelding"):
         assert (destination / f"{track}-state.json").read_text() == "{}\n"
+
+
+def test_cursor_parent_replacement_cannot_escape_dirfd(roots, tmp_path: Path, monkeypatch):
+    source, destination = roots
+    moved = tmp_path / "moved-runtime"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real_link = os.link
+    replaced = False
+
+    def replace_parent(*args, **kwargs):
+        nonlocal replaced
+        if not replaced:
+            replaced = True
+            destination.rename(moved)
+            destination.symlink_to(outside, target_is_directory=True)
+        return real_link(*args, **kwargs)
+
+    monkeypatch.setattr(os, "link", replace_parent)
+    migrate(source, destination)
+    assert (moved / "spond-state.json").read_text() == '{"track":"spond"}\n'
+    assert not (outside / "spond-state.json").exists()
+
+
+def test_jsonl_parent_replacement_cannot_escape_dirfd(roots, tmp_path: Path, monkeypatch):
+    source, destination = roots
+    moved = tmp_path / "moved-spond"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real_link = os.link
+    replaced = False
+
+    def replace_parent(*args, **kwargs):
+        nonlocal replaced
+        if not replaced and str(args[1]).endswith(".jsonl"):
+            replaced = True
+            (destination / "spond").rename(moved)
+            (destination / "spond").symlink_to(outside, target_is_directory=True)
+        return real_link(*args, **kwargs)
+
+    monkeypatch.setattr(os, "link", replace_parent)
+    migrate(source, destination)
+    assert (moved / "2026-11-01.jsonl").read_text() == '{"track":"spond"}\n'
+    assert not (outside / "2026-11-01.jsonl").exists()
+
+
+def test_nested_attachments_and_both_legacy_prefixes_are_migrated(roots):
+    source, destination = roots
+    nested = source / "vigilo/attachments/thread/nested"
+    nested.mkdir(parents=True)
+    (nested / "document.pdf").write_bytes(b"%PDF-test")
+    (source / "vigilo/2026-11-01.jsonl").write_text(
+        '{"data":{"messages":[{"attachments":[{"path":'
+        '"/home/kek/diary/memory/vigilo/attachments/thread/nested/document.pdf"}]}]}}\n'
+    )
+    (source / "skolemelding/2026-11-01.jsonl").write_text(
+        '{"data":{"attachments":[{"path":'
+        '"/etc/diary/workspace/memory/skolemelding/attachments/42/plan.pdf"}]}}\n'
+    )
+    (source / "skolemelding/attachments/42").mkdir(parents=True)
+    (source / "skolemelding/attachments/42/plan.pdf").write_bytes(b"plan")
+
+    migrate(source, destination)
+
+    assert (destination / "vigilo/attachments/thread/nested/document.pdf").read_bytes() == b"%PDF-test"
+    assert (destination / "skolemelding/attachments/42/plan.pdf").read_bytes() == b"plan"
+    vigilo = (destination / "vigilo/2026-11-01.jsonl").read_text()
+    skolemelding = (destination / "skolemelding/2026-11-01.jsonl").read_text()
+    assert "/var/lib/diary/legacy-state/vigilo/attachments/thread/nested/document.pdf" in vigilo
+    assert "/var/lib/diary/legacy-state/skolemelding/attachments/42/plan.pdf" in skolemelding
+    assert "/home/kek/diary/memory" not in vigilo + skolemelding
+    assert "/etc/diary/workspace/memory" not in vigilo + skolemelding
+
+
+def test_repeat_run_normalizes_old_destination_attachment_paths(roots):
+    source, destination = roots
+    migrate(source, destination)
+    path = destination / "vigilo/2026-11-01.jsonl"
+    path.write_text(
+        '{"data":{"attachments":[{"path":'
+        '"/home/kek/diary/memory/vigilo/attachments/old.pdf"}]}}\n'
+    )
+    migrate(source, destination)
+    assert "/var/lib/diary/legacy-state/vigilo/attachments/old.pdf" in path.read_text()
+
+
+def test_write_all_handles_short_writes(monkeypatch):
+    from scripts.legacy_state_install import _write_all
+
+    chunks = []
+    monkeypatch.setattr(os, "write", lambda fd, data: chunks.append(data) or min(2, len(data)))
+    _write_all(1, b"abcdef")
+    assert chunks == [b"abcdef", b"cdef", b"ef"]

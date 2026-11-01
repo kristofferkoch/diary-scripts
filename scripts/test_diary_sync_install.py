@@ -191,8 +191,9 @@ def test_shell_installer_requires_root_config_and_uses_approved_units(
         (integration / "sync" / name).write_text("unreviewed\n")
         (approved_diary / "sync" / name).write_text("reviewed\n")
     for name in (
-        "diary_sync_broker.py", "diary_sync_install.py", "legacy_state_install.py", "safe_io.py",
-        "event_spool.py", "event_export.py", "public_hosts_config.py",
+        "diary_sync_broker.py", "diary_sync_install.py", "legacy_state_install.py",
+        "legacy_state_quiesce.py", "safe_io.py", "event_spool.py", "event_export.py",
+        "public_hosts_config.py",
     ):
         (approved_scripts / "scripts" / name).write_text("")
     (approved_scripts / "mail_reader/hosts_config.py").write_text("")
@@ -294,10 +295,7 @@ printf '%s\n' "$SYNC_INSTALL_TEST_CONFIG_UID"
     assert not any(f"{integration}/sync" in line for line in operations)
     assert not any("config/local.toml" in line for line in operations)
     assert "systemctl restart diary-sync-runtime.service diary-sync-broker.service" in operations
-    assert (
-        "systemctl disable diary-collect-spond.timer diary-collect-vigilo.timer "
-        "diary-collect-skolemelding.timer"
-    ) in operations
+    assert not any(line.startswith("systemctl disable diary-collect-") for line in operations)
     assert not any(line.startswith("systemctl enable diary-collect-") for line in operations)
     assert not any(line.startswith("systemctl restart diary-collect-") for line in operations)
     assert not any(line.startswith("systemctl mask diary-collect@") for line in operations)
