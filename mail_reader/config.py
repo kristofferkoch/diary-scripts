@@ -17,9 +17,11 @@ Ordinary file lookup order:
     1. ``$DIARY_CONFIG``                         (explicit; must exist if set)
     2. ``$XDG_CONFIG_HOME/diary/config.toml``    (default ``~/.config``)
 
-Security-sensitive hosts and privileged collector settings instead come only
-from the fixed, root-owned ``/etc/diary/trusted.toml`` through ``trusted_cfg``.
-That file has no environment override and never falls back to ordinary config.
+Non-secret host endpoints come only from the fixed, root-owned world-readable
+``/etc/diary/hosts.toml``. Privileged collector settings instead come only from
+the fixed ``root:kek`` ``0640`` ``/etc/diary/trusted.toml`` through
+``trusted_cfg``. Neither file has an environment override or ordinary-config
+fallback; a missing or malformed public hosts file fails loudly.
 
 A malformed TOML file raises (loud failure); a *missing* file in the XDG
 slot is simply "no overrides". An explicitly-set ``$DIARY_CONFIG`` that
@@ -59,6 +61,7 @@ def reload() -> None:
     """Drop cached config and workspace root (used by tests after changing env)."""
     _data.cache_clear()
     _trusted_data.cache_clear()
+    _hosts_data.cache_clear()
     workspace_root.cache_clear()
 
 
@@ -157,41 +160,49 @@ def trusted_cfg(dotted: str, default: Any) -> Any:
     return node
 
 
-def _host_url(dotted: str, default_hostport: str) -> str:
-    """Build ``http://host:port`` from a trusted ``hosts.*`` config key."""
-    return f"http://{trusted_cfg(dotted, default_hostport)}".rstrip("/")
+HOSTS_CONFIG_PATH = Path("/etc/diary/hosts.toml")
+
+
+@lru_cache(maxsize=1)
+def _hosts_data() -> dict[str, str]:
+    from mail_reader.hosts_config import read_hosts
+    return read_hosts(HOSTS_CONFIG_PATH)
+
+
+def _host_value(key: str) -> str:
+    return _hosts_data()[key]
+
+
+def _host_url(key: str) -> str:
+    """Build ``http://host:port`` from the fixed public hosts config."""
+    return f"http://{_host_value(key)}".rstrip("/")
 
 
 def embed_url() -> str:
-    """OpenAI-compatible embedding server (llama.cpp ``/v1/embeddings``),
-    e.g. ``http://gpu-host:8081``."""
-    return _host_url("hosts.embed", "gpu-host:8081")
+    """OpenAI-compatible embedding server (llama.cpp ``/v1/embeddings``)."""
+    return _host_url("embed")
 
 
 def vlm_url() -> str:
-    """Vision-language model server (OpenAI-compatible
-    ``/v1/chat/completions`` with image input), e.g. ``http://gpu-host:8080``."""
-    return _host_url("hosts.vlm", "gpu-host:8080")
+    """Vision-language model server (OpenAI-compatible chat completions)."""
+    return _host_url("vlm")
 
 
 def immich_url() -> str:
-    """Immich photo server API base, e.g. ``http://server:2283``."""
-    return _host_url("hosts.immich", "server:2283")
+    """Immich photo server API base."""
+    return _host_url("immich")
 
 
 def kimi_web_url() -> str:
-    """Public base URL of the kimi web UI (behind the Caddy tailnet proxy),
-    e.g. ``https://server:8446``. Full URL incl. scheme."""
-    return trusted_cfg("hosts.kimi_web", "https://server:8446").rstrip("/")
+    """Public base URL of the kimi web UI, without a trailing slash."""
+    return _host_value("kimi_web").rstrip("/")
 
 
 def dsh_web_url() -> str:
-    """Public base URL of the dsh web UI (behind the Caddy tailnet proxy),
-    e.g. ``https://server:8444``. Full URL incl. scheme, unlike the
-    ``host:port`` keys above."""
-    return trusted_cfg("hosts.dsh_web", "https://server:8444").rstrip("/")
+    """Public base URL of the dsh web UI, without a trailing slash."""
+    return _host_value("dsh_web").rstrip("/")
 
 
 def mail_web_url() -> str:
     """Public base URL of the authenticated mail UI, without a trailing slash."""
-    return (trusted_cfg("hosts.tailnet_base", "https://server") + "/mail").rstrip("/")
+    return (_host_value("tailnet_base") + "/mail").rstrip("/")

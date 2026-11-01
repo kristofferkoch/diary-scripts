@@ -319,7 +319,7 @@ after their syncs run.
 
 `uv run embed-images` describes image attachments (mail + Signal + Vigilo)
 with a vision-language model (OpenAI-compatible `/v1/chat/completions`; URL
-from trusted `/etc/diary/trusted.toml` `hosts.vlm`, with no `VLM_URL` or local
+from root-owned `/etc/diary/hosts.toml` `hosts.vlm`, with no `VLM_URL` or local
 override; model `$VLM_MODEL` → config `vlm.model` → `qwen3.8-flash-next`) and
 embeds the descriptions into the same `mailvec`
 store — so receipts are findable by their printed text and photos by what's

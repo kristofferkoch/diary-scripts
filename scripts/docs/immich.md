@@ -41,5 +41,5 @@ Immich → user avatar → Account Settings → API Keys; check **`asset.read`**
 (search) + **`asset.view`** (thumbnails) + **`map.read`** (`--near`) — keep it
 read-only. `asset.download` is only needed if originals must ever be fetched
 via the API (they're normally read over NFS).
-Base URL: `hosts.immich` in root-owned `/etc/diary/trusted.toml`; local config
+Base URL: `hosts.immich` in root-owned `/etc/diary/hosts.toml`; local config
 and `IMMICH_URL` cannot override it.
