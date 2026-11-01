@@ -12,7 +12,7 @@ is a ``message``, one whose signature moved is a ``message_update``. Upstream's
 threadUid-set-only model never forwards a reply — that would silently drop
 every answer an AKS teacher gives.
 
-Output: ``memory/vigilo/YYYY-MM-DD.jsonl``, one record per line::
+Output: ``/var/lib/diary/legacy-state/vigilo/YYYY-MM-DD.jsonl``, one record per line::
 
     {"kind": "message"|"message_update"|"news"|"consent"|"check_out_note",
      "fetched_at": "…Z", "data": {…}}
@@ -23,9 +23,9 @@ pre-signed Azure Blob URLs that expire in ~6 h, and persisting those would put
 a usable URL for someone else's school documents into a git-tracked file.
 Attachments are downloaded immediately — in the same run that fetches the
 thread detail, because the SAS URLs expire in ~6 h — to
-``memory/vigilo/attachments/<threadUid>/<name>``, which is git-ignored.
+``/var/lib/diary/legacy-state/vigilo/attachments/<threadUid>/<name>``, which is git-ignored.
 
-State: ``memory/vigilo-state.json``::
+State: ``/var/lib/diary/legacy-state/vigilo-state.json``::
 
     {
       "threads":   { "<threadUid>": {"sig": "…", "time_created": "…", "message_count": 2} },
@@ -64,7 +64,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from mail_reader.config import cfg, workspace_root
+from mail_reader.config import cfg, legacy_state_root
 
 from scripts.attachment_store import find_attachment, write_attachment
 from scripts.safe_io import append_text, ensure_dir
@@ -80,9 +80,8 @@ from scripts.vigilo_api import (
     unit_name,
 )
 
-PROJECT_ROOT = workspace_root()
-STATE_PATH = PROJECT_ROOT / "memory" / "vigilo-state.json"
-OUT_DIR = PROJECT_ROOT / "memory" / "vigilo"
+STATE_PATH = legacy_state_root() / "vigilo-state.json"
+OUT_DIR = legacy_state_root() / "vigilo"
 ATTACH_DIR = OUT_DIR / "attachments"
 
 VALID_KINDS = {"message", "message_update", "news", "consent", "check_out_note"}
@@ -787,7 +786,7 @@ def run_once(
                 print(
                     "vigilo: skipping web-gateway kinds (news/consent/check_out_note) — "
                     "the app token was refused there. Re-run vigilo-login, or remove "
-                    "web_available from memory/vigilo-state.json to probe again.",
+                    "web_available from /var/lib/diary/legacy-state/vigilo-state.json to probe again.",
                     file=sys.stderr,
                 )
             else:

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Pull new activity from Spond and append raw JSONL to memory/spond/.
+Pull new activity from Spond and append raw JSONL to /var/lib/diary/legacy-state/spond/.
 
 Surfaces fetched (Olen/Spond public API):
   chat   — chat-level metadata + last message (the upstream lib does NOT
@@ -12,7 +12,7 @@ Surfaces fetched (Olen/Spond public API):
 Payments / Spond Pay are NOT supported by the upstream library; receipts
 arrive over mail anyway and are already captured by the mail pipeline.
 
-State cursor: memory/spond-state.json
+State cursor: /var/lib/diary/legacy-state/spond-state.json
   {
     "seen_chat_activity":  { "<chatId>":  "<lastMessage.id or updatedAt>" },
     "seen_event_activity": { "<eventId>": "<activity-key>" },
@@ -28,7 +28,7 @@ changes on already-seen events. Lesson 2026-05-29.) A legacy
 `seen_event_ids` value is dropped on first run, which re-emits current
 events once with their proper keys to re-baseline.
 
-Raw output: memory/spond/YYYY-MM-DD.jsonl
+Raw output: /var/lib/diary/legacy-state/spond/YYYY-MM-DD.jsonl
   One JSON object per line:
     {"kind": "chat"|"event"|"post", "fetched_at": "...Z", "data": {...}}
 
@@ -52,12 +52,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from mail_reader.config import trusted_cfg, workspace_root
+from mail_reader.config import legacy_state_root, trusted_cfg
 from scripts.safe_io import append_text, ensure_dir
 
-PROJECT_ROOT = workspace_root()
-STATE_PATH = PROJECT_ROOT / "memory" / "spond-state.json"
-OUT_DIR = PROJECT_ROOT / "memory" / "spond"
+STATE_PATH = legacy_state_root() / "spond-state.json"
+OUT_DIR = legacy_state_root() / "spond"
 PASSWORD_ARGV = ("pass", "show", "spond/user")
 
 VALID_KINDS = {"chat", "event", "post"}

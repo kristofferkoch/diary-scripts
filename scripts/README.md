@@ -36,9 +36,11 @@ names and the important-senders list) live in `config/local.toml` +
 (`$DIARY_CONFIG` env var or the `~/.config/diary/config.toml` symlink).
 Non-secret host endpoints live in root-owned world-readable
 `/etc/diary/hosts.toml`; privileged collector settings stay in `root:kek` `0640`
-`/etc/diary/trusted.toml`. Neither has an env or local-config override. The
-submodule ships only placeholder examples. New code must resolve the
-workspace data root (where `CALENDAR.md`,
+`/etc/diary/trusted.toml`. Neither has an env or local-config override. Legacy
+Spond/Vigilo/Skolemelding cursors, JSONL, and attachments live only in
+`/var/lib/diary/legacy-state`; trusted collector state and immutable events stay
+in their separate `/var/lib/diary` roots. The submodule ships only placeholder
+examples. New code must resolve the workspace data root (where `CALENDAR.md`,
 `memory/`, topic files live) via `mail_reader.config.workspace_root()` (from
 config `paths.project`) — not by walking `__file__`.
 
@@ -63,6 +65,7 @@ Per-tool detail and the triage SOPs live in `docs/`. This file is the index.
 | [`docs/signal-notify.md`](docs/signal-notify.md) | `signal-notify-proxy` + `signal-attachment`: note-to-self sends and read-only attachment downloads (agent-facing) |
 | [`docs/diary-sync.md`](docs/diary-sync.md) | `diary-sync` / `diary-sync-broker`: allow-listed socket for the sjekk's privileged steps (spond/vigilo/skolemelding sync, `systemctl --user`) so the agent never holds those secrets |
 | [`docs/event-spool.md`](docs/event-spool.md) | independent trusted collection, immutable event IDs, atomic spool writes, and pipeline read/agent denial permissions |
+| [`docs/legacy-state.md`](docs/legacy-state.md) | manual collector runtime state and safe migration out of tracked `memory/` |
 | [`docs/agent-merge.md`](docs/agent-merge.md) | `agent-merge-queue` / `agent-merge-approve`: separate automatic and approved trees, Signal-token publication |
 | [`docs/sudo-broker.md`](docs/sudo-broker.md) | `sudo-broker` / `sudo-ask`: per-command root approval from an open terminal, replacing standing `NOPASSWD` |
 | [`docs/audit.md`](docs/audit.md) | `diary-audit` / `diary-auditd`: trusted metadata-only journal writer, duplicate counters, baseline/review reports |

@@ -4,7 +4,7 @@ Three blocks:
     calendar_block(today)  - list of {label, events[]} for today + next 3 days,
                              scraped from CALENDAR.md per CALENDAR-RULES.md.
     spond_block()          - list of {who, when, title} pending-response items,
-                             scanned from memory/spond/*.jsonl.
+                             scanned from /var/lib/diary/legacy-state/spond/*.jsonl.
     weather_block()        - dict with today + 3-day outlook from yr.no.
 
 Each function returns the empty/None default on failure (caught by view.py),
@@ -18,7 +18,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from mail_reader.config import cfg, workspace_root
+from mail_reader.config import cfg, legacy_state_root, workspace_root
 
 # Household first names the dashboard recognises in calendar titles.
 FAMILY_MEMBERS: tuple[str, ...] = tuple(cfg("family.members", ("Robin", "Bjorn", "Carl")))
@@ -431,7 +431,7 @@ def calendar_block(today: _dt.date, *, days_ahead: int = 3) -> list[dict[str, An
 
 # ---------- spond ----------------------------------------------------------
 
-SPOND_DIR = REPO_ROOT / "memory" / "spond"
+SPOND_DIR = legacy_state_root() / "spond"
 
 # member-id → short display label. Add more here as IDs are discovered for
 # other kids / clubs. The dashboard surfaces *unanswered* RSVPs for any of

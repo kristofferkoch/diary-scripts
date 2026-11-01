@@ -47,7 +47,7 @@ device sleeps, so the poke always fails — just commit and let it pull.
 
 The wall Kindle renders the [kindle_dashboard](kindle-dashboard.md)
 PNG, whose calendar and spond blocks are scraped live from `CALENDAR.md`
-and `memory/spond/*.jsonl`. The dashboard *generator* picks up edits on
+and `/var/lib/diary/legacy-state/spond/*.jsonl`. The dashboard *generator* picks up edits on
 its next request automatically — but the **device re-fetches only on its
 own scheduled wake**.
 
@@ -86,7 +86,7 @@ today..+3 window changed.
 
 **Pushing to the device is now largely obsolete — the device pulls.**
 Earlier plans here were to have a git/file hook poke the Kindle on
-`CALENDAR.md` / `memory/spond/*.jsonl` change (the watcher's
+`CALENDAR.md` / `/var/lib/diary/legacy-state/spond/*.jsonl` change (the watcher's
 `_poke_kindle()` pattern). Suspend kills that: you can't push to a
 sleeping device. The device's own ≤15 min / ≤5 min poll is the mechanism
 now, and the power button covers the rare "show it this instant" case.

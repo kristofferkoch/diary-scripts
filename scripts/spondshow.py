@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Read Spond JSONL records from memory/spond/ as readable text.
+Read Spond JSONL records from /var/lib/diary/legacy-state/spond/ as readable text.
 
 Examples:
     scripts/spondshow.py --since-cursor                    # everything new since cursor
@@ -12,7 +12,7 @@ Examples:
     SPOND_RSVP_MEMBER_ID=<id> scripts/spondshow.py ...     # surface RSVP markers
 
 Mirrors `mailshow.py --since-cursor` — the cursor is
-memory/spond-state.json's `last_successful_run`, written by `spond_sync.py`.
+/var/lib/diary/legacy-state/spond-state.json's `last_successful_run`, written by `spond_sync.py`.
 """
 from __future__ import annotations
 
@@ -24,11 +24,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from mail_reader.config import trusted_cfg, workspace_root
+from mail_reader.config import legacy_state_root, trusted_cfg
 
-PROJECT_ROOT = workspace_root()
-STATE_PATH = PROJECT_ROOT / "memory" / "spond-state.json"
-JSONL_DIR = PROJECT_ROOT / "memory" / "spond"
+STATE_PATH = legacy_state_root() / "spond-state.json"
+JSONL_DIR = legacy_state_root() / "spond"
 RSVP_ENV = "SPOND_RSVP_MEMBER_ID"
 
 # Module-level — set in main(); read by render_header() when rendering events.
@@ -193,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--since-cursor", action="store_true",
-                    help="Start from memory/spond-state.json's last_successful_run.")
+                    help="Start from /var/lib/diary/legacy-state/spond-state.json's last_successful_run.")
     ap.add_argument("--since", type=str, default=None,
                     help="ISO date or datetime; only records fetched at-or-after this point.")
     ap.add_argument("--kind", action="append",

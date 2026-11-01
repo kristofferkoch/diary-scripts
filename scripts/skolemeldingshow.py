@@ -6,7 +6,7 @@ The sjekk-track reader for ``skolemelding-sync`` data, in the
 ``--since-cursor`` / ``--headers-only`` for the collect bundle, ``--full``
 when triaging.
 
-Cursor: ``memory/skolemelding-state.json``'s ``cursor`` — **hand-advanced**,
+Cursor: ``/var/lib/diary/legacy-state/skolemelding-state.json``'s ``cursor`` — **hand-advanced**,
 like the mail, Signal and Vigilo cursors, not the auto-bumped
 ``last_successful_run`` that ``skolemelding-sync`` writes. (``spondshow
 --since-cursor`` reads that auto-bumped one, which the sync stamps *after*
@@ -37,11 +37,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from mail_reader.config import workspace_root
+from mail_reader.config import legacy_state_root
 
-PROJECT_ROOT = workspace_root()
-STATE_PATH = PROJECT_ROOT / "memory" / "skolemelding-state.json"
-JSONL_DIR = PROJECT_ROOT / "memory" / "skolemelding"
+STATE_PATH = legacy_state_root() / "skolemelding-state.json"
+JSONL_DIR = legacy_state_root() / "skolemelding"
 ATTACH_DIR = JSONL_DIR / "attachments"
 
 BODY_CHARS = 600
@@ -287,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--since-cursor", action="store_true",
-                    help="Only records fetched after memory/skolemelding-state.json's cursor.")
+                    help="Only records fetched after /var/lib/diary/legacy-state/skolemelding-state.json's cursor.")
     ap.add_argument("--since", default=None, help="ISO date/datetime (strictly after).")
     ap.add_argument("--until", default=None,
                     help="ISO date/datetime (at or before) — pair with --since for a window.")

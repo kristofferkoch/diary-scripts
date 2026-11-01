@@ -5,7 +5,7 @@ The sjekk-track reader for ``vigilo-sync`` data, in the ``spondshow`` /
 ``signalshow`` shape: header line per record, ``--since-cursor`` /
 ``--headers-only`` for the collect bundle, ``--full`` when triaging.
 
-Cursor: ``memory/vigilo-state.json``'s ``cursor`` — **hand-advanced**, like
+Cursor: ``/var/lib/diary/legacy-state/vigilo-state.json``'s ``cursor`` — **hand-advanced**, like
 the mail and Signal cursors, not the auto-bumped ``last_successful_run`` that
 ``vigilo-sync`` writes. (``spondshow --since-cursor`` reads that auto-bumped
 one, which the sync stamps *after* fetching — so records from the run that
@@ -37,14 +37,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from mail_reader.config import workspace_root
+from mail_reader.config import legacy_state_root
 
 from scripts.vigilo_api import VigiloApi, VigiloError
 from scripts.vigilo_sync import CHECKOUT_EXPIRY_WARN_DAYS
 
-PROJECT_ROOT = workspace_root()
-STATE_PATH = PROJECT_ROOT / "memory" / "vigilo-state.json"
-JSONL_DIR = PROJECT_ROOT / "memory" / "vigilo"
+STATE_PATH = legacy_state_root() / "vigilo-state.json"
+JSONL_DIR = legacy_state_root() / "vigilo"
 ATTACH_DIR = JSONL_DIR / "attachments"
 
 BODY_CHARS = 600
@@ -370,7 +369,7 @@ def main(argv: list[str] | None = None) -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--since-cursor", action="store_true",
-                    help="Only records fetched after memory/vigilo-state.json's cursor.")
+                    help="Only records fetched after /var/lib/diary/legacy-state/vigilo-state.json's cursor.")
     ap.add_argument("--since", default=None, help="ISO date/datetime (strictly after).")
     ap.add_argument("--until", default=None,
                     help="ISO date/datetime (at or before) — pair with --since for a window.")

@@ -36,15 +36,16 @@ parents answer) are excluded, so a poll never re-emits a message nobody at
 the school touched. New `Id` → `message`; moved signature →
 `message_update`.
 
-Records land in `memory/skolemelding/YYYY-MM-DD.jsonl` (git-tracked), one
-`{"kind", "fetched_at", "data"}` per line; `data` is distilled (id, header,
-sender, timestamp, plain-text body, threads, attachments as
-name + local path + portal source path). Attachments download in the same
-run to `memory/skolemelding/attachments/<Id>/<name>` (git-ignored), with a
+Records land in `/var/lib/diary/legacy-state/skolemelding/YYYY-MM-DD.jsonl`
+(runtime-only, never git-tracked), one `{"kind", "fetched_at", "data"}`
+per line; `data` is distilled (id, header, sender, timestamp, plain-text body,
+threads, attachments as name + local path + portal source path). Attachments
+download in the same run to
+`/var/lib/diary/legacy-state/skolemelding/attachments/<Id>/<name>`, with a
 3-attempt retry budget tracked in state — a message with a missing file is
 re-emitted next run instead of being marked seen and losing the file.
 
-State: `memory/skolemelding-state.json` (tracked). The sync owns `messages`,
+State: `/var/lib/diary/legacy-state/skolemelding-state.json` (runtime-only). The sync owns `messages`,
 `attachment_retries`, `last_successful_run` and `auth_required`; the
 **triage cursor `cursor` is written only by `skolemeldingshow --bump`** —
 the sync never moves what the next triage sees. Auth loss sets
@@ -85,9 +86,8 @@ FAILED in the bundle.
 4. **Advance the cursor** — `uv run skolemeldingshow --since-cursor --bump`
    once triaged.
 5. **Daily note + commit** — actionable items go under `## Skolemelding` in
-   today's `memory/YYYY-MM-DD.md` (`MEM:`); commit
-   `memory/skolemelding-state.json` and `memory/skolemelding/*.jsonl`
-   alongside (generated — don't hand-edit).
+   today's `memory/YYYY-MM-DD.md` (`MEM:`). Runtime cursors and JSONL are
+   generated, never committed, and remain in `/var/lib/diary/legacy-state`.
 
 ## Auth — `skolemelding-login`
 

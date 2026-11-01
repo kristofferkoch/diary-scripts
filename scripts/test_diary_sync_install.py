@@ -186,17 +186,12 @@ def test_shell_installer_requires_root_config_and_uses_approved_units(
         owner_home / ".gnupg",
     ):
         path.mkdir(parents=True, exist_ok=True)
-    collector_units = (
-        "diary-collect@.service",
-        "diary-collect-spond.timer",
-        "diary-collect-vigilo.timer",
-        "diary-collect-skolemelding.timer",
-    )
+    collector_units = ("diary-collect@.service",)
     for name in ("diary-sync-broker.service", "diary-sync-runtime.service", *collector_units):
         (integration / "sync" / name).write_text("unreviewed\n")
         (approved_diary / "sync" / name).write_text("reviewed\n")
     for name in (
-        "diary_sync_broker.py", "diary_sync_install.py", "safe_io.py",
+        "diary_sync_broker.py", "diary_sync_install.py", "legacy_state_install.py", "safe_io.py",
         "event_spool.py", "event_export.py", "public_hosts_config.py",
     ):
         (approved_scripts / "scripts" / name).write_text("")
@@ -281,7 +276,8 @@ printf '%s\n' "$SYNC_INSTALL_TEST_CONFIG_UID"
     assert (
         "systemd-analyze verify "
         f"{approved_diary}/sync/diary-sync-runtime.service "
-        f"{approved_diary}/sync/diary-sync-broker.service"
+        f"{approved_diary}/sync/diary-sync-broker.service "
+        f"{approved_diary}/sync/diary-collect@.service"
     ) in operations
     for name in ("diary-sync-runtime.service", "diary-sync-broker.service", *collector_units):
         assert (
@@ -294,13 +290,17 @@ printf '%s\n' "$SYNC_INSTALL_TEST_CONFIG_UID"
     assert "install -d -o kek -g kek -m 0700 /var/lib/diary/collector-state" in operations
     assert "groupadd --system --force diary-pipeline" in operations
     assert "python3 -P -m scripts.public_hosts_config" in operations
+    assert "python3 -P -m scripts.legacy_state_install" in operations
     assert not any(f"{integration}/sync" in line for line in operations)
     assert not any("config/local.toml" in line for line in operations)
     assert "systemctl restart diary-sync-runtime.service diary-sync-broker.service" in operations
     assert (
-        "systemctl restart diary-collect-spond.timer diary-collect-vigilo.timer "
+        "systemctl disable diary-collect-spond.timer diary-collect-vigilo.timer "
         "diary-collect-skolemelding.timer"
     ) in operations
+    assert not any(line.startswith("systemctl enable diary-collect-") for line in operations)
+    assert not any(line.startswith("systemctl restart diary-collect-") for line in operations)
+    assert not any(line.startswith("systemctl mask diary-collect@") for line in operations)
 
 
 def test_pipe01_units_pin_trusted_state_spool_and_shared_lock():
@@ -316,8 +316,11 @@ def test_pipe01_units_pin_trusted_state_spool_and_shared_lock():
         assert "SupplementaryGroups=kek" in unit
         assert "BindPaths=/var/lib/diary/events" in unit
         assert "BindPaths=/var/lib/diary/collector-state" in unit
+        assert "BindPaths=/var/lib/diary/legacy-state" in unit
         assert "BindPaths=/run/user/1000/diary-collect" in unit
         assert "Environment=XDG_RUNTIME_DIR=/run/user/1000" in unit
+        assert "Environment=DIARY_LEGACY_STATE_DIR=/var/lib/diary/legacy-state" in unit
+        assert "/home/kek/diary/memory" not in unit
     assert "ExecStart=/usr/bin/flock /run/user/1000/diary-collect/%i.lock" in collector
     assert "--event-spool /var/lib/diary/events" in collector
     assert "--state-dir /var/lib/diary/collector-state" in collector
@@ -326,3 +329,5 @@ def test_pipe01_units_pin_trusted_state_spool_and_shared_lock():
     assert "--spool /var/lib/diary/events" in mail
     assert "mail-sync.service" not in mail
     assert not (root / "systemd/units/mail-sync.service.d/20-event-spool.conf").exists()
+    for source in ("spond", "vigilo", "skolemelding"):
+        assert not (root / f"sync/diary-collect-{source}.timer").exists()

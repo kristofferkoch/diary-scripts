@@ -4,8 +4,8 @@
 
 Evaluation phase, no timer yet. `uv run spond-sync --once` pulls
 chats + events + posts via the Olen/Spond library and appends raw JSONL
-to `memory/spond/YYYY-MM-DD.jsonl`. State cursor lives at
-`memory/spond-state.json` (auto-bumped by the tool — unlike the mail
+to `/var/lib/diary/legacy-state/spond/YYYY-MM-DD.jsonl`. State cursor lives at
+`/var/lib/diary/legacy-state/spond-state.json` (auto-bumped by the tool — unlike the mail
 cursor). Use `uv run spondshow --since-cursor [--headers-only]` to
 triage new items; `--kind event --future` filters to upcoming events.
 Run **manually** for now; we'll add a systemd timer once we trust it.
@@ -32,7 +32,7 @@ post bodies, while payment receipts come in over mail.
 
 ### Processing new Spond items (SOP)
 
-Unlike the mail cursor, `memory/spond-state.json` is auto-bumped —
+Unlike the mail cursor, `/var/lib/diary/legacy-state/spond-state.json` is auto-bumped —
 running `spond-sync --once` updates `last_successful_run` and the
 per-chat / per-event / per-post seen-sets on every successful run. The
 cursor reflects "the last time `spond-sync` ran cleanly", not "the
@@ -40,7 +40,7 @@ last time we wrote a digest".
 
 1. **Fetch new activity** — `uv run spond-sync --once`.
    Prints a one-line `new records: total=N, by_kind={...}` summary on
-   stderr; appends new records to `memory/spond/YYYY-MM-DD.jsonl`.
+   stderr; appends new records to `/var/lib/diary/legacy-state/spond/YYYY-MM-DD.jsonl`.
    Idempotent — re-running with no new activity is a no-op.
    (In a sjekk, `sjekk-collect` already ran this in Phase A, and its
    Phase B produced `memory/sjekk/latest/spond.txt` — step 2's output —
@@ -77,6 +77,5 @@ last time we wrote a digest".
    klubb-feed are deliberately low-signal — capture in JSONL, only
    surface to the daily note if there's a real follow-up.
 4. **Commit** — daily-note updates under `MEM:`; pipeline changes under
-   `TOOLS:`. The state file (`memory/spond-state.json`) and the JSONL
-   files (`memory/spond/*.jsonl`) are generated — commit them alongside,
-   but don't hand-edit.
+   `TOOLS:`. The runtime state file and JSONL are generated, never committed,
+   and must stay in `/var/lib/diary/legacy-state` rather than tracked `memory/`.

@@ -16,7 +16,7 @@ Read-receipts (``IsMessageSeen``/``IsFavourite``) and the feedback counters
 parents answer) are deliberately excluded, or every poll would re-emit
 messages nobody at the school touched.
 
-Output: ``memory/skolemelding/YYYY-MM-DD.jsonl``, one record per line::
+Output: ``/var/lib/diary/legacy-state/skolemelding/YYYY-MM-DD.jsonl``, one record per line::
 
     {"kind": "message"|"message_update", "fetched_at": "…Z", "data": {…}}
 
@@ -24,11 +24,11 @@ Output: ``memory/skolemelding/YYYY-MM-DD.jsonl``, one record per line::
 threads, attachments as name + local path + portal source path) — HTML bodies
 go through ``embed_mail.html_to_text`` so the reader and the embedder see
 text, not markup. Attachments are downloaded immediately to
-``memory/skolemelding/attachments/<Id>/<name>`` (git-ignored in the diary
+``/var/lib/diary/legacy-state/skolemelding/attachments/<Id>/<name>`` (git-ignored in the diary
 repo); their portal paths are stable and Bearer-gated, so recording them in
 the JSONL leaks nothing usable.
 
-State: ``memory/skolemelding-state.json``::
+State: ``/var/lib/diary/legacy-state/skolemelding-state.json``::
 
     {
       "messages": { "<Id>": {"sig": "…", "timestamp": "…"} },
@@ -64,7 +64,7 @@ from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import urlsplit
 
-from mail_reader.config import cfg, workspace_root
+from mail_reader.config import cfg, legacy_state_root
 
 from scripts.attachment_store import find_attachment, write_attachment
 from scripts.embed_mail import html_to_text
@@ -76,9 +76,8 @@ from scripts.skolemelding_api import (
     SkolemeldingError,
 )
 
-PROJECT_ROOT = workspace_root()
-STATE_PATH = PROJECT_ROOT / "memory" / "skolemelding-state.json"
-OUT_DIR = PROJECT_ROOT / "memory" / "skolemelding"
+STATE_PATH = legacy_state_root() / "skolemelding-state.json"
+OUT_DIR = legacy_state_root() / "skolemelding"
 ATTACH_DIR = OUT_DIR / "attachments"
 
 PAGE_SIZE = 25

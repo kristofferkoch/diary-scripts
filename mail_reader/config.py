@@ -98,6 +98,15 @@ def workspace_root() -> Path:
     return cwd
 
 
+def legacy_state_root() -> Path:
+    """Runtime root for non-secret legacy collector cursors and JSONL.
+
+    This is deliberately outside the tracked diary workspace. The environment
+    override is a test seam only and never affects trusted collector state.
+    """
+    return Path(os.environ.get("DIARY_LEGACY_STATE_DIR", "/var/lib/diary/legacy-state"))
+
+
 def cfg(dotted: str, default: Any) -> Any:
     """Return the config value at a dotted key, or ``default`` if absent.
 

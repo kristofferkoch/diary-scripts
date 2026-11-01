@@ -112,7 +112,7 @@ journalctl -u diary-sync-broker -n 20
 
 ## What it does not solve
 
-The agent still reads every byte the syncs write into `memory/` — that is the
-point. What it no longer has is the ability to *become* the account: no GPG
+The agent still reads the legacy records the syncs write into
+`/var/lib/diary/legacy-state` — that is the point. What it no longer has is the ability to *become* the account: no GPG
 key, no BankID token, no arbitrary command as kek. In trifecta terms this
 removes the "run as the user" leg, not the data the sjekk legitimately reads.

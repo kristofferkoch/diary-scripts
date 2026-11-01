@@ -62,7 +62,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from mail_reader.config import workspace_root
+from mail_reader.config import legacy_state_root, workspace_root
 
 DEFAULT_TIMEOUT = 120
 SYNC_TIMEOUT = 300
@@ -367,8 +367,7 @@ def notification_pending(track: str, *, state_dir: Path | None = None,
     every uncertainty resolves to *sync*.
     """
     now = now or dt.datetime.now(dt.UTC)
-    state_file = (state_dir or workspace_root() / "memory") \
-        / f"{track}-state.json"
+    state_file = (state_dir or legacy_state_root()) / f"{track}-state.json"
     last = _last_sync_epoch(state_file)
     if last is None:
         return True

@@ -60,7 +60,7 @@ PIL rotate −90° → mode "L" → save optimized PNG. Coercion lives in
 
 Data sources:
 - Calendar → `CALENDAR.md` (per `CALENDAR-RULES.md`)
-- Spond → `memory/spond/*.jsonl`, latest record per event id, filtered to
+- Spond → `/var/lib/diary/legacy-state/spond/*.jsonl`, latest record per event id, filtered to
   future events where a known member-id is in `unansweredIds`. Member-ids
   come from `config/local.toml` `[spond] member_ids`; `data.py` has a
   placeholder default.
@@ -94,7 +94,7 @@ members = ["Robin", "Bjorn", "Carl"]   # first names for calendar labelling
 
 [spond]
 # member-id (32-char hex) → short display label shown on the dashboard.
-# Discover new IDs from memory/spond/*.jsonl when a new club is added.
+# Discover new IDs from /var/lib/diary/legacy-state/spond/*.jsonl when a new club is added.
 member_ids = { "0123456789ABCDEF0123456789ABCDEF" = "H" }
 ```
 

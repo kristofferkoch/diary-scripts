@@ -11,10 +11,10 @@ Unofficial, reverse-engineered API — the full spec and its watch-outs live in
 `scripts/vigilo_api.py`'s docstring.
 
 `uv run vigilo-sync --once` appends distilled records (never raw — SAS
-attachment URLs are kept out of git) to `memory/vigilo/YYYY-MM-DD.jsonl`
-and downloads message attachments to `memory/vigilo/attachments/`
+attachment URLs are kept out of git) to `/var/lib/diary/legacy-state/vigilo/YYYY-MM-DD.jsonl`
+and downloads message attachments to `/var/lib/diary/legacy-state/vigilo/attachments/`
 (git-ignored in the diary repo). State lives in
-`memory/vigilo-state.json`: the sync owns `last_successful_run` and the
+`/var/lib/diary/legacy-state/vigilo-state.json`: the sync owns `last_successful_run` and the
 seen-maps; the **triage cursor is a separate `cursor` key, advanced only
 by `vigiloshown --bump`** — unlike Spond, a sync run never moves what the
 next triage sees.
@@ -65,7 +65,7 @@ kind exists purely because nothing else surfaces it.
   a child the web gateway actually named: since an unknown id answers 200 with
   an empty list, an empty answer from a child `/api/children/my` never listed
   proves nothing, so that announcement is gated on it (with a line to stderr).
-- While `web_available: false` sits in `memory/vigilo-state.json`, this kind is
+- While `web_available: false` sits in `/var/lib/diary/legacy-state/vigilo-state.json`, this kind is
   skipped along with news and consent and the drumbeat goes silent — nothing
   announces the expiry, and nothing announces the expiry date passing. The skip
   line on stderr names the kinds, so a sjekk with no hentemelding track at all
@@ -115,6 +115,5 @@ kind exists purely because nothing else surfaces it.
 4. **Advance the cursor** — `uv run vigiloshown --since-cursor --bump`
    once triaged.
 5. **Daily note + commit** — actionable items go under `## Vigilo` in
-   today's `memory/YYYY-MM-DD.md` (`MEM:`); commit
-   `memory/vigilo-state.json` and `memory/vigilo/*.jsonl` alongside
-   (generated — don't hand-edit).
+   today's `memory/YYYY-MM-DD.md` (`MEM:`). Runtime cursors and JSONL are
+   generated, never committed, and remain in `/var/lib/diary/legacy-state`.

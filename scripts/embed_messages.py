@@ -4,11 +4,11 @@ Embed non-mail messages — Signal, Spond, Vigilo JSONL records — into the
 Postgres + pgvector `mailvec` store alongside mail, reusing embed_mail's
 schema (migration 016), chunking, batching and insertion helpers.
 
-Sources (under `memory/` in the diary workspace):
-    signal/YYYY-MM-DD.jsonl       signal-capture records (immutable)
-    spond/YYYY-MM-DD.jsonl        spond-sync records (re-emitted on change)
-    vigilo/YYYY-MM-DD.jsonl       vigilo-sync records (re-emitted on change)
-    skolemelding/YYYY-MM-DD.jsonl skolemelding-sync records (re-emitted on change)
+Sources:
+    memory/signal/YYYY-MM-DD.jsonl       signal-capture records (immutable)
+    /var/lib/diary/legacy-state/spond/YYYY-MM-DD.jsonl
+    /var/lib/diary/legacy-state/vigilo/YYYY-MM-DD.jsonl
+    /var/lib/diary/legacy-state/skolemelding/YYYY-MM-DD.jsonl
 
 Each record becomes one `messages` row (tier 0, source tag, synthesized
 message_id: `signal:{ts}:{hash12}`, `spond:{kind}:{id}`,
@@ -24,8 +24,8 @@ assembled text + extracted attachment text):
                       message_update
 
 Signal attachment blobs live under ~/.local/share/signal-cli/attachments/<id>;
-Vigilo files under memory/vigilo/attachments/, Skolemelding files under
-memory/skolemelding/attachments/ (paths recorded by the syncs).
+Vigilo and Skolemelding files live under their source directories in
+/var/lib/diary/legacy-state/ (paths recorded by the syncs).
 Extractable types (pdf/docx/odt/text) get their text chunked; images and
 missing blobs stay metadata-only rows (text_chars=0), same as mail.
 
@@ -57,7 +57,7 @@ from typing import Any, Literal
 
 import psycopg
 
-from mail_reader.config import workspace_root
+from mail_reader.config import legacy_state_root, workspace_root
 
 from scripts.embed_mail import (
     BATCH_CHUNKS,
@@ -541,7 +541,8 @@ def _flush_batch(conn: psycopg.Connection, batch: list[SourcePayload],
 def iter_records(source: str, verbose: bool) -> Iterator[dict[str, Any]]:
     """Stream one source's JSONL history, oldest file first. A missing
     directory is a note, not an error (e.g. vigilo before the first sync)."""
-    jsonl_dir = workspace_root() / "memory" / source
+    jsonl_dir = (workspace_root() / "memory" / source if source == "signal"
+                 else legacy_state_root() / source)
     if not jsonl_dir.exists():
         if verbose:
             print(f"[{source}] {jsonl_dir} does not exist — skipping",

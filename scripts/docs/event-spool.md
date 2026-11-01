@@ -5,31 +5,31 @@ not run model triage or send notifications.
 
 ## Trust and data flow
 
-The three system timers `diary-collect-{spond,vigilo,skolemelding}.timer` start
-fixed instances of `diary-collect@.service`. They execute the approved sync entry
-points directly, not through `diary-sync`; the existing agent-facing broker and
-its verbs remain available. **Every broker, timer, and local-fallback invocation
-passes both** `--event-spool /var/lib/diary/events` and
+Spond, Vigilo, and Skolemelding use **manual/on-demand trusted collection only**;
+there are no periodic probes or collector timers. Mail keeps its independent
+schedule. **Every broker, manual-service, and local-fallback invocation passes
+both** `--event-spool /var/lib/diary/events` and
 `--state-dir /var/lib/diary/collector-state`. A broker run therefore cannot
-advance a shared cursor past records that a later timer still needs to export.
+advance a shared cursor past records that a later manual run still needs to
+export.
 
 A per-collector `flock` at `/run/user/1000/diary-collect/` serializes broker,
-timer, and fallback collection. The system services bind only that directory
-from the user runtime and pin `XDG_RUNTIME_DIR=/run/user/1000`; a plain kek
-fallback creates the same owner-writable directory if the broker is down.
+manual-service, and fallback collection. The system services bind only that
+directory from the user runtime and pin `XDG_RUNTIME_DIR=/run/user/1000`; a plain
+kek fallback creates the same owner-writable directory if the broker is down.
 
 Spond, Vigilo, and Skolemelding write fresh **in-memory** records to the spool
 before legacy JSONL and trusted collector state. The exporter deliberately does
-not ingest those legacy files: their group-writable directories are
+not ingest those legacy files: their group-writable runtime directories are
 agent-accessible and are not a trusted event source.
 
 All seen markers, poll timestamps, attachment retry state, and Vigilo deletion
 tombstones are read only from `/var/lib/diary/collector-state`, installed as
-`kek:kek` mode `0700` with `0600` state files. The legacy
-`memory/*-state.json` files are best-effort output mirrors for existing readers;
-they are never trusted inputs. Mirror failures do not move or invalidate the
-trusted state. Future poll timestamps are treated as invalid rather than as a
-reason to skip collection.
+`kek:kek` mode `0700` with `0600` state files. Legacy cursors and JSONL in
+`/var/lib/diary/legacy-state` are best-effort output mirrors for existing
+readers; they are never trusted inputs and never enter tracked `memory/`.
+Mirror failures do not move or invalidate trusted state. Future poll timestamps
+are treated as invalid rather than as a reason to skip collection.
 
 **First trusted run / migration policy:** Spond backfills when its trusted state
 file is absent. Vigilo and Skolemelding backfill while their trusted state lacks
@@ -109,27 +109,28 @@ sudo-ask /home/kek/diary-approved/sync/install
 sudo-ask --as kek /home/kek/diary-approved/systemd/install-user
 ```
 
-The first command installs/enables the three system timers and prepares the
-spool, trusted state, and trusted-config modes. The second installs/enables the
-independent mail export timer and removes the obsolete `mail-sync`
-`ExecStartPost` drop-in. Installation does not immediately run a collector.
+The first command disables the three obsolete collector timers, migrates legacy
+state to `/var/lib/diary/legacy-state`, and prepares the spool, trusted state,
+and trusted-config modes without starting or masking a manual collector. The
+second installs/enables the independent mail export timer and removes the
+obsolete `mail-sync` `ExecStartPost` drop-in. Installation does not immediately
+run a collector. Run `scripts.legacy_state_install` once from the approved
+scripts checkout before synchronizing the diary commit that deletes the old
+tracked files.
 
 Static checks on the approved files:
 
 ```bash
 systemd-analyze verify \
   /home/kek/diary-approved/sync/diary-sync-runtime.service \
-  /home/kek/diary-approved/sync/diary-collect@.service \
-  /home/kek/diary-approved/sync/diary-collect-spond.timer \
-  /home/kek/diary-approved/sync/diary-collect-vigilo.timer \
-  /home/kek/diary-approved/sync/diary-collect-skolemelding.timer
+  /home/kek/diary-approved/sync/diary-collect@.service
 systemd-analyze verify --user \
   /home/kek/diary-approved/systemd/units/diary-mail-event-export.service \
   /home/kek/diary-approved/systemd/units/diary-mail-event-export.timer
 ```
 
 Controlled verification must show all four collectors succeeding during a
-controlled general-agent lock, broker-then-timer delivery without loss, identical
+controlled general-agent lock, broker-then-manual delivery without loss, identical
 IDs after service/process restart, archived pending recovery, per-message
 quarantine, duplicate and malformed fixtures following the rules above, and
 `agent` plus an unprivileged future-pipeline identity unable to read credentials,
