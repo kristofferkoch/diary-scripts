@@ -36,9 +36,11 @@ import threading
 import time
 
 if __package__:
+    from scripts import broker_audit
     from scripts.attachment_store import read_attachment as _read_attachment
     from scripts.attachment_store import validate_attachment_id
 else:
+    import broker_audit  # ty: ignore[unresolved-import]
     from attachment_store import read_attachment as _read_attachment  # ty: ignore[unresolved-import]
     from attachment_store import validate_attachment_id  # ty: ignore[unresolved-import]
 
@@ -178,6 +180,7 @@ def handle_attachment(conn: socket.socket, request: dict, root: str) -> None:
 def handle(conn: socket.socket, upstream: str, limiter: Limiter,
            attachments_root: str | None = None) -> None:
     try:
+        caller = broker_audit.peer_credentials(conn)
         conn.settimeout(30.0)
         buf = b""
         while b"\n" not in buf:
@@ -192,9 +195,14 @@ def handle(conn: socket.socket, upstream: str, limiter: Limiter,
         try:
             request = json.loads(line)
         except json.JSONDecodeError:
+            broker_audit.audit("signal-notify", "unknown", caller)
             conn.sendall(b'{"jsonrpc":"2.0","error":{"code":-32700,"message":"parse error"},"id":null}\n')
             return
 
+        operation = request.get("method") if isinstance(request, dict) else "unknown"
+        if not isinstance(operation, str):
+            operation = "unknown"
+        broker_audit.audit("signal-notify", operation, caller)
         if isinstance(request, dict) and request.get("method") == "getAttachment":
             root = attachments_root or os.path.expanduser("~/.local/share/signal-cli/attachments")
             handle_attachment(conn, request, root)

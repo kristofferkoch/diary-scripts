@@ -98,8 +98,9 @@ uv run --project diary-scripts diary-sync ping
 uv run --project diary-scripts diary-sync status
 uv run --project diary-scripts diary-sync sync spond
 
-# as kek — the broker's own log:
+# as kek — the broker's own log and trusted AUD-04 decisions:
 journalctl -u diary-sync-broker -n 20
+diary-audit baseline --since 1h --json
 ```
 
 ## Consumers

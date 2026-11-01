@@ -72,6 +72,35 @@ values. Free-form strings smuggled into metadata, unknown keys, invalid IP/DNS
 values, control characters, and booleans used as integers are rejected. DNS
 query *names* remain supported because the design explicitly requires them.
 
+## AUD-04 broker observation
+
+`broker_audit.py` is the shared best-effort client used by Signal, `diary-sync`,
+`agent-merge`, and the sudo broker. Each request produces one `broker.decision`
+with `lock_state=locked`: this is a hypothetical locked-mode classification, not
+a claim that the future controller is active. Safe operations use `allow`;
+external actions use `would_deny`. Signal attachment reads and sync
+`ping`/`status` are safe, as is the independent owner-only merge approval path.
+Signal sends, sync/start, diary/scripts merge requests, and ordinary sudo are
+`would_deny`. Unknown methods and unknown future brokers become
+`operation=unknown`, `decision=would_deny`, and `reason=unknown_operation`.
+There is no lock-safe sudo operation or break-glass path in this audit-only
+phase.
+
+Broker PID/UID/GID caller metadata comes from the request socket's
+`SO_PEERCRED`; no client-supplied identity is accepted. Operation names come
+from fixed policy tables, and commands, message bodies, branch names, and commit
+OIDs are never included. The client makes one audit attempt and never queues or
+replays the broker operation. Audit failure is deliberately non-fatal in AUD-04
+so availability and responses remain unchanged; later enforcement must implement
+its own fail-closed behavior. The merge socket front-end performs its audit once
+before dispatch, including before its diary review fallback, and suppresses
+helper stderr to preserve the socket protocol.
+
+Installed brokers use the root-owned helper and reach the AUD-01 socket as root
+or with `SupplementaryGroups=diary-audit`; general agents never receive that
+group. Inspect parseable results with `diary-audit baseline --since 1h --json`
+or the corresponding `DIARY_AUDIT_*` fields in the `diary-lock` journal.
+
 ## Duplicates and restart behavior
 
 The SHA-256 fingerprint covers the validated event and trusted caller metadata,

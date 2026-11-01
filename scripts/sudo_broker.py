@@ -47,6 +47,11 @@ import sys
 import threading
 import time
 
+if __package__:
+    from scripts import broker_audit
+else:
+    import broker_audit  # ty: ignore[unresolved-import]
+
 SOCK_PATH = os.environ.get("SUDO_BROKER_SOCK", "/run/sudo-broker/agent.sock")
 SOCK_DIR = os.path.dirname(SOCK_PATH)
 
@@ -356,10 +361,13 @@ def execute(conn: socket.socket, cmd: str, cwd: str, target: pwd.struct_passwd) 
 def handle(conn: socket.socket) -> None:
     try:
         info = peer_info(conn)
+        caller = {"pid": info[0], "uid": info[1], "gid": info[2]}
         req = read_request(conn)
         if req is None:
+            broker_audit.audit("sudo-broker", "unknown", caller)
             send(conn, {"t": "state", "s": "error", "msg": "malformed request"})
             return
+        broker_audit.audit("sudo-broker", "execute", caller)
         cmd = req["cmd"]
         requested_cwd = req.get("cwd")
         cwd = requested_cwd if isinstance(requested_cwd, str) else "/"

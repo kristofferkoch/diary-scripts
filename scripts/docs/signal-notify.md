@@ -45,6 +45,7 @@ needed.
 
 ```bash
 sudo-ask 'install -o root -g root -m 0644 /path/to/diary-scripts-approved/scripts/attachment_store.py /usr/local/bin/attachment_store.py'
+sudo-ask 'install -o root -g root -m 0644 /path/to/diary-scripts-approved/scripts/broker_audit.py /usr/local/bin/broker_audit.py'
 sudo-ask 'install -o root -g root -m 0755 /path/to/diary-scripts-approved/scripts/signal_notify_proxy.py /usr/local/bin/signal-notify-proxy'
 sudo-ask 'install -m 0644 /path/to/diary-approved/signal/signal-notify.service /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now signal-notify'
 ```

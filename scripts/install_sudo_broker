@@ -16,6 +16,7 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 [[ -x /usr/bin/python3 ]] || { echo "ERROR: /usr/bin/python3 missing" >&2; exit 1; }
 
 install -o root -g root -m 0755 "$here/sudo_broker.py" /usr/local/sbin/sudo-broker
+install -o root -g root -m 0644 "$here/broker_audit.py" /usr/local/sbin/broker_audit.py
 install -o root -g root -m 0755 "$here/sudo_ask.py"    /usr/local/bin/sudo-ask
 
 echo "installed:"

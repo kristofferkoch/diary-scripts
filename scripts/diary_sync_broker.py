@@ -51,6 +51,11 @@ import sys
 import threading
 import time
 
+if __package__:
+    from scripts import broker_audit
+else:
+    import broker_audit  # ty: ignore[unresolved-import]
+
 DEFAULT_SOCKET = "/run/diary-sync/socket"
 VERSION = "1.0"
 
@@ -313,6 +318,7 @@ def serve(listen: str, *, runner=run_command) -> int:
 
     def _serve_one(conn: socket.socket) -> None:
         try:
+            caller = broker_audit.peer_credentials(conn)
             conn.settimeout(STATUS_TIMEOUT)
             buf = b""
             while b"\n" not in buf:
@@ -327,8 +333,13 @@ def serve(listen: str, *, runner=run_command) -> int:
             try:
                 request = json.loads(raw)
             except json.JSONDecodeError:
+                broker_audit.audit("diary-sync", "unknown", caller)
                 conn.sendall(b'{"ok": false, "error": "parse error"}\n')
                 return
+            operation = request.get("cmd") if isinstance(request, dict) else "unknown"
+            if not isinstance(operation, str):
+                operation = "unknown"
+            broker_audit.audit("diary-sync", operation, caller)
             reply = handle(request, sync_limiter=sync_limiter,
                            status_limiter=status_limiter, busy=busy, runner=runner)
             if not reply.get("ok"):

@@ -124,6 +124,10 @@ control surface.
   `/usr/local/bin/sudo-ask`. Never run the daemon with `uv run` — that would
   execute code from a tree the agent can write, which is the whole thing we
   are trying to avoid.
+- **AUD-04 is observation only.** Every valid request emits a `would_deny`
+  locked-mode decision with kernel caller identity, without recording the
+  command. The existing approval and execution flow is unchanged; no sudo
+  break-glass exception exists until the later enforcement work.
 
 ## What it does not protect against
 

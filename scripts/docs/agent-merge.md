@@ -124,6 +124,11 @@ branch queued after review cannot slip into approval. The socket service uses
 or Signal prompt. Queue and approval operations are serialized with an exclusive
 lock.
 
+The socket front-end also emits AUD-04 locked-mode decisions with kernel peer
+identity: diary/scripts requests are `would_deny`; the independent owner approval
+is `allow`. This observation does not alter queueing or approval and does not use
+the advisory model reviewer as an authority.
+
 An empty queue is a no-op. A changed queue OID, dirty approved/integration
 checkout, dirty queue, unexpected queue HEAD, wrong caller UID, or merge conflict
 fails closed. Approval uses a normal non-forced `git push origin master`; a failed
