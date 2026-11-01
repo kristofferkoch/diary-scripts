@@ -66,6 +66,16 @@ def test_migration_extracts_only_hosts_with_modes_and_deterministic_content(path
     assert hosts_config.read_hosts() == migration.extract_hosts()
 
 
+def test_second_run_without_source_hosts_preserves_valid_destination(paths):
+    source, destination, _ = paths
+    migration.install_public_hosts()
+    original = destination.read_text()
+    source.write_text('[paths]\nproject = "/home/user/diary"\n')
+    migration.install_public_hosts()
+    assert destination.read_text() == original
+    assert hosts_config.read_hosts()["kimi_web"] == "https://server:8446"
+
+
 def test_source_symlink_is_rejected_without_output(paths, tmp_path: Path):
     source, destination, _ = paths
     target = tmp_path / "actual-trusted.toml"
@@ -95,10 +105,36 @@ def test_unapproved_host_key_is_rejected_without_copying_secrets(paths):
     assert not destination.exists()
 
 
-def test_missing_hosts_table_is_rejected(paths):
+def test_missing_source_and_destination_is_rejected(paths):
     source, destination, _ = paths
     source.write_text('[paths]\nproject = "/private/project"\n')
-    with pytest.raises(ValueError, match=r"no \[hosts\]"):
+    with pytest.raises(FileNotFoundError):
+        migration.install_public_hosts()
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("embed", "user:password@gpu-host:8081"),
+        ("vlm", "gpu-host:8080?token=DO-NOT-COPY"),
+        ("immich", "server:2283#DO-NOT-COPY"),
+        ("server", "user@server"),
+        ("tailnet_base", "https://user:password@server"),
+        ("dsh_web", "https://server:8444/?token=DO-NOT-COPY"),
+        ("kimi_web", "https://server:8446#DO-NOT-COPY"),
+        ("tailnet_base", "http://server"),
+        ("embed", "gpu-host:8081/private"),
+        ("dsh_web", "https://server:8444/private"),
+    ],
+)
+def test_secret_bearing_or_invalid_endpoint_is_rejected_before_install(paths, key, value):
+    source, destination, _ = paths
+    source.write_text("\n".join(
+        f'{key} = "{value}"' if line.startswith(key + " =") else line
+        for line in HOSTS.splitlines()
+    ) + "\n")
+    with pytest.raises(ValueError, match=rf"invalid hosts\.{key} value"):
         migration.install_public_hosts()
     assert not destination.exists()
 
