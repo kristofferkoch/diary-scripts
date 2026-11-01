@@ -1,0 +1,426 @@
+schema_version = 1
+suite_id = "act01-lockdown-acceptance"
+
+[[cases]]
+id = "preflight.dark_safe"
+title = "Confirm owner authorization, dark enforcement, maintenance window, and no conflicting work"
+operation = "preflight.dark_safe"
+coverage = ["act.dark_safe"]
+dependencies = ["ACT-01"]
+required_evidence = ["deployment_dark", "owner_authorization", "maintenance_window", "conflicting_work_absent"]
+timeout_seconds = 60
+
+[[cases]]
+id = "preflight.deployed_identity"
+title = "Bind the run to exact approved deployed commits and all dependency health"
+operation = "preflight.deployed_identity"
+coverage = ["act.exact_deployed"]
+dependencies = ["CTL-02", "CTL-03", "CTL-04", "CTL-05", "CTL-07", "CTL-09", "PIPE-05"]
+required_evidence = ["approved_commit_ids", "deployed_commit_ids", "dependency_health", "adapter_capabilities"]
+timeout_seconds = 60
+
+[[cases]]
+id = "preflight.recovery"
+title = "Prove local recovery, fresh owner authentication, evidence storage, and notification consent"
+operation = "preflight.recovery"
+coverage = ["act.dark_safe"]
+dependencies = ["CTL-01", "CTL-06", "CTL-08", "CTL-09"]
+required_evidence = ["recovery_verified", "fresh_auth_available", "dashboard_read_only_health", "evidence_storage_verified", "signal_probe_consent"]
+timeout_seconds = 60
+
+[[cases]]
+id = "activation.integrated"
+title = "Activate the exact integrated result and verify initial locked enforcement"
+operation = "activation.integrated"
+coverage = ["act.integrated"]
+dependencies = ["CTL-02", "CTL-03", "CTL-04", "CTL-05", "CTL-07", "PIPE-05"]
+required_evidence = ["activated_commit_ids", "locked_verified", "controller_audit_refs", "pipeline_audit_refs"]
+timeout_seconds = 180
+
+[[cases]]
+id = "network.ipv4_tcp"
+title = "Locked agent IPv4 TCP egress is denied and audited"
+operation = "network.locked_ipv4_tcp"
+coverage = ["design.network"]
+dependencies = ["CTL-03"]
+required_evidence = ["probe_id", "denied", "locked_verified", "audit_refs"]
+timeout_seconds = 90
+
+[[cases]]
+id = "network.ipv4_udp"
+title = "Locked agent IPv4 UDP egress is denied and audited"
+operation = "network.locked_ipv4_udp"
+coverage = ["design.network"]
+dependencies = ["CTL-03"]
+required_evidence = ["probe_id", "denied", "locked_verified", "audit_refs"]
+timeout_seconds = 90
+
+[[cases]]
+id = "network.ipv6_tcp"
+title = "Locked agent IPv6 TCP egress is denied and audited"
+operation = "network.locked_ipv6_tcp"
+coverage = ["design.network"]
+dependencies = ["CTL-03"]
+required_evidence = ["probe_id", "denied", "locked_verified", "audit_refs"]
+timeout_seconds = 90
+
+[[cases]]
+id = "network.ipv6_udp"
+title = "Locked agent IPv6 UDP egress is denied and audited"
+operation = "network.locked_ipv6_udp"
+coverage = ["design.network"]
+dependencies = ["CTL-03"]
+required_evidence = ["probe_id", "denied", "locked_verified", "audit_refs"]
+timeout_seconds = 90
+
+[[cases]]
+id = "network.dns_direct"
+title = "Locked direct DNS is denied with readable trusted query metadata"
+operation = "network.locked_dns_direct"
+coverage = ["design.network"]
+dependencies = ["CTL-04", "AUD-03"]
+required_evidence = ["probe_id", "denied", "query_metadata", "audit_refs"]
+timeout_seconds = 90
+
+[[cases]]
+id = "network.dns_dot"
+title = "Locked DNS-over-TLS is denied and audited"
+operation = "network.locked_dns_dot"
+coverage = ["design.network"]
+dependencies = ["CTL-04", "AUD-03"]
+required_evidence = ["probe_id", "denied", "transport", "audit_refs"]
+timeout_seconds = 90
+
+[[cases]]
+id = "network.dns_doh"
+title = "Locked DNS-over-HTTPS is denied by general TCP policy and audited"
+operation = "network.locked_dns_doh"
+coverage = ["design.network"]
+dependencies = ["CTL-04", "CTL-03"]
+required_evidence = ["probe_id", "denied", "transport", "audit_refs"]
+timeout_seconds = 90
+
+[[cases]]
+id = "network.dns_mdns"
+title = "Locked multicast DNS is denied and audited"
+operation = "network.locked_dns_mdns"
+coverage = ["design.network"]
+dependencies = ["CTL-04", "AUD-03"]
+required_evidence = ["probe_id", "denied", "transport", "audit_refs"]
+timeout_seconds = 90
+
+[[cases]]
+id = "network.dns_llmnr"
+title = "Locked LLMNR is denied and audited"
+operation = "network.locked_dns_llmnr"
+coverage = ["design.network"]
+dependencies = ["CTL-04", "AUD-03"]
+required_evidence = ["probe_id", "denied", "transport", "audit_refs"]
+timeout_seconds = 90
+
+[[cases]]
+id = "network.lan"
+title = "Locked agent LAN egress is denied and audited"
+operation = "network.locked_lan"
+coverage = ["design.network"]
+dependencies = ["CTL-03"]
+required_evidence = ["probe_id", "denied", "destination_class", "audit_refs"]
+timeout_seconds = 90
+
+[[cases]]
+id = "network.tailscale"
+title = "Locked agent tailnet egress is denied and audited"
+operation = "network.locked_tailscale"
+coverage = ["design.network"]
+dependencies = ["CTL-03"]
+required_evidence = ["probe_id", "denied", "destination_class", "audit_refs"]
+timeout_seconds = 90
+
+[[cases]]
+id = "network.deepseek_fetch"
+title = "Locked agent model search and fetch paths are denied and audited"
+operation = "network.locked_deepseek_fetch"
+coverage = ["design.network"]
+dependencies = ["CTL-03"]
+required_evidence = ["probe_id", "search_denied", "fetch_denied", "audit_refs"]
+timeout_seconds = 120
+
+[[cases]]
+id = "network.established_stream"
+title = "Locking terminates an already-established agent HTTP stream"
+operation = "network.locked_established_stream"
+coverage = ["design.network"]
+dependencies = ["CTL-03", "CTL-02"]
+required_evidence = ["flow_id", "established_before_lock", "terminated", "audit_refs"]
+timeout_seconds = 120
+
+[[cases]]
+id = "network.loopback"
+title = "Approved loopback UI, database, and IPC remain available while locked"
+operation = "network.locked_loopback"
+coverage = ["design.network"]
+dependencies = ["CTL-03", "CTL-04"]
+required_evidence = ["loopback_checks", "locked_verified", "non_loopback_still_denied"]
+timeout_seconds = 90
+
+[[cases]]
+id = "pipeline.allowance_isolation"
+title = "General agent cannot use or inherit the fixed pipeline model allowance"
+operation = "pipeline.allowance_isolation"
+coverage = ["design.pipeline_isolation"]
+dependencies = ["PIPE-02", "CTL-03"]
+required_evidence = ["pipeline_model_allowed", "agent_model_denied", "identity_separation", "audit_refs"]
+timeout_seconds = 120
+
+[[cases]]
+id = "pipeline.mail_to_signal"
+title = "Mail is collected, triaged by the fixed local model, sanitized, and delivered to Signal"
+operation = "pipeline.mail_to_signal"
+coverage = ["design.pipeline_e2e"]
+dependencies = ["PIPE-01", "PIPE-02", "PIPE-03", "PIPE-04", "PIPE-05"]
+required_evidence = ["event_id", "local_model_proof", "schema_validation", "signal_notification_id", "agent_egress_denied", "audit_refs"]
+timeout_seconds = 600
+
+[[cases]]
+id = "broker.signal_arbitrary"
+title = "Arbitrary and spoofed-identity agent Signal sends are rejected without execution"
+operation = "broker.signal_arbitrary"
+coverage = ["design.broker_rejection"]
+dependencies = ["PIPE-05", "AUD-04"]
+required_evidence = ["probe_ids", "rejected", "not_executed", "caller_identity", "audit_refs"]
+timeout_seconds = 120
+
+[[cases]]
+id = "broker.merge_push"
+title = "Agent merge and push requests are rejected without publication"
+operation = "broker.merge_push"
+coverage = ["design.broker_rejection"]
+dependencies = ["CTL-05", "AUD-04"]
+required_evidence = ["probe_ids", "rejected", "not_executed", "approved_tree_unchanged", "audit_refs"]
+timeout_seconds = 120
+
+[[cases]]
+id = "broker.sync_mutating"
+title = "Agent sync and service-start requests are rejected without execution"
+operation = "broker.sync_mutating"
+coverage = ["design.broker_rejection"]
+dependencies = ["CTL-05", "AUD-04"]
+required_evidence = ["probe_ids", "rejected", "not_executed", "collector_state_unchanged", "audit_refs"]
+timeout_seconds = 120
+
+[[cases]]
+id = "broker.sync_safe"
+title = "Sync ping and read-only status remain available while locked"
+operation = "broker.sync_safe"
+coverage = ["design.broker_rejection"]
+dependencies = ["CTL-05"]
+required_evidence = ["ping_ok", "status_read_only", "mutations_absent", "locked_verified"]
+timeout_seconds = 90
+
+[[cases]]
+id = "broker.sudo"
+title = "Ordinary locked sudo is denied and only explicit owner break-glass remains"
+operation = "broker.sudo"
+coverage = ["design.broker_rejection"]
+dependencies = ["CTL-05", "AUD-04"]
+required_evidence = ["ordinary_denied", "ordinary_not_executed", "break_glass_owner_only", "audit_refs"]
+timeout_seconds = 120
+
+[[cases]]
+id = "broker.unknown"
+title = "Unknown or unclassified broker operations deny by default"
+operation = "broker.unknown"
+coverage = ["design.broker_rejection"]
+dependencies = ["CTL-05"]
+required_evidence = ["probe_id", "rejected", "not_executed", "audit_refs"]
+timeout_seconds = 90
+
+[[cases]]
+id = "immutability.lock_state"
+title = "Agent-controlled writes cannot change controller state or policy"
+operation = "immutability.lock_state"
+coverage = ["design.immutability"]
+dependencies = ["CTL-01", "CTL-03"]
+required_evidence = ["attempt_ids", "all_denied", "state_digest_unchanged", "locked_verified"]
+timeout_seconds = 120
+
+[[cases]]
+id = "immutability.pipeline_config"
+title = "Agent-controlled writes cannot change pipeline executable or configuration"
+operation = "immutability.pipeline_config"
+coverage = ["design.immutability"]
+dependencies = ["PIPE-02"]
+required_evidence = ["attempt_ids", "all_denied", "configuration_digest_unchanged", "executable_digest_unchanged"]
+timeout_seconds = 120
+
+[[cases]]
+id = "immutability.endpoints"
+title = "Agent-controlled configuration cannot select collector, model, or fallback endpoints"
+operation = "immutability.endpoints"
+coverage = ["design.immutability"]
+dependencies = ["SEC-01", "PIPE-02", "PIPE-03"]
+required_evidence = ["attempt_ids", "all_denied", "endpoint_digest_unchanged", "fallback_absent"]
+timeout_seconds = 120
+
+[[cases]]
+id = "immutability.audit"
+title = "Agent-controlled writes cannot modify or erase trusted audit evidence"
+operation = "immutability.audit"
+coverage = ["design.immutability"]
+dependencies = ["AUD-01", "AUD-04"]
+required_evidence = ["attempt_ids", "all_denied", "audit_digest_unchanged", "trusted_writer_still_healthy"]
+timeout_seconds = 120
+
+[[cases]]
+id = "failure.controller"
+title = "Controller stop, kill, and watchdog failure leave or restore locked mode"
+operation = "failure.controller"
+coverage = ["design.failure_boot"]
+dependencies = ["CTL-01", "CTL-03"]
+required_evidence = ["injection_ids", "locked_during_failure", "recovered_locked", "agent_actions_denied", "audit_refs"]
+timeout_seconds = 300
+
+[[cases]]
+id = "failure.audit_agent"
+title = "Audit failure immediately stops external general-agent actions"
+operation = "failure.audit_agent"
+coverage = ["design.failure_boot", "act.audit_stops_agent"]
+dependencies = ["AUD-01", "CTL-01", "CTL-03", "CTL-05", "PIPE-05"]
+required_evidence = ["injection_id", "audit_unavailable", "network_denied", "brokers_denied", "locked_verified"]
+timeout_seconds = 300
+
+[[cases]]
+id = "failure.audit_pipeline"
+title = "Audit failure stops pipeline notifications without cloud or endpoint fallback"
+operation = "failure.audit_pipeline"
+coverage = ["design.failure_boot", "act.audit_stops_pipeline"]
+dependencies = ["AUD-01", "PIPE-03", "PIPE-05"]
+required_evidence = ["injection_id", "audit_unavailable", "notification_suppressed", "fallback_absent", "agent_egress_denied"]
+timeout_seconds = 300
+
+[[cases]]
+id = "failure.policy_verification"
+title = "Policy verification failure fails closed and stops or freezes agents"
+operation = "failure.policy_verification"
+coverage = ["design.failure_boot"]
+dependencies = ["CTL-03", "CTL-04"]
+required_evidence = ["injection_id", "verification_failed", "agents_stopped_or_frozen", "locked_verified", "audit_refs"]
+timeout_seconds = 300
+
+[[cases]]
+id = "auth.stolen_session"
+title = "Stolen agent and ordinary two-factor browser sessions cannot unlock"
+operation = "auth.stolen_session"
+coverage = ["design.unlock"]
+dependencies = ["CTL-07", "CTL-08"]
+required_evidence = ["agent_session_rejected", "ordinary_session_rejected", "locked_verified", "audit_refs"]
+timeout_seconds = 180
+
+[[cases]]
+id = "auth.fresh_ack"
+title = "Fresh user-verified passkey and suspicious-report acknowledgement are both required"
+operation = "auth.fresh_ack"
+coverage = ["design.unlock"]
+dependencies = ["CTL-07", "CTL-08"]
+required_evidence = ["fresh_transaction_id", "passkey_user_verified", "report_acknowledged", "acknowledgement_audit_refs"]
+timeout_seconds = 600
+
+[[cases]]
+id = "auth.failed_unlock"
+title = "Failed, stale, replayed, or policy-failing unlock leaves restrictions intact"
+operation = "auth.failed_unlock"
+coverage = ["design.unlock"]
+dependencies = ["CTL-07", "CTL-08", "CTL-03"]
+required_evidence = ["attempt_ids", "all_rejected", "locked_verified", "policy_unchanged", "audit_refs"]
+timeout_seconds = 300
+
+[[cases]]
+id = "auth.agent_activity_expiry"
+title = "Agent messages, background work, WebSockets, and model output do not extend attendance"
+operation = "auth.agent_activity_expiry"
+coverage = ["design.unlock"]
+dependencies = ["CTL-07"]
+required_evidence = ["activity_ids", "expiry_unchanged", "expired_locked", "independent_extension_verified"]
+timeout_seconds = 1200
+
+[[cases]]
+id = "turn.idle_cancel"
+title = "Idle lock cancels the complete active turn and prevents resume after unlock"
+operation = "turn.idle_cancel"
+coverage = ["design.cancellation", "design.no_replay"]
+dependencies = ["CTL-02", "CTL-07"]
+required_evidence = ["turn_id", "child_process_ids", "all_terminated", "conversation_preserved", "not_resumed", "audit_refs"]
+timeout_seconds = 1200
+
+[[cases]]
+id = "notification.extra_fields"
+title = "Notification results with unknown fields or wrong event IDs stay local"
+operation = "notification.extra_fields"
+coverage = ["design.notification"]
+dependencies = ["PIPE-03", "PIPE-05"]
+required_evidence = ["fixture_ids", "all_rejected", "local_review_preserved", "notifications_absent", "audit_refs"]
+timeout_seconds = 180
+
+[[cases]]
+id = "notification.urls"
+title = "URLs and model-controlled recipient or envelope data cannot reach Signal"
+operation = "notification.urls"
+coverage = ["design.notification"]
+dependencies = ["PIPE-04", "PIPE-05"]
+required_evidence = ["fixture_ids", "urls_absent", "fixed_envelope", "fixed_recipient", "notifications_valid"]
+timeout_seconds = 180
+
+[[cases]]
+id = "notification.unicode"
+title = "Terminal controls, bidi, zero-width, and misleading formatting are removed"
+operation = "notification.unicode"
+coverage = ["design.notification"]
+dependencies = ["PIPE-04", "PIPE-05"]
+required_evidence = ["fixture_ids", "controls_absent", "bidi_absent", "zero_width_absent", "render_digests"]
+timeout_seconds = 180
+
+[[cases]]
+id = "notification.length"
+title = "Excessive summary and aggregate lengths are capped without hiding local review"
+operation = "notification.length"
+coverage = ["design.notification"]
+dependencies = ["PIPE-04"]
+required_evidence = ["fixture_ids", "length_caps_enforced", "local_review_preserved", "render_digests"]
+timeout_seconds = 180
+
+[[cases]]
+id = "notification.frequency"
+title = "Per-event and aggregate notification frequency limits suppress without replay"
+operation = "notification.frequency"
+coverage = ["design.notification", "design.no_replay"]
+dependencies = ["PIPE-04", "PIPE-05"]
+required_evidence = ["fixture_ids", "per_event_limited", "aggregate_limited", "local_review_preserved", "suppressed_replay_count"]
+timeout_seconds = 300
+
+[[cases]]
+id = "replay.no_replay"
+title = "No blocked network, broker, turn, or notification operation executes after unlock"
+operation = "replay.no_replay"
+coverage = ["design.no_replay"]
+dependencies = ["CTL-02", "CTL-05", "PIPE-04", "PIPE-05"]
+required_evidence = ["blocked_operation_ids", "post_unlock_observation", "blocked_replay_count", "owner_unlock_audit_refs"]
+timeout_seconds = 600
+
+[[cases]]
+id = "boot.locked"
+title = "Controlled reboot changes the boot ID and starts every enforcement layer locked"
+operation = "boot.locked"
+coverage = ["design.failure_boot", "act.boot_locked"]
+dependencies = ["CTL-01", "CTL-03", "CTL-04", "CTL-05", "PIPE-02", "PIPE-05"]
+required_evidence = ["locked_verified", "controller_boot_audit_refs", "agent_egress_denied", "pipeline_contained"]
+timeout_seconds = 300
+reboot = true
+
+[[cases]]
+id = "owner.first_cycle"
+title = "Owner reviews the first live report, authenticates freshly, unlocks, and accepts behavior"
+operation = "owner.first_cycle"
+coverage = ["design.unlock", "act.owner_acceptance"]
+dependencies = ["CTL-07", "CTL-08"]
+required_evidence = ["owner_accepted", "fresh_authorization", "report_acknowledged", "cycle_audit_refs", "unexpected_findings", "blocked_replay_count"]
+timeout_seconds = 1200

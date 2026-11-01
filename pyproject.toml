@@ -74,6 +74,7 @@ diary-fresh-unlock = "scripts.diary_fresh_unlock:main"
 diary-lock-dashboard = "scripts.diary_lock_dashboard:main"
 diary-pipeline    = "scripts.diary_pipeline:main"
 diary-lock-ui     = "scripts.diary_lock_ui:main"
+diary-lockdown-acceptance = "scripts.lockdown_acceptance:main"
 
 [build-system]
 requires = ["hatchling"]
