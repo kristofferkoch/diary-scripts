@@ -19,3 +19,10 @@ os.environ["XDG_CONFIG_HOME"] = "/nonexistent-diary-xdg-for-tests"
 # Pin the workspace root to this repo dir so workspace_root() is deterministic
 # in tests and never autodetects a real CALENDAR.md on the dev machine.
 os.environ.setdefault("DIARY_ROOT", str(Path(__file__).resolve().parent))
+
+# Public host endpoints must also resolve before doctests import embed_mail or
+# embed_images. Pin the fixed path to a sanitized static fixture, never the real
+# deployment file. Tests for missing/malformed configs monkeypatch this path.
+from mail_reader import config as diary_config
+diary_config.HOSTS_CONFIG_PATH = Path(__file__).resolve().parent / "fixtures" / "hosts.toml"
+diary_config.reload()

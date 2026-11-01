@@ -12,6 +12,10 @@ from scripts.safe_io import atomic_write_text
 TRUSTED_CONFIG_PATH = Path("/etc/diary/trusted.toml")
 
 
+class MissingHostsTableError(ValueError):
+    """The private source has no host table; an existing public file may suffice."""
+
+
 def extract_hosts(path: Path | None = None) -> dict[str, str]:
     path = path or TRUSTED_CONFIG_PATH
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -23,12 +27,15 @@ def extract_hosts(path: Path | None = None) -> dict[str, str]:
     finally:
         os.close(fd)
     if "hosts" not in document:
-        raise ValueError("trusted config has no [hosts] table")
+        raise MissingHostsTableError("trusted config has no [hosts] table")
     return validate_hosts(document["hosts"])
 
 
 def install_public_hosts() -> None:
-    hosts = extract_hosts()
+    try:
+        hosts = extract_hosts()
+    except MissingHostsTableError:
+        hosts = read_hosts()
     atomic_write_text(HOSTS_CONFIG_PATH, render_hosts(hosts), mode=0o644)
     os.chown(HOSTS_CONFIG_PATH, 0, 0)
     os.chmod(HOSTS_CONFIG_PATH, 0o644)

@@ -1,0 +1,9 @@
+# Sanitized static pytest fixture; no deployment values.
+[hosts]
+embed = "gpu-host:8081"
+vlm = "gpu-host:8080"
+server = "server"
+tailnet_base = "https://server"
+dsh_web = "https://server:8444"
+kimi_web = "https://server:8446"
+immich = "server:2283"
