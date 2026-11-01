@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -23,16 +24,31 @@ from scripts import diary_lock as lock
 class FakeSystemd:
     def __init__(self) -> None:
         self.services = {"dsh-web.service": True, "kimi-web.service": True}
+        self.supervisor_pids = {"dsh-web.service": 1099, "kimi-web.service": 2199}
         self.pids = {"dsh-web.service": 1100, "kimi-web.service": 2200}
         self.membership = {"dsh-web.service": {1100}, "kimi-web.service": {2200}}
         self.scopes_by_name: dict[str, set[int]] = {}
         self.inactive_scopes: set[str] = set()
         self.calls: list[tuple[str, str]] = []
+        self.replaced_pids: set[int] = set()
 
-    def runtime_pid(self, service: str) -> int:
+    def identity(self, pid: int, ppid: int = 1) -> lock.ProcessIdentity:
+        return lock.ProcessIdentity(pid, ppid, pid * 100, os.geteuid())
+
+    def service_identities(
+        self, service: str, wait: bool = False,
+    ) -> tuple[lock.ProcessIdentity, lock.ProcessIdentity]:
         if not self.services[service]:
             raise lock.LockError("service is stopped")
-        return self.pids[service]
+        supervisor = self.supervisor_pids[service]
+        return self.identity(supervisor), self.identity(self.pids[service], supervisor)
+
+    def runtime_pid(self, service: str) -> int:
+        return self.service_identities(service)[1].pid
+
+    def verify_identity(self, identity: lock.ProcessIdentity) -> None:
+        if identity.pid in self.replaced_pids:
+            raise lock.LockError("PID was replaced")
 
     def start_scope(self, scope: str, pid: int) -> None:
         self.calls.append(("start_scope", scope))
@@ -82,12 +98,32 @@ class FakeSystemd:
         if self.services[service]:
             raise lock.LockError("old service was not stopped")
         self.services[service] = True
+        self.supervisor_pids[service] += 1
         self.pids[service] += 1
         self.membership[service] = {self.pids[service]}
 
 
-def turns(fake: FakeSystemd, attended: bool = True) -> lock.SystemdTurns:
-    return lock.SystemdTurns(None, lambda: attended, systemd=fake)
+class FakeProcesses:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def stop_and_kill(self) -> int:
+        self.calls.append("stop_and_kill")
+        return 0
+
+    def require_empty(self) -> None:
+        self.calls.append("require_empty")
+
+
+def turns(
+    fake: FakeSystemd,
+    attended: bool = True,
+    processes: Any = None,
+) -> lock.SystemdTurns:
+    return lock.SystemdTurns(
+        None, lambda: attended, systemd=fake,
+        processes=processes or FakeProcesses(),
+    )
 
 
 def test_turn_moves_real_service_pid_to_scope_and_finishes_without_killing_background() -> None:
@@ -113,7 +149,7 @@ def test_turn_moves_real_service_pid_to_scope_and_finishes_without_killing_backg
 def test_locked_turn_is_denied_and_cancel_stops_services_before_complete_scopes() -> None:
     fake = FakeSystemd()
     svc = turns(fake, attended=False)
-    with pytest.raises(lock.RequestRejected, match="not attended"):
+    with pytest.raises(lock.LockError, match="not attended"):
         svc.start("kimi", "session-one")
 
     svc = turns(fake)
@@ -126,12 +162,14 @@ def test_locked_turn_is_denied_and_cancel_stops_services_before_complete_scopes(
     assert svc.cancel() == 2
     assert not any(fake.services.values())
     assert fake.inactive_scopes == {dsh_scope, kimi_scope}
-    assert [call[0] for call in fake.calls[-4:]] == ["stop"] * 4
-    assert fake.calls[-4:-2] == [("stop", "dsh-web.service"), ("stop", "kimi-web.service")]
+    stop_calls = [call for call in fake.calls if call[0] == "stop"]
+    assert stop_calls[:2] == [("stop", "dsh-web.service"), ("stop", "kimi-web.service")]
+    assert ("stop", dsh_scope) in stop_calls and ("stop", kimi_scope) in stop_calls
     assert svc.current == {}
 
     svc.attend()
     assert all(fake.services.values())
+    assert fake.supervisor_pids == {"dsh-web.service": 1100, "kimi-web.service": 2200}
     assert fake.pids == {"dsh-web.service": 1101, "kimi-web.service": 2201}
     assert svc.current == {}
 
@@ -163,6 +201,73 @@ def test_cancellation_attempts_every_scope_before_failing_closed() -> None:
     assert fake.inactive_scopes == {second}
     assert not any(fake.services.values())
     assert svc.current
+
+
+def test_scope_created_during_cancellation_is_found_by_next_rescan() -> None:
+    fake = FakeSystemd()
+    svc = turns(fake)
+    first = svc.start("dsh", "session-one")["scope"]
+    late = "tool-created-during-lock.scope"
+    original = fake.stop
+    injected = False
+
+    def stop(unit: str, no_block: bool = False) -> None:
+        nonlocal injected
+        original(unit, no_block=no_block)
+        if unit == first and not injected:
+            injected = True
+            fake.scopes_by_name[late] = {9999}
+            fake.membership[late] = {9999}
+            fake.inactive_scopes.discard(late)
+
+    cast(Any, fake).stop = stop
+    assert svc.cancel() == 2
+    assert injected
+    assert late in fake.inactive_scopes
+    assert not any(fake.active(scope) for scope in fake.scopes_by_name)
+
+
+def test_attend_refuses_active_service_and_reused_fresh_pids() -> None:
+    fake = FakeSystemd()
+    svc = turns(fake)
+    svc.cancel()
+    fake.services["dsh-web.service"] = True
+    with pytest.raises(lock.LockError, match="refusing to resume active"):
+        svc.attend()
+
+    fake.services["dsh-web.service"] = False
+    original = fake.start
+
+    def reuse(service: str) -> None:
+        original(service)
+        fake.supervisor_pids[service] -= 1
+        fake.pids[service] -= 1
+
+    cast(Any, fake).start = reuse
+    with pytest.raises(lock.LockError, match="reused a supervisor or runtime PID"):
+        svc.attend()
+
+
+def test_pid_replacement_is_rejected_before_scope_start_and_reattach() -> None:
+    fake = FakeSystemd()
+    svc = turns(fake)
+    original = fake.start_scope
+
+    def replace_during_start(scope: str, pid: int) -> None:
+        original(scope, pid)
+        fake.replaced_pids.add(pid)
+
+    cast(Any, fake).start_scope = replace_during_start
+    with pytest.raises(lock.LockError, match="PID was replaced"):
+        svc.start("dsh", "session-one")
+
+    fake = FakeSystemd()
+    svc = turns(fake)
+    svc.start("dsh", "session-one")
+    fake.replaced_pids.add(1100)
+    with pytest.raises(lock.LockError, match="PID was replaced"):
+        svc.finish("dsh", "session-one")
+    assert not any(call[0] == "attach" for call in fake.calls)
 
 
 class FakeTurns:
@@ -218,6 +323,21 @@ def test_locking_is_durable_before_cancellation_and_unlock_starts_fresh_services
     assert lifecycle.calls == ["cancel"]
     assert json.loads((tmp_path / "state.json").read_text())["state"] == "LOCKED"
     assert json.loads(conversation.read_text())["turn"] == "working"
+
+
+def test_fresh_turn_preparation_precedes_attended_mode_activation(tmp_path: Path) -> None:
+    lifecycle = FakeTurns()
+    svc, order = controller(tmp_path, lifecycle)
+    original = lifecycle.attend
+
+    def attend() -> None:
+        order.append("fresh_processes_verified")
+        original()
+
+    cast(Any, lifecycle).attend = attend
+    svc.startup()
+    svc.break_glass({"pid": 1, "uid": 1000, "gid": 1000})
+    assert order == ["locked", "fresh_processes_verified", "attended"]
 
 
 def test_cancellation_failure_does_not_record_locked_or_start_attended_services(tmp_path: Path) -> None:
@@ -281,9 +401,29 @@ def test_turn_socket_uses_kernel_agent_uid_and_preserves_protocol(tmp_path: Path
         finished = lock.request(str(path), {"cmd": "finish", "runtime": "dsh", "session": "session-one"})
         assert finished["scope"] == scope
         server.agent_uid = os.geteuid() + 1
-        with pytest.raises(lock.LockError, match="not the agent"):
+        with pytest.raises(lock.LockError, match="not the agent|cannot use controller socket"):
             lock.request(str(path), {"cmd": "start", "runtime": "dsh", "session": "other"})
         assert failures == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_locked_turn_started_request_invokes_failsafe(tmp_path: Path) -> None:
+    fake = FakeSystemd()
+    svc = turns(fake, attended=False)
+    failures: list[Exception] = []
+    group = lock.grp.getgrgid(os.getegid()).gr_name
+    server = lock.TurnDaemon(str(tmp_path / "turns.sock"), svc, os.geteuid(), group, failures.append)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(lock.LockError, match="not attended"):
+            lock.request(str(tmp_path / "turns.sock"), {
+                "cmd": "start", "runtime": "kimi", "session": "task-turn",
+            })
+        assert len(failures) == 1 and "not attended" in str(failures[0])
     finally:
         server.shutdown()
         server.server_close()
@@ -298,12 +438,75 @@ def test_client_finish_failure_never_requests_model_continuation(monkeypatch: py
         assert client.main(["--runtime", "kimi", "start"]) == 2
 
 
+def test_pidfd_signal_is_withheld_when_start_time_or_parent_changes() -> None:
+    expected = lock.ProcessIdentity(1234, 100, 999, os.geteuid())
+    replacement = lock.ProcessIdentity(1234, 100, 1000, os.geteuid())
+    with (
+        patch.object(lock.os, "pidfd_open", return_value=42),
+        patch.object(lock, "process_identity", return_value=replacement),
+        patch.object(lock.signal, "pidfd_send_signal") as send,
+        patch.object(lock.os, "close") as close,
+    ):
+        lock.signal_process(expected, signal.SIGKILL)
+    send.assert_not_called()
+    close.assert_called_once_with(42)
+
+
 def pid_running(pid: int) -> bool:
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
     except FileNotFoundError:
         return False
     return stat.rsplit(")", 1)[1].strip().split()[0] != "Z"
+
+
+class OutageSystemd:
+    def __getattr__(self, _name: str):
+        def unavailable(*_args, **_kwargs):
+            raise lock.SystemdUnavailable("injected user-manager outage")
+        return unavailable
+
+
+def test_real_pid_fallback_contains_process_tree_during_user_manager_outage(tmp_path: Path) -> None:
+    child_file = tmp_path / "child.pid"
+    conversation = tmp_path / "conversation.json"
+    conversation.write_text('{"turn":"working"}\n')
+    helper = r'''
+import pathlib, subprocess, sys, time
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"], start_new_session=True)
+pathlib.Path(sys.argv[1]).write_text(str(child.pid))
+time.sleep(300)
+'''
+    parent = subprocess.Popen([sys.executable, "-c", helper, str(child_file)])
+    child_pid = None
+    try:
+        for _attempt in range(100):
+            if child_file.exists():
+                break
+            if parent.poll() is not None:
+                raise AssertionError("synthetic parent exited")
+            time.sleep(0.02)
+        child_pid = int(child_file.read_text())
+        allowed = {parent.pid, child_pid}
+        processes = lock.AgentProcesses(
+            os.geteuid(), eligible=lambda identity: identity.pid in allowed,
+        )
+        svc = lock.SystemdTurns(
+            None, lambda: True, runtimes={"probe": "diary-outage-probe.service"},
+            systemd=OutageSystemd(), processes=processes,
+        )
+        assert pid_running(parent.pid) and pid_running(child_pid)
+        assert svc.cancel() == 0
+        parent.wait(timeout=5)
+        assert not pid_running(parent.pid)
+        assert not pid_running(child_pid)
+        assert processes.processes() == []
+        assert json.loads(conversation.read_text())["turn"] == "working"
+    finally:
+        for pid in (parent.pid, child_pid):
+            if pid is not None and pid_running(pid):
+                os.kill(pid, signal.SIGKILL)
+        parent.wait(timeout=5)
 
 
 @pytest.mark.skipif(os.environ.get("DIARY_TEST_SYSTEMD_USER") != "1", reason="opt-in synthetic user units")
@@ -340,7 +543,7 @@ signal.pause()
     systemd = lock.SystemdUser(None)
     svc = lock.SystemdTurns(
         None, lambda: True, runtimes={"probe": service}, systemd=systemd,
-        contain_all_scopes=False,
+        processes=FakeProcesses(), contain_all_scopes=False,
     )
     old_pid = None
     old_child = None
@@ -350,6 +553,7 @@ signal.pause()
                 break
             time.sleep(0.05)
         old_pid = json.loads(conversation.read_text())["pid"]
+        old_supervisor = systemd.main_pid(service)
         scope = svc.start("probe", "session-one")["scope"]
         systemd.verify_membership(scope, old_pid)
         spawn.touch()
@@ -378,6 +582,7 @@ signal.pause()
                 break
             time.sleep(0.05)
         assert current["pid"] != old_pid
+        assert systemd.main_pid(service) != old_supervisor
         time.sleep(0.2)
         assert child_file.read_text() == previous_child_record
         assert not pid_running(old_child)

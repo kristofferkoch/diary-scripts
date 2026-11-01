@@ -16,19 +16,22 @@ preserves the child's exit status. Both services explicitly use
 When attended lifecycle hooks report a new turn, the root controller:
 
 1. Obtains the supervisor's trusted `MainPID` from systemd and requires exactly
-   one direct runtime child.
+   one direct runtime child. It pins both processes' PID, parent PID, kernel
+   start time, and UID; an unexpected parent or identity is rejected.
 2. Calls the agent user manager's `StartTransientUnit` with that child in
    `PIDs`, `KillMode=control-group`, `SendSIGKILL=true`, and a 10-second stop
    timeout. The scope name is `diary-<runtime>-turn-<random>.scope`.
 3. Verifies through `GetUnit` and `GetUnitByPID` that the runtime is actually in
-   the new scope. Tool children inherit it, including children that call
-   `setsid` or create a new process group.
+   the new scope, then rechecks the pinned identity to reject PID reuse. Tool
+   children inherit the scope, including children that call `setsid` or create
+   a new process group.
 
 The web server and its model turn keep running; only the runtime child changes
-cgroup. At normal turn completion, `AttachProcessesToUnit` returns that child to
-the original service and membership is verified. A scope with background tool
-children remains registered with systemd, so those children are still covered
-by the next lock. A later turn gets a new scope.
+cgroup. At normal turn completion, the controller verifies the pinned identity
+before and after `AttachProcessesToUnit` returns that child to the original
+service; membership is also verified. A scope with background tool children
+remains registered with systemd, so those children are still covered by the
+next lock. A later turn gets a new scope.
 
 Each runtime is one process and can therefore belong to only one cgroup at a
 time. One active turn per runtime is supported. A second simultaneous session
@@ -37,28 +40,53 @@ DSH and Kimi runtimes have independent scopes. The ordinary single-user web
 flow does not require a runtime restart at turn boundaries.
 
 Kimi uses `UserPromptSubmit` before the model call, idempotent `TurnStarted` for
-other turn origins, and `Stop`/`StopFailure`/`Interrupt` for completion. DSH's
-Claude-compatible hook bridge uses `UserPromptSubmit` and `Stop`. An abnormal
-DSH turn may leave its runtime in the scope until the next lock; this is safe
-and does not resume work. A failing completion hook exits successfully so a
-`Stop` hook can never ask the model to continue. The controller independently
-fails locked on scope/systemd errors.
+other turn origins, and `Stop`/`StopFailure`/`Interrupt` for completion.
+`TurnStarted` is observation-only, so its exit status is not a security check:
+a valid start request received while the controller is not attended raises an
+operational error and invokes the root failsafe, killing the runtime instead of
+allowing a task/system turn to continue. DSH's Claude-compatible hook bridge
+uses `UserPromptSubmit` and `Stop`. An abnormal DSH turn may leave its runtime
+in the scope until the next lock; this is safe and does not resume work. A
+failing completion hook exits successfully so a `Stop` hook can never ask the
+model to continue.
 
 Agent-owned hook configuration is not the containment boundary. On every
-`LOCKING` transition the controller stops both fixed web services first, then
-**every scope in the dedicated agent user manager**, including scopes created
-directly by tools. It verifies each unit is inactive or gone. Stopping the
-services first prevents `Restart=on-failure` from resurrecting a model turn;
-stopping the scopes then kills the runtime and its complete descendant trees.
-Any error retains durable `LOCKING`, never `LOCKED`, and invokes fatal failsafe
-handling.
+`LOCKING` transition the controller requests both fixed web service stops
+without waiting, then repeatedly waits for service inactivity and rescans and
+stops **every active scope in the dedicated agent user manager**. A scope
+created during cancellation is found by a later pass. Stopping services first
+prevents `Restart=on-failure` from resurrecting a model turn.
 
-Unlock starts fresh service processes only after no managed scope remains
-active. The controller has no prompt queue, continuation request, or replay
-operation. It never opens or edits runtime conversation files. DSH persists an
-interrupted turn and requires a new user message to continue; the controlled
-verification below must prove the same no-auto-resume behavior for the deployed
-DSH/Kimi versions.
+Independently of the user manager, the controller enumerates `/proc` for the
+dedicated agent UID, pins process identities, and uses pidfds to SIGSTOP and
+SIGKILL candidates until none remain. Zombies are not treated as running work.
+After PID quiescence it performs the service/scope loop again. A scope-stop or
+lingering-process failure retains durable `LOCKING`, never `LOCKED`. If the
+user manager itself is unavailable but PID containment proves no agent process
+remains, lock may complete in degraded mode; attended startup remains impossible
+until the manager returns.
+
+Before attended mode or its egress policy is activated, unlock requires every
+old service to be inactive, no active agent-user scope, and no remaining agent
+process. It then starts each service and verifies a fresh supervisor PID,
+fresh runtime PID, and valid pinned parentage. Only after all services pass
+does the controller activate attended mode. A fresh service that accepts a
+prompt while durable state is still `LOCKING` follows the failsafe path above;
+there is no replay. The controller never opens or edits runtime conversation
+files. DSH persists an interrupted turn and requires a new user message to
+continue; the controlled verification below must prove the same no-auto-resume
+behavior for the deployed DSH/Kimi versions.
+
+## LATER-03 migration contract
+
+CTL-02 deliberately uses the existing agent user manager, transient user
+scopes, and the dedicated UID for its independent PID fallback. It does not
+create `agent.slice`, attach `NFTSet=`, or change network identity. LATER-03
+owns the move to root-owned system services and system slices, including any
+per-scope `NFTSet=` identity and the corresponding SELinux/executable changes.
+That migration must preserve per-turn control-group cancellation, the
+fresh-process/no-replay contract, and an independent failure fallback; it must
+not silently reuse these user-unit paths as system-slice configuration.
 
 ## Socket and hook protocol
 
@@ -97,8 +125,16 @@ DIARY_TEST_SYSTEMD_USER=1 uv run pytest \
 The opt-in probe creates a uniquely named synthetic service and scope with a
 supervised runtime, moves the runtime to the scope, spawns a `setsid` child,
 and stops only the synthetic units. It verifies both PIDs die, on-disk state
-remains, and a fresh service does not recreate the old child. Its manager uses
-`contain_all_scopes=False`; production always contains every agent-user scope.
+remains, fresh supervisor/runtime PIDs appear, and the fresh service does not
+recreate the old child. Its manager uses `contain_all_scopes=False`; production
+always contains every agent-user scope.
+
+The ordinary suite also performs a real PID-level user-manager-outage test with
+an allow-list containing only its two synthetic PIDs. It verifies the `/proc`
+and pidfd fallback kills the process tree without touching other processes.
+Fake-systemd race tests inject a new scope during cancellation and require a
+later rescan to remove it; identity tests reject replacement before scope start
+and reattach.
 
 ## Required controlled live verification
 
@@ -121,19 +157,26 @@ For each runtime:
    services remain stopped. Check the transition audit and durable state.
 4. Verify the conversation checksum/history remains and records at most an
    interrupted turn, not successful completion of the cancelled tool.
-5. Enter attended mode. Confirm fresh supervisor/runtime PIDs and a working web
-   UI, wait for background completion, and verify no cancelled tool or model
-   turn resumes and no blocked operation is replayed.
+5. Before attended egress opens, confirm old services are inactive and no stale
+   scope/process survives. Then confirm fresh supervisor/runtime PIDs and a
+   working web UI, wait for background completion, and verify no cancelled tool
+   or model turn resumes and no blocked operation is replayed.
 6. Start a new explicit turn and verify it receives a new scope and finishes
    normally. Repeat for the other runtime while the first has a turn to prove
    their scopes are independent.
 7. Test two simultaneous turns in one runtime: the second must fail closed and
    the controller must not report healthy attended/unscoped execution.
+8. Start a task/system-originated Kimi turn while locked. Observation-only
+   `TurnStarted` must reach the root failsafe and kill the runtime rather than
+   continue. Create another tool scope during cancellation and verify a later
+   pass removes it before `LOCKED`.
 
-Also inject a scope-stop failure and a user-manager outage. Both must retain
-`LOCKING`, stop or freeze the agents, and prevent attended startup. Stop the
-controller during an active turn and verify its stop/failsafe path also cancels
-the complete tree.
+Inject a scope-stop failure: it must retain `LOCKING` even when other scopes
+were stopped. Separately stop the user manager during an active test turn: the
+independent PID fallback must kill every recorded PID before degraded lock can
+complete, and attended startup must fail until the manager is restored. Stop
+the controller during an active turn and verify its stop/failsafe path also
+cancels the complete tree.
 
 After the controlled window, remove the turn-cancellation drop-in and custom
 hook entries, restore the prior approved agent units if activation is not yet

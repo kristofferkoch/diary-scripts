@@ -445,6 +445,113 @@ class NftCgroupIdentity:
         self._verify_descendant(unit, slice_cgroup)
 
 
+class SystemdUnavailable(LockError):
+    """The agent user manager cannot answer; PID containment is required."""
+
+
+@dataclass(frozen=True)
+class ProcessIdentity:
+    pid: int
+    ppid: int
+    start_time: int
+    uid: int
+
+
+def process_identity(pid: int, proc_root: str = "/proc") -> ProcessIdentity:
+    try:
+        raw = Path(proc_root, str(pid), "stat").read_text(encoding="ascii")
+        fields = raw.rsplit(")", 1)[1].strip().split()
+        ppid = int(fields[1])
+        start_time = int(fields[19])
+        uid = Path(proc_root, str(pid)).stat().st_uid
+    except (OSError, IndexError, ValueError) as exc:
+        raise LockError(f"cannot pin PID {pid} identity") from exc
+    if pid <= 0 or ppid < 0 or start_time < 0:
+        raise LockError(f"invalid PID {pid} identity")
+    return ProcessIdentity(pid, ppid, start_time, uid)
+
+
+def process_state(pid: int, proc_root: str = "/proc") -> str:
+    try:
+        raw = Path(proc_root, str(pid), "stat").read_text(encoding="ascii")
+        return raw.rsplit(")", 1)[1].strip().split()[0]
+    except (OSError, IndexError) as exc:
+        raise LockError(f"cannot read PID {pid} state") from exc
+
+
+def signal_process(identity: ProcessIdentity, signum: int) -> None:
+    try:
+        fd = os.pidfd_open(identity.pid)
+    except ProcessLookupError:
+        return
+    try:
+        try:
+            current = process_identity(identity.pid)
+        except LockError:
+            if Path(f"/proc/{identity.pid}").exists():
+                raise
+            return
+        if current == identity:
+            signal.pidfd_send_signal(fd, signum)
+    except ProcessLookupError:
+        pass
+    finally:
+        os.close(fd)
+
+
+class AgentProcesses:
+    def __init__(
+        self,
+        uid: int,
+        proc_root: str = "/proc",
+        eligible: Callable[[ProcessIdentity], bool] | None = None,
+    ) -> None:
+        self.uid = uid
+        self.proc_root = proc_root
+        self.eligible = eligible
+
+    def processes(self) -> list[ProcessIdentity]:
+        result: list[ProcessIdentity] = []
+        try:
+            entries = list(Path(self.proc_root).iterdir())
+        except OSError as exc:
+            raise LockError("cannot enumerate agent processes") from exc
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                identity = process_identity(int(entry.name), self.proc_root)
+                state = process_state(identity.pid, self.proc_root)
+            except LockError:
+                if not entry.exists():
+                    continue
+                raise
+            if identity.uid != self.uid or state in {"X", "Z"}:
+                continue
+            if self.eligible is not None and not self.eligible(identity):
+                continue
+            result.append(identity)
+        return result
+
+    def require_empty(self) -> None:
+        if self.processes():
+            raise LockError("agent processes remain after cancellation")
+
+    def stop_and_kill(self) -> int:
+        seen: set[ProcessIdentity] = set()
+        for _attempt in range(100):
+            current = self.processes()
+            if not current:
+                return len(seen)
+            for identity in current:
+                seen.add(identity)
+                signal_process(identity, signal.SIGSTOP)
+            for identity in self.processes():
+                signal_process(identity, signal.SIGKILL)
+            time.sleep(0.01)
+        raise LockError("agent processes could not be quiesced")
+
+
 class SystemdUser:
     def __init__(self, user: str | None, runner: Callable[..., Any] = subprocess.run) -> None:
         if user is not None and re.fullmatch(r"[a-z_][a-z0-9_-]*", user) is None:
@@ -472,7 +579,7 @@ class SystemdUser:
                 env=env,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise LockError("systemd user operation failed") from exc
+            raise SystemdUnavailable("systemd user operation failed") from exc
 
     def active(self, unit: str) -> bool:
         result = self._run("systemctl", ["is-active", "--quiet", unit])
@@ -480,7 +587,7 @@ class SystemdUser:
             return True
         if result.returncode in {3, 4}:
             return False
-        raise LockError(f"cannot verify {unit}")
+        raise SystemdUnavailable(f"cannot verify {unit}")
 
     def main_pid(self, service: str) -> int:
         result = self._run("systemctl", ["show", service, "--property=MainPID", "--value"])
@@ -492,18 +599,35 @@ class SystemdUser:
             raise LockError(f"{service} has no running main PID")
         return pid
 
+    def service_identities(
+        self, service: str, wait: bool = False,
+    ) -> tuple[ProcessIdentity, ProcessIdentity]:
+        for attempt in range(100 if wait else 1):
+            supervisor_pid = self.main_pid(service)
+            supervisor = process_identity(supervisor_pid)
+            try:
+                children = Path(f"/proc/{supervisor_pid}/task/{supervisor_pid}/children").read_text(
+                    encoding="ascii"
+                ).split()
+                pids = [int(value) for value in children]
+            except (OSError, ValueError) as exc:
+                raise LockError(f"cannot identify {service} runtime child") from exc
+            if len(pids) == 1 and pids[0] > 0:
+                runtime = process_identity(pids[0])
+                if runtime.ppid != supervisor.pid or runtime.uid != supervisor.uid:
+                    raise LockError(f"{service} runtime has unexpected parentage or identity")
+                return supervisor, runtime
+            if len(pids) > 1:
+                raise LockError(f"{service} must have exactly one runtime child")
+            time.sleep(0.05)
+        raise LockError(f"{service} must have exactly one runtime child")
+
     def runtime_pid(self, service: str) -> int:
-        supervisor = self.main_pid(service)
-        try:
-            children = Path(f"/proc/{supervisor}/task/{supervisor}/children").read_text(
-                encoding="ascii"
-            ).split()
-            pids = [int(value) for value in children]
-        except (OSError, ValueError) as exc:
-            raise LockError(f"cannot identify {service} runtime child") from exc
-        if len(pids) != 1 or pids[0] <= 0:
-            raise LockError(f"{service} must have exactly one runtime child")
-        return pids[0]
+        return self.service_identities(service)[1].pid
+
+    def verify_identity(self, identity: ProcessIdentity) -> None:
+        if process_identity(identity.pid) != identity:
+            raise LockError(f"PID {identity.pid} was replaced during turn handling")
 
     def unit_path(self, unit: str) -> str:
         result = self._run("busctl", [
@@ -511,7 +635,7 @@ class SystemdUser:
             "org.freedesktop.systemd1.Manager", "GetUnit", "s", unit,
         ])
         if result.returncode != 0:
-            raise LockError(f"cannot resolve {unit}")
+            raise SystemdUnavailable(f"cannot resolve {unit}")
         return result.stdout.strip()
 
     def pid_unit_path(self, pid: int) -> str:
@@ -520,7 +644,7 @@ class SystemdUser:
             "org.freedesktop.systemd1.Manager", "GetUnitByPID", "u", str(pid),
         ])
         if result.returncode != 0:
-            raise LockError(f"cannot resolve PID {pid}")
+            raise SystemdUnavailable(f"cannot resolve PID {pid}")
         return result.stdout.strip()
 
     def verify_membership(self, unit: str, pid: int) -> None:
@@ -540,7 +664,7 @@ class SystemdUser:
             "0",
         ])
         if result.returncode != 0:
-            raise LockError(f"could not create {scope}")
+            raise SystemdUnavailable(f"could not create {scope}")
         for _attempt in range(100):
             if self.active(scope):
                 self.verify_membership(scope, pid)
@@ -555,7 +679,7 @@ class SystemdUser:
             "ssau", service, "", "1", str(pid),
         ])
         if result.returncode != 0:
-            raise LockError(f"could not reattach PID {pid} to {service}")
+            raise SystemdUnavailable(f"could not reattach PID {pid} to {service}")
         self.verify_membership(service, pid)
 
     def all_scopes(self) -> list[str]:
@@ -563,7 +687,7 @@ class SystemdUser:
             "list-units", "--type=scope", "--all", "--plain", "--no-legend",
         ])
         if result.returncode != 0:
-            raise LockError("cannot list agent scopes")
+            raise SystemdUnavailable("cannot list agent scopes")
         return [parts[0] for line in result.stdout.splitlines() if (parts := line.split())]
 
     def scopes(self, runtime: str) -> list[str]:
@@ -577,7 +701,9 @@ class SystemdUser:
         args = ["stop"]
         if no_block:
             args.append("--no-block")
-        self._run("systemctl", [*args, unit])
+        result = self._run("systemctl", [*args, unit])
+        if result.returncode != 0 and not no_block and self.active(unit):
+            raise LockError(f"could not stop {unit}")
         if not no_block and self.active(unit):
             raise LockError(f"could not stop {unit}")
 
@@ -589,6 +715,8 @@ class SystemdUser:
         raise LockError(f"{unit} remains active after cancellation")
 
     def start(self, service: str) -> None:
+        if self.active(service):
+            raise LockError(f"refusing to reuse active {service}")
         result = self._run("systemctl", ["start", service])
         if result.returncode != 0 or not self.active(service):
             raise LockError(f"could not start {service}")
@@ -599,7 +727,11 @@ class Turn:
     runtime: str
     session: str
     scope: str
-    pid: int
+    identity: ProcessIdentity
+
+    @property
+    def pid(self) -> int:
+        return self.identity.pid
 
 
 class SystemdTurns:
@@ -609,6 +741,7 @@ class SystemdTurns:
         attended: Callable[[], bool],
         runtimes: dict[str, str] | None = None,
         systemd: Any = None,
+        processes: Any = None,
         contain_all_scopes: bool = True,
     ) -> None:
         self.runtimes = runtimes or {"dsh": "dsh-web.service", "kimi": "kimi-web.service"}
@@ -619,8 +752,13 @@ class SystemdTurns:
                 raise LockError("invalid agent service")
         self.attended = attended
         self.systemd = systemd or SystemdUser(agent_user)
+        if processes is None:
+            uid = os.geteuid() if agent_user is None else pwd.getpwnam(agent_user).pw_uid
+            processes = AgentProcesses(uid)
+        self.processes = processes
         self.contain_all_scopes = contain_all_scopes
         self.current: dict[str, Turn] = {}
+        self.retired: dict[str, tuple[ProcessIdentity, ProcessIdentity]] = {}
         self.lock = threading.RLock()
 
     def managed_scopes(self) -> set[str]:
@@ -635,20 +773,22 @@ class SystemdTurns:
     def start(self, runtime: str, session: str) -> dict[str, Any]:
         with self.lock:
             if not self.attended():
-                raise RequestRejected("agent turns are not attended")
+                raise LockError("agent turns are not attended")
             if runtime not in self.runtimes:
                 raise RequestRejected("unknown agent runtime")
             existing = self.current.get(runtime)
             if existing is not None:
                 if existing.session != session:
                     raise LockError("concurrent in-process turns cannot have separate scopes")
+                self.systemd.verify_identity(existing.identity)
                 self.systemd.verify_membership(existing.scope, existing.pid)
                 return {"ok": True, "scope": existing.scope}
             service = self.runtimes[runtime]
-            pid = self.systemd.runtime_pid(service)
+            _supervisor, identity = self.systemd.service_identities(service, wait=True)
             scope = f"diary-{runtime}-turn-{uuid.uuid4().hex}.scope"
-            self.systemd.start_scope(scope, pid)
-            turn = Turn(runtime, session, scope, pid)
+            self.systemd.start_scope(scope, identity.pid)
+            self.systemd.verify_identity(identity)
+            turn = Turn(runtime, session, scope, identity)
             self.current[runtime] = turn
             return {"ok": True, "scope": scope}
 
@@ -661,41 +801,83 @@ class SystemdTurns:
                 return {"ok": True, "scope": None}
             if turn.session != session:
                 raise LockError("turn completion does not match the active session")
+            self.systemd.verify_identity(turn.identity)
             self.systemd.attach(self.runtimes[runtime], turn.pid)
+            self.systemd.verify_identity(turn.identity)
             del self.current[runtime]
             return {"ok": True, "scope": turn.scope}
 
-    def cancel(self) -> int:
-        with self.lock:
-            scopes = self.managed_scopes()
+    def _capture_retired(self) -> None:
+        for service in self.runtimes.values():
+            try:
+                self.retired[service] = self.systemd.service_identities(service)
+            except (LockError, OSError):
+                pass
+
+    def _cancel_systemd(self) -> set[str]:
+        self._capture_retired()
+        for service in self.runtimes.values():
+            self.systemd.stop(service, no_block=True)
+        seen: set[str] = set()
+        for _attempt in range(100):
             errors: list[str] = []
             for service in self.runtimes.values():
                 try:
-                    self.systemd.stop(service, no_block=True)
-                except (LockError, OSError) as exc:
+                    self.systemd.wait_inactive(service)
+                except LockError as exc:
                     errors.append(str(exc))
-            for scope in sorted(scopes):
+            active_scopes = {scope for scope in self.managed_scopes() if self.systemd.active(scope)}
+            seen.update(active_scopes)
+            for scope in sorted(active_scopes):
                 try:
                     self.systemd.stop(scope)
-                except (LockError, OSError) as exc:
-                    errors.append(str(exc))
-            for service in self.runtimes.values():
-                try:
-                    self.systemd.wait_inactive(service)
-                except (LockError, OSError) as exc:
+                except LockError as exc:
                     errors.append(str(exc))
             if errors:
-                raise LockError("turn cancellation failed: " + "; ".join(errors))
+                raise LockError("; ".join(errors))
+            if not active_scopes:
+                return seen
+        raise LockError("agent scopes could not be quiesced")
+
+    def cancel(self) -> int:
+        with self.lock:
+            try:
+                seen = self._cancel_systemd()
+            except LockError:
+                seen = set()
+            self.processes.stop_and_kill()
+            self.processes.require_empty()
+            try:
+                seen = self._cancel_systemd() | seen
+            except SystemdUnavailable:
+                pass
+            except LockError as exc:
+                raise LockError(f"turn cancellation failed: {exc}") from exc
             self.current.clear()
-            return len(scopes)
+            return len(seen)
 
     def attend(self) -> None:
         with self.lock:
-            for scope in self.managed_scopes():
-                if self.systemd.active(scope):
-                    raise LockError("cancelled turn scope is still active")
+            for service in self.runtimes.values():
+                if self.systemd.active(service):
+                    raise LockError(f"refusing to resume active {service}")
+            self._cancel_systemd()
+            self.processes.stop_and_kill()
+            self.processes.require_empty()
+            self._cancel_systemd()
+            for service in self.runtimes.values():
+                if self.systemd.active(service):
+                    raise LockError(f"refusing to resume active {service}")
             for service in self.runtimes.values():
                 self.systemd.start(service)
+                fresh = self.systemd.service_identities(service, wait=True)
+                previous = self.retired.get(service)
+                if previous is not None:
+                    if fresh[0].pid == previous[0].pid or fresh[1].pid == previous[1].pid:
+                        raise LockError(f"{service} reused a supervisor or runtime PID")
+                    if fresh == previous:
+                        raise LockError(f"{service} reused a previous process identity")
+                self.retired[service] = fresh
             self.current.clear()
 
 
@@ -820,12 +1002,12 @@ class Controller:
         self.audit.emit(event, "request", "observed", self.state, reason, peer)
         self._save("LOCKING")
         self.modes.verify_network_audit()
+        if self.turns is not None:
+            self.turns.attend()
         self._activate("attended")
         self.modes.verify_network_audit()
         self.deadline_monotonic = self.monotonic() + self.attended_seconds
         self._save("ATTENDED", self.clock() + self.attended_seconds)
-        if self.turns is not None:
-            self.turns.attend()
         self.audit.emit(event, "attended", "allow", "ATTENDED", reason, peer)
         self.next_audit_check = self.monotonic() + AUDIT_HEALTH_INTERVAL
         return self.status()
