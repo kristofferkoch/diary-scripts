@@ -31,6 +31,13 @@ class FakeSystemd:
         self.inactive_scopes: set[str] = set()
         self.calls: list[tuple[str, str]] = []
         self.replaced_pids: set[int] = set()
+        self.manager_available = True
+        self.manager_recoveries = 0
+
+    def ensure_manager(self) -> None:
+        if not self.manager_available:
+            self.manager_available = True
+            self.manager_recoveries += 1
 
     def identity(self, pid: int, ppid: int = 1) -> lock.ProcessIdentity:
         return lock.ProcessIdentity(pid, ppid, pid * 100, os.geteuid())
@@ -248,6 +255,19 @@ def test_attend_refuses_active_service_and_reused_fresh_pids() -> None:
         svc.attend()
 
 
+def test_ordinary_lock_unlock_recovers_manager_and_starts_fresh_processes() -> None:
+    fake = FakeSystemd()
+    svc = turns(fake)
+    svc.cancel()
+    fake.manager_available = False
+    svc.attend()
+    assert fake.manager_available
+    assert fake.manager_recoveries == 1
+    assert all(fake.services.values())
+    assert fake.supervisor_pids == {"dsh-web.service": 1100, "kimi-web.service": 2200}
+    assert fake.pids == {"dsh-web.service": 1101, "kimi-web.service": 2201}
+
+
 def test_pid_replacement_is_rejected_before_scope_start_and_reattach() -> None:
     fake = FakeSystemd()
     svc = turns(fake)
@@ -385,6 +405,20 @@ def test_systemd_user_scope_and_attach_use_fixed_dbus_control_group_operations()
     assert attached[-5:] == ["ssau", "kimi-web.service", "", "1", "1234"]
 
 
+def test_systemd_scope_cancellation_excludes_manager_init_scope() -> None:
+    def run(argv, **kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "init.scope loaded active running System and Service Manager\n"
+                "tool-created.scope loaded active running Synthetic tool\n"
+            ),
+        )
+
+    systemd = lock.SystemdUser("agent", runner=run)
+    assert systemd.all_scopes() == ["tool-created.scope"]
+
+
 def test_turn_socket_uses_kernel_agent_uid_and_preserves_protocol(tmp_path: Path) -> None:
     fake = FakeSystemd()
     svc = turns(fake)
@@ -450,6 +484,33 @@ def test_pidfd_signal_is_withheld_when_start_time_or_parent_changes() -> None:
         lock.signal_process(expected, signal.SIGKILL)
     send.assert_not_called()
     close.assert_called_once_with(42)
+
+
+def fake_process(tmp_path: Path, pid: int, cgroup: str) -> None:
+    directory = tmp_path / str(pid)
+    directory.mkdir()
+    fields = ["0"] * 22
+    fields[0] = "S"
+    fields[1] = "1"
+    fields[19] = str(pid * 10)
+    (directory / "stat").write_text(f"{pid} (synthetic) {' '.join(fields)}\n")
+    (directory / "cgroup").write_text(f"0::{cgroup}\n")
+
+
+def test_pid_fallback_preserves_manager_and_infrastructure_cgroups(tmp_path: Path) -> None:
+    uid = os.geteuid()
+    prefix = f"/user.slice/user-{uid}.slice/user@{uid}.service"
+    fake_process(tmp_path, 9001, f"{prefix}/init.scope")
+    fake_process(tmp_path, 9002, f"{prefix}/app.slice/dsh-web.service")
+    fake_process(tmp_path, 9003, f"{prefix}/app.slice/dsh-web-token.service")
+    fake_process(tmp_path, 9004, f"{prefix}/app.slice/tool-created.scope")
+    fake_process(tmp_path, 9005, f"{prefix}/app.slice/dbus-broker.service")
+    fake_process(tmp_path, 9006, f"{prefix}/app.slice/kimi-web.service/tool-child")
+    processes = lock.AgentProcesses(uid, proc_root=str(tmp_path))
+    assert not processes.is_workload(9001)
+    assert not processes.is_workload(9003)
+    assert not processes.is_workload(9005)
+    assert {identity.pid for identity in processes.processes()} == {9002, 9004, 9006}
 
 
 def pid_running(pid: int) -> bool:
@@ -541,12 +602,25 @@ signal.pause()
     ]
     subprocess.run(command, check=True, capture_output=True, text=True, timeout=20)
     systemd = lock.SystemdUser(None)
+    allowed: set[int] = set()
+    processes = lock.AgentProcesses(
+        os.geteuid(), eligible=lambda identity: identity.pid in allowed,
+        workload_services={service},
+    )
     svc = lock.SystemdTurns(
         None, lambda: True, runtimes={"probe": service}, systemd=systemd,
-        processes=FakeProcesses(), contain_all_scopes=False,
+        processes=processes, contain_all_scopes=False,
     )
     old_pid = None
     old_child = None
+    uid = os.geteuid()
+    manager_pid = int(subprocess.check_output([
+        "/usr/bin/systemctl", "show", f"user@{uid}.service", "--property=MainPID", "--value",
+    ], text=True).strip())
+    manager_processes = lock.AgentProcesses(
+        uid, eligible=lambda identity: identity.pid == manager_pid,
+    )
+    assert manager_processes.processes() == []
     try:
         for _attempt in range(200):
             if conversation.exists():
@@ -563,6 +637,7 @@ signal.pause()
             time.sleep(0.05)
         old_child = int(child_file.read_text())
         assert old_child != old_pid and pid_running(old_child)
+        allowed.update({old_supervisor, old_pid, old_child})
 
         assert svc.cancel() == 1
         for _attempt in range(100):
@@ -583,6 +658,9 @@ signal.pause()
             time.sleep(0.05)
         assert current["pid"] != old_pid
         assert systemd.main_pid(service) != old_supervisor
+        assert pid_running(manager_pid)
+        assert manager_processes.processes() == []
+        allowed.update({current["pid"], systemd.main_pid(service)})
         time.sleep(0.2)
         assert child_file.read_text() == previous_child_record
         assert not pid_running(old_child)

@@ -499,16 +499,43 @@ def signal_process(identity: ProcessIdentity, signum: int) -> None:
         os.close(fd)
 
 
+def process_cgroup(pid: int, proc_root: str = "/proc") -> str:
+    try:
+        lines = Path(proc_root, str(pid), "cgroup").read_text(encoding="ascii").splitlines()
+    except OSError as exc:
+        raise LockError(f"cannot read PID {pid} cgroup") from exc
+    if len(lines) != 1 or not lines[0].startswith("0::/"):
+        raise LockError(f"PID {pid} has no unambiguous cgroup v2 identity")
+    return lines[0][3:]
+
+
 class AgentProcesses:
     def __init__(
         self,
         uid: int,
         proc_root: str = "/proc",
         eligible: Callable[[ProcessIdentity], bool] | None = None,
+        workload_services: set[str] | None = None,
     ) -> None:
         self.uid = uid
         self.proc_root = proc_root
         self.eligible = eligible
+        self.workload_services = workload_services or {"dsh-web.service", "kimi-web.service"}
+        self.manager_prefix = f"/user.slice/user-{uid}.slice/user@{uid}.service/"
+
+    def is_workload(self, pid: int) -> bool:
+        cgroup = process_cgroup(pid, self.proc_root)
+        if not cgroup.startswith(self.manager_prefix):
+            return False
+        relative = cgroup[len(self.manager_prefix):]
+        parts = relative.split("/")
+        if parts[0] == "init.scope":
+            return False
+        if any(part.endswith(".scope") for part in parts):
+            return True
+        if len(parts) >= 2 and parts[0] == "app.slice":
+            return parts[1] in self.workload_services
+        return False
 
     def processes(self) -> list[ProcessIdentity]:
         result: list[ProcessIdentity] = []
@@ -527,6 +554,8 @@ class AgentProcesses:
                     continue
                 raise
             if identity.uid != self.uid or state in {"X", "Z"}:
+                continue
+            if not self.is_workload(identity.pid):
                 continue
             if self.eligible is not None and not self.eligible(identity):
                 continue
@@ -580,6 +609,37 @@ class SystemdUser:
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise SystemdUnavailable("systemd user operation failed") from exc
+
+    def _run_system(self, args: list[str]) -> Any:
+        try:
+            return self.runner(
+                ["/usr/bin/systemctl", *args],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=20,
+                env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise SystemdUnavailable("could not recover the agent user manager") from exc
+
+    def ensure_manager(self) -> None:
+        try:
+            self.all_scopes()
+            return
+        except SystemdUnavailable:
+            pass
+        uid = os.geteuid() if self.user is None else pwd.getpwnam(self.user).pw_uid
+        result = self._run_system(["start", f"user@{uid}.service"])
+        if result.returncode != 0:
+            raise SystemdUnavailable("could not recover the agent user manager")
+        for _attempt in range(100):
+            try:
+                self.all_scopes()
+                return
+            except SystemdUnavailable:
+                time.sleep(0.05)
+        raise SystemdUnavailable("agent user manager did not become ready")
 
     def active(self, unit: str) -> bool:
         result = self._run("systemctl", ["is-active", "--quiet", unit])
@@ -688,7 +748,11 @@ class SystemdUser:
         ])
         if result.returncode != 0:
             raise SystemdUnavailable("cannot list agent scopes")
-        return [parts[0] for line in result.stdout.splitlines() if (parts := line.split())]
+        return [
+            parts[0]
+            for line in result.stdout.splitlines()
+            if (parts := line.split()) and parts[0] != "init.scope"
+        ]
 
     def scopes(self, runtime: str) -> list[str]:
         prefix = f"diary-{runtime}-turn-"
@@ -858,6 +922,7 @@ class SystemdTurns:
 
     def attend(self) -> None:
         with self.lock:
+            self.systemd.ensure_manager()
             for service in self.runtimes.values():
                 if self.systemd.active(service):
                     raise LockError(f"refusing to resume active {service}")
