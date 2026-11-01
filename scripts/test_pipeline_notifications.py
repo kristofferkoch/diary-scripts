@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import time
 import unicodedata
 from pathlib import Path
 
@@ -112,7 +113,7 @@ def test_urls_and_obfuscated_urls_are_removed(hostile: str):
     assert "javascript:" not in cleaned.lower()
     assert "data:" not in cleaned.lower()
     assert "mailto:" not in cleaned.lower()
-    if not hostile.startswith("<a"):
+    if not hostile.startswith(("<a", "[click")):
         assert "[link removed]" in cleaned
 
 
@@ -125,11 +126,18 @@ def test_urls_and_obfuscated_urls_are_removed(hostile: str):
         ("//example.com/admin", "example.com"),
         ("例子.测试/path", "例子"),
         ("例子。测试/path", "例子"),
+        ("例子.测试", "例子"),
+        ("例子。测试", "例子"),
         ("example。com/path", "example"),
+        ("example。com", "example"),
         ("example．com/path", "example"),
         ("example｡com/path", "example"),
         ("bücher.de/path", "bücher"),
+        ("bücher.de", "bücher"),
         ("xn--fsqu00a.xn--0zwm56d/path", "xn--"),
+        ("user@例子.测试", "user@"),
+        ("user@例子。测试", "user@"),
+        ("用户@bücher.de", "用户@"),
     ],
 )
 def test_international_and_protocol_relative_urls_are_removed(hostile: str, forbidden: str):
@@ -163,6 +171,14 @@ def test_oversized_html_tags_are_removed_without_retaining_delimiters():
     )
     assert cleaned == "safe"
     assert "<" not in cleaned and ">" not in cleaned
+
+
+def test_repeated_markdown_delimiters_are_linear_at_the_raw_cap():
+    started = time.perf_counter()
+    cleaned = sanitize_field("[" * (64 * 1024), limit=MAX_SUMMARY)
+    elapsed = time.perf_counter() - started
+    assert len(cleaned) <= MAX_SUMMARY
+    assert elapsed < 5.0
 
 
 @pytest.mark.parametrize(

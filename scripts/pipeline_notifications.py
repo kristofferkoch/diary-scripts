@@ -41,14 +41,14 @@ _ANSI_RE = re.compile(
 _DOMAIN_LABEL = r"[^\W_](?:[\w-]{0,61}[^\W_])?"
 _ASCII_TLD = r"(?:[a-z]{2,63}|xn--[a-z0-9-]{2,59})"
 _UNICODE_TLD = r"[^\W\d_][\w-]{1,62}"
-_ASCII_DOMAIN = rf"(?:{_DOMAIN_LABEL}\.)+{_ASCII_TLD}"
+_BARE_TLD = rf"(?:{_ASCII_TLD}|测试)"
+_BARE_DOMAIN = rf"(?:{_DOMAIN_LABEL}\.)+{_BARE_TLD}"
 _IDN_DOMAIN = rf"(?:{_DOMAIN_LABEL}\.)+{_UNICODE_TLD}"
+_BARE_UNICODE_DOT_DOMAIN = rf"(?:{_DOMAIN_LABEL}[。．｡․])+{_BARE_TLD}"
 _UNICODE_DOT_DOMAIN = rf"(?:{_DOMAIN_LABEL}[。．｡․])+{_UNICODE_TLD}"
+_EMAIL_DOMAIN = rf"(?:{_DOMAIN_LABEL}[.。．｡․])+{_UNICODE_TLD}"
 _URL_RES = (
-    re.compile(
-        r"(?i)(?<![\w.+-])[\w.+-]+@(?:[a-z0-9-]+\.)+[a-z]{2,63}"
-        r"(?::\d{1,5})?(?:/[^\s<>]*)?"
-    ),
+    re.compile(rf"(?i)(?<![\w.+-])[\w.+-]+@{_EMAIL_DOMAIN}"),
     re.compile(
         r"(?i)\b(?:(?:https?|ftp|file|data|javascript|mailto|tel|signal)\s*:"
         r"|[a-z][a-z0-9+.-]{1,31}\s*:\s*//)[^\s<>]*"
@@ -59,12 +59,16 @@ _URL_RES = (
         r"(?::\d{1,5})?(?:/[^\s<>]*)?"
     ),
     re.compile(
-        rf"(?i)(?<![\w@.-]){_ASCII_DOMAIN}"
+        rf"(?i)(?<![\w@.-]){_BARE_DOMAIN}"
         r"(?::\d{1,5})?(?:/[^\s<>]*)?"
     ),
     re.compile(
         rf"(?i)(?<![\w@.-]){_IDN_DOMAIN}"
         r"(?::\d{1,5})?/[^\s<>]*"
+    ),
+    re.compile(
+        rf"(?i)(?<![\w@.-]){_BARE_UNICODE_DOT_DOMAIN}"
+        r"(?::\d{1,5})?(?:/[^\s<>]*)?"
     ),
     re.compile(
         rf"(?i)(?<![\w@.-]){_UNICODE_DOT_DOMAIN}"
@@ -74,9 +78,6 @@ _URL_RES = (
         r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?(?:/[^\s<>]*)?"
     ),
 )
-_HTML_TAG_RE = re.compile(r"</?[^<>]*>")
-_MARKDOWN_LINK_RE = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
-_MARKDOWN_REFERENCE_RE = re.compile(r"!?\[([^\]]*)\]\[[^]]*\]")
 _WHITESPACE_RE = re.compile(r"\s+")
 
 
@@ -143,6 +144,46 @@ def validate_triage_result(result: Any) -> dict[str, Any]:
     return dict(result)
 
 
+def _strip_markup(text: str) -> str:
+    output: list[str] = []
+    position = 0
+    while position < len(text):
+        if text[position] == "<":
+            close = text.find(">", position + 1)
+            if close < 0:
+                output.append(text[position:])
+                break
+            last_open = text.rfind("<", position + 1, close)
+            if last_open < 0:
+                last_open = position
+            output.append(text[position:last_open])
+            output.append(" ")
+            position = close + 1
+            continue
+        if text[position] == "[":
+            label_close = text.find("]", position + 1)
+            if label_close < 0:
+                output.append(text[position:])
+                break
+            opener = label_close + 1
+            if opener >= len(text) or text[opener] not in "([":
+                output.append(text[position:opener])
+                position = opener
+                continue
+            destination_close = text.find(")" if text[opener] == "(" else "]", opener + 1)
+            if position > 0 and text[position - 1] == "!" and output \
+                    and output[-1].endswith("!"):
+                output[-1] = output[-1][:-1]
+            output.append(text[position + 1:label_close])
+            if destination_close < 0:
+                break
+            position = destination_close + 1
+            continue
+        output.append(text[position])
+        position += 1
+    return "".join(output)
+
+
 def sanitize_field(value: str, *, limit: int, empty: str = "[no safe text]") -> str:
     """Return one plain-text line with no links, controls, or text formatting."""
     text = html.unescape(unicodedata.normalize("NFKC", value[:MAX_RAW_SUMMARY]))
@@ -155,9 +196,7 @@ def sanitize_field(value: str, *, limit: int, empty: str = "[no safe text]") -> 
     )
     for pattern in _URL_RES:
         text = pattern.sub(" [link removed] ", text)
-    text = _MARKDOWN_LINK_RE.sub(r"\1", text)
-    text = _MARKDOWN_REFERENCE_RE.sub(r"\1", text)
-    text = _HTML_TAG_RE.sub(" ", text)
+    text = _strip_markup(text)
     text = text.translate({ord(char): " " for char in "`*_~#>\\"})
     text = _WHITESPACE_RE.sub(" ", text).strip()
     if not text:
