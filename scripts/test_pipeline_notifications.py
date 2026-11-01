@@ -117,6 +117,55 @@ def test_urls_and_obfuscated_urls_are_removed(hostile: str):
 
 
 @pytest.mark.parametrize(
+    ("hostile", "forbidden"),
+    [
+        ("//[::1]/admin", "::1"),
+        ("//[2001:DB8::1]:8080/admin", "2001"),
+        ("https://[::1]/admin", "::1"),
+        ("//example.com/admin", "example.com"),
+        ("例子.测试/path", "例子"),
+        ("例子。测试/path", "例子"),
+        ("example。com/path", "example"),
+        ("example．com/path", "example"),
+        ("example｡com/path", "example"),
+        ("bücher.de/path", "bücher"),
+        ("xn--fsqu00a.xn--0zwm56d/path", "xn--"),
+    ],
+)
+def test_international_and_protocol_relative_urls_are_removed(hostile: str, forbidden: str):
+    cleaned = sanitize_field(hostile, limit=MAX_SUMMARY)
+    assert forbidden not in cleaned
+    assert "[link removed]" in cleaned
+
+
+@pytest.mark.parametrize(
+    "ordinary",
+    [
+        "Use // as a separator", "你好。世界", "你好.世界", "a。b", "Version 1。2",
+        "1.2", "path/to/file",
+    ],
+)
+def test_url_detection_preserves_ordinary_text(ordinary: str):
+    assert sanitize_field(ordinary, limit=MAX_SUMMARY) == ordinary
+
+
+def test_oversized_markdown_constructs_are_reduced_to_plain_text():
+    assert sanitize_field("[safe](" + "d" * 2049 + ")", limit=MAX_SUMMARY) == "safe"
+    assert sanitize_field("[label][" + "r" * 201 + "]", limit=MAX_SUMMARY) == "label"
+    long_label = sanitize_field("[" + "l" * 1001 + "](destination)", limit=MAX_SUMMARY)
+    assert len(long_label) <= MAX_SUMMARY
+    assert not any(char in long_label for char in "[]()")
+
+
+def test_oversized_html_tags_are_removed_without_retaining_delimiters():
+    cleaned = sanitize_field(
+        "<" + "a" * 1025 + ">safe</" + "b" * 1025 + ">", limit=MAX_SUMMARY,
+    )
+    assert cleaned == "safe"
+    assert "<" not in cleaned and ">" not in cleaned
+
+
+@pytest.mark.parametrize(
     "hostile",
     [
         "normal\x1b[31mred\x1b[0m",
