@@ -163,6 +163,13 @@ uses a fixed argv and returns only allowlisted metadata, never raw `MESSAGE` or
 unrecognized journal fields. At most 10,000 stored records are summarized;
 `truncated` warns when the cap was reached.
 
+For AUD-05, `diary-production-baseline` consumes this fixed baseline API and
+adds the production coverage checklist, duration evidence, expected/novel flow
+classification, repeated-denial and suspicious-broker findings, and hash-bound
+owner-review evidence. See [production-baseline.md](production-baseline.md).
+That client does not collect live evidence or establish owner acceptance by
+itself.
+
 ## Approved installation and live verification
 
 After the diary-scripts and diary commits (including the submodule pointer) are

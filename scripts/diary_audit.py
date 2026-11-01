@@ -89,7 +89,7 @@ FIELD_MAP = {
     "dns_name": "DIARY_AUDIT_DNS_NAME",
 }
 REPORT_FIELDS = (
-    "event", "component", "operation", "decision", "lock_state",
+    "event", "component", "operation", "decision", "lock_state", "reason", "unit",
     "destination_ip", "destination_port", "protocol", "dns_name", "caller_uid",
 )
 
