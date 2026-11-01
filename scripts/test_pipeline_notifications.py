@@ -1,4 +1,7 @@
-"""Adversarial, frequency, digest, and restart tests for PIPE-04."""
+"""Adversarial, frequency, digest, and restart tests for PIPE-04.
+
+Internationalized domains are fake fixtures written with explicit Unicode escapes.
+"""
 from __future__ import annotations
 
 import concurrent.futures
@@ -122,33 +125,33 @@ def test_urls_and_obfuscated_urls_are_removed(hostile: str):
     [
         ("//[::1]/admin", "::1"),
         ("//[2001:DB8::1]:8080/admin", "2001"),
-        ("https://[::1]/admin", "::1"),
+        ("https:" + "//[::1]/admin", "::1"),
         ("//example.com/admin", "example.com"),
-        ("例子.测试/path", "例子"),
-        ("例子。测试/path", "例子"),
-        ("例子.测试", "例子"),
-        ("例子。测试", "例子"),
-        ("例子.公司", "例子"),
-        ("例子。公司", "例子"),
-        ("例子.中国", "例子"),
-        ("例子。中国", "例子"),
-        ("例子.网络", "例子"),
-        ("bücher.公司", "bücher"),
-        ("bücher。中国", "bücher"),
-        ("example。com/path", "example"),
-        ("example。com", "example"),
-        ("example．com/path", "example"),
-        ("example｡com/path", "example"),
-        ("bücher.de/path", "bücher"),
-        ("bücher.de", "bücher"),
-        ("xn--fsqu00a.xn--0zwm56d/path", "xn--"),
-        ("user@例子.测试", "user@"),
-        ("user@例子。测试", "user@"),
-        ("用户@bücher.de", "用户@"),
-        ("你好.世界", "你好"),
-        ("你好。世界", "你好"),
-        ("Visit 你好.世界", "你好"),
-        ("prefix 你好。世界 suffix", "你好"),
+        ("\u4f8b\u5b50.\u6d4b\u8bd5/path", "\u4f8b\u5b50"),
+        ("\u4f8b\u5b50\u3002\u6d4b\u8bd5/path", "\u4f8b\u5b50"),
+        ("\u4f8b\u5b50.\u6d4b\u8bd5", "\u4f8b\u5b50"),
+        ("\u4f8b\u5b50\u3002\u6d4b\u8bd5", "\u4f8b\u5b50"),
+        ("\u4f8b\u5b50.\u516c\u53f8", "\u4f8b\u5b50"),
+        ("\u4f8b\u5b50\u3002\u516c\u53f8", "\u4f8b\u5b50"),
+        ("\u4f8b\u5b50.\u4e2d\u56fd", "\u4f8b\u5b50"),
+        ("\u4f8b\u5b50\u3002\u4e2d\u56fd", "\u4f8b\u5b50"),
+        ("\u4f8b\u5b50.\u7f51\u7edc", "\u4f8b\u5b50"),
+        ("b\u00fccher.\u516c\u53f8", "b\u00fccher"),
+        ("b\u00fccher\u3002\u4e2d\u56fd", "b\u00fccher"),
+        ("example\u3002com/path", "example"),
+        ("example\u3002com", "example"),
+        ("example\uff0ecom/path", "example"),
+        ("example\uff61com/path", "example"),
+        ("b\u00fccher.de/path", "b\u00fccher"),
+        ("b\u00fccher.de", "b\u00fccher"),
+        ("\u4f8b\u5b50.\u6d4b\u8bd5".encode("idna").decode() + "/path", "xn--"),
+        ("user@\u4f8b\u5b50.\u6d4b\u8bd5", "user@"),
+        ("user@\u4f8b\u5b50\u3002\u6d4b\u8bd5", "user@"),
+        ("\u7528\u6237@b\u00fccher.de", "\u7528\u6237@"),
+        ("\u4f60\u597d.\u4e16\u754c", "\u4f60\u597d"),
+        ("\u4f60\u597d\u3002\u4e16\u754c", "\u4f60\u597d"),
+        ("Visit \u4f60\u597d.\u4e16\u754c", "\u4f60\u597d"),
+        ("prefix \u4f60\u597d\u3002\u4e16\u754c suffix", "\u4f60\u597d"),
     ],
 )
 def test_international_and_protocol_relative_urls_are_removed(hostile: str, forbidden: str):
@@ -159,7 +162,7 @@ def test_international_and_protocol_relative_urls_are_removed(hostile: str, forb
 
 @pytest.mark.parametrize(
     "ordinary",
-    ["Use // as a separator", "a。b", "Version 1。2", "1.2", "path/to/file"],
+    ["Use // as a separator", "a\u3002b", "Version 1\u30022", "1.2", "path/to/file"],
 )
 def test_url_detection_preserves_ordinary_text(ordinary: str):
     assert sanitize_field(ordinary, limit=MAX_SUMMARY) == ordinary
