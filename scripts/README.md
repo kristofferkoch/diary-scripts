@@ -65,6 +65,7 @@ Per-tool detail and the triage SOPs live in `docs/`. This file is the index.
 | [`docs/signal-notify.md`](docs/signal-notify.md) | `signal-notify-proxy` + `signal-attachment`: note-to-self sends and read-only attachment downloads (agent-facing) |
 | [`docs/diary-sync.md`](docs/diary-sync.md) | `diary-sync` / `diary-sync-broker`: allow-listed socket for the sjekk's privileged steps (spond/vigilo/skolemelding sync, `systemctl --user`) so the agent never holds those secrets |
 | [`docs/event-spool.md`](docs/event-spool.md) | independent trusted collection, immutable event IDs, atomic spool writes, and pipeline read/agent denial permissions |
+| [`docs/pipeline-identity.md`](docs/pipeline-identity.md) | PIPE-02 fixed-purpose `diary-pipeline` identity, root-owned numeric model endpoint, permanent UID egress, and live verification gates |
 | [`docs/legacy-state.md`](docs/legacy-state.md) | manual collector runtime state and safe migration out of tracked `memory/` |
 | [`docs/agent-merge.md`](docs/agent-merge.md) | `agent-merge-queue` / `agent-merge-approve`: separate automatic and approved trees, exact-OID owner publication |
 | [`docs/agent-merge-review.md`](docs/agent-merge-review.md) | advisory local-model scripts-queue review, pre-queue allowlist rejection, owner-readable reports |
