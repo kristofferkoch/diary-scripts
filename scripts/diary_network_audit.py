@@ -75,6 +75,7 @@ class WorkerState:
     def __init__(self) -> None:
         self.reported_version = 0
         self.in_flight: str | None = None
+        self.sentinel_done = False
         self.exited = False
 
 
@@ -438,13 +439,19 @@ def _audit_worker(
             except queue.Empty:
                 continue
             if event is _WORK_SENTINEL:
-                if loss.snapshot()[0] != state.reported_version:
-                    _emit_health(state, loss, socket_path, writer)
-                return
+                try:
+                    if loss.snapshot()[0] != state.reported_version:
+                        _emit_health(state, loss, socket_path, writer)
+                    return
+                finally:
+                    work.task_done()
+                    state.sentinel_done = True
             try:
                 _write_event(state, "flow", socket_path, writer, event)
             except (NetworkAuditError, OSError):
                 loss.add("audit_unavailable")
+            finally:
+                work.task_done()
     finally:
         state.exited = True
 
@@ -497,15 +504,16 @@ def serve(
         except queue.Full:
             try:
                 work.get_nowait()
+                work.task_done()
                 discarded = 1
             except queue.Empty:
                 pass
             work.put_nowait(_WORK_SENTINEL)
         worker.join(shutdown_timeout)
         with work.mutex:
-            discarded += sum(item is not _WORK_SENTINEL for item in work.queue)
-        if state.in_flight == "flow":
-            discarded += 1
+            unfinished = work.unfinished_tasks
+            sentinel_done = state.sentinel_done
+        discarded += max(0, unfinished - (0 if sentinel_done else 1))
         if loss.snapshot()[0] != state.reported_version:
             discarded += 1
         if discarded:

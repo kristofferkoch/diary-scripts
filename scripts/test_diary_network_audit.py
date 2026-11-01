@@ -538,6 +538,53 @@ def test_shutdown_budget_counts_queued_flows_and_pending_health(
     assert state.exited is True
 
 
+def test_dequeued_but_unmarked_flow_is_counted_once_on_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeSocket:
+        def __init__(self) -> None:
+            self.reads = 0
+
+        def recv(self, _size) -> bytes:
+            self.reads += 1
+            if self.reads == 1:
+                return packet_message(ipv4())
+            raise OSError("stop test")
+
+        def close(self) -> None:
+            pass
+
+    dequeued = threading.Event()
+    release_writer = threading.Event()
+    original_write = network._write_event
+
+    def paused_write(state, kind, *args):
+        if kind == "flow":
+            dequeued.set()
+            release_writer.wait(2)
+        return original_write(state, kind, *args)
+
+    loss = network.LossTracker()
+    state = network.WorkerState()
+    monkeypatch.setattr(network, "sd_notify", lambda _: True)
+    monkeypatch.setattr(network, "_write_event", paused_write)
+    with pytest.raises(OSError, match="stop test"):
+        network.serve(
+            GROUP, UID, GID, "/run/test/audit.sock",
+            opener=lambda _: FakeSocket(), writer=lambda *_: {"ok": True},
+            loss=loss, state=state, shutdown_timeout=0.05,
+        )
+    assert dequeued.is_set()
+    assert state.in_flight is None
+    assert loss.snapshot()[1]["shutdown_loss"] == 1
+    release_writer.set()
+    for _ in range(200):
+        if state.exited:
+            break
+        threading.Event().wait(0.01)
+    assert state.exited is True
+
+
 def test_sigterm_is_graceful_and_handler_is_restored(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(network.os, "geteuid", lambda: 0)
     previous = network.signal.getsignal(network.signal.SIGTERM)
