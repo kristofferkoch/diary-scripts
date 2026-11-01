@@ -33,7 +33,8 @@ def test_all_producers_and_readers_share_runtime_root_outside_tracked_memory():
         assert "memory" not in path.parts
 
 
-def test_runtime_jsonl_and_cursor_are_readable_by_existing_workflows(tmp_path: Path):
+def test_runtime_jsonl_and_cursor_are_readable_by_existing_workflows(
+        tmp_path: Path, monkeypatch):
     record = {"kind": "event", "fetched_at": "2026-11-01T10:00:00Z", "data": {"id": "event-1"}}
     output_dir = tmp_path / "spond"
     output_dir.mkdir()
@@ -45,16 +46,10 @@ def test_runtime_jsonl_and_cursor_are_readable_by_existing_workflows(tmp_path: P
     records = list(embed_messages.iter_records("spond", False))
     assert records == []
 
-    original_dir = embed_messages.legacy_state_root
-    original_show_dir = spondshow.JSONL_DIR
-    try:
-        embed_messages.legacy_state_root = lambda: tmp_path
-        spondshow.JSONL_DIR = output_dir
-        assert list(embed_messages.iter_records("spond", False)) == [record]
-        assert list(spondshow.iter_records(None, None)) == [record]
-    finally:
-        embed_messages.legacy_state_root = original_dir
-        spondshow.JSONL_DIR = original_show_dir
+    monkeypatch.setattr(embed_messages, "legacy_state_root", lambda: tmp_path)
+    monkeypatch.setattr(spondshow, "JSONL_DIR", output_dir)
+    assert list(embed_messages.iter_records("spond", False)) == [record]
+    assert list(spondshow.iter_records(None, None)) == [record]
 
 
 def test_sync_daily_output_never_targets_tracked_workspace(tmp_path: Path, monkeypatch):
