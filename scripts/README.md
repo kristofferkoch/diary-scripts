@@ -18,7 +18,7 @@ Entry-point names: `mailshow`, `search-mail`, `embed-mail`, `embed-messages`,
 `dsh-web-notify`, `vigilo-api`, `vigilo-login`, `vigilo-sync`, `vigiloshown`,
 `skolemelding-api`, `skolemelding-login`, `skolemelding-sync`,
 `skolemeldingshow`, `diary-sync`, `diary-sync-broker`, `diary-pipeline-triage`,
-`agent-merge-review`, `diary-audit`, `diary-auditd`, `diary-production-baseline`, `diary-lock`, `diary-lockd`, `diary-network-auditd`, `diary-dns-auditd`, `diary-network-policy`, `diary-fresh-unlock`, `diary-lock-dashboard`, `diary-lock-ui`, `diary-lockdown-acceptance`. Server modules are invoked as `uv run python -m mail_reader.server` and
+`agent-merge-review`, `diary-audit`, `diary-auditd`, `diary-production-baseline`, `diary-lock`, `diary-lockd`, `diary-network-auditd`, `diary-dns-auditd`, `diary-network-policy`, `diary-dns-policy`, `diary-dns-policyd`, `diary-fresh-unlock`, `diary-lock-dashboard`, `diary-lock-ui`, `diary-lockdown-acceptance`. Server modules are invoked as `uv run python -m mail_reader.server` and
 `uv run python -m scripts.kindle_dashboard.serve`.
 
 `uv run` creates/syncs `.venv/` on demand; you never need to activate
@@ -81,6 +81,7 @@ Per-tool detail and the triage SOPs live in `docs/`. This file is the index.
 | [`docs/network-audit.md`](docs/network-audit.md) | `diary-network-auditd`: accept-only UID/NFLOG flow observation forwarded to the trusted audit writer |
 | [`docs/dns-audit.md`](docs/dns-audit.md) | `diary-dns-auditd`: audit-only per-identity DNS forwarding and direct/alternate-resolution observation |
 | [`docs/network-policy.md`](docs/network-policy.md) | `diary-network-policy`: controller-owned dark/locked/attended UID rules, structural verification, and fail-closed live tests |
+| [`docs/dns-policy.md`](docs/dns-policy.md) | `diary-dns-policy` / `diary-dns-policyd`: fail-closed CTL-04 policy socket for the AUD-03 proxy, firewall split, and dark live checks |
 | [`docs/fresh-unlock.md`](docs/fresh-unlock.md) | `diary-fresh-unlock`: forced-login, browser-bound, single-use owner authorization boundary |
 | [`docs/owner-ui.md`](docs/owner-ui.md) | `diary-lock-ui`: independent grouped review, fresh unlock, lock-now, and explicit attendance extension |
 | [`docs/lockdown-acceptance.md`](docs/lockdown-acceptance.md) | offline-safe ACT-01 catalog runner, adapter protocol, reboot/resume, evidence, and fail-closed cleanup |
