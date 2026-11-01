@@ -1,13 +1,13 @@
 """Isolated PIPE-05 identity, failure, rate, execution, and replay tests."""
 from __future__ import annotations
 
+import hashlib
 import json
 import socket
 
 import pytest
 
 from scripts import signal_notify_proxy as proxy
-from scripts.pipeline_notification import render_envelope
 
 PIPELINE_UID = 4200
 GENERAL_UID = 4300
@@ -15,16 +15,54 @@ PIPELINE_CALLER = {"pid": 101, "uid": PIPELINE_UID, "gid": PIPELINE_UID}
 GENERAL_CALLER = {"pid": 202, "uid": GENERAL_UID, "gid": GENERAL_UID}
 
 
-def notification(event_id="mail:event-123", **changes):
+def event_id(number=1):
+    return f"evt_{number:064x}"
+
+
+def notification_id(kind, event_ids):
+    identity = json.dumps([kind, event_ids], separators=(",", ":")).encode("ascii")
+    return "ntf_" + hashlib.sha256(identity).hexdigest()
+
+
+def notification(number=1, **changes):
+    item = event_id(number)
     value = {
-        "event_id": event_id,
-        "urgency": "normal",
-        "summary": "Sanitized summary",
-        "deadline": None,
-        "review_reference": "local/review/event-123",
+        "schema_version": 1,
+        "notification_id": notification_id("immediate", [item]),
+        "kind": "immediate",
+        "recipient": "note-to-self",
+        "envelope": "diary-pipeline-v1",
+        "body": (
+            "Diary notification\n"
+            f"Event: {item}\n"
+            "Urgency: normal\n"
+            "Summary: Sanitized summary\n"
+            "Deadline: -\n"
+            "Review: local-review"
+        ),
+        "event_ids": [item],
+        "created_at": 1000.0,
     }
     value.update(changes)
     return value
+
+
+def digest_notification():
+    ids = [event_id(1), event_id(2)]
+    return {
+        "schema_version": 1,
+        "notification_id": notification_id("digest", ids),
+        "kind": "digest",
+        "recipient": "note-to-self",
+        "envelope": "diary-pipeline-v1",
+        "body": (
+            "Diary digest\nLow-priority events: 2\n\n"
+            f"Event: {ids[0]}\nSummary: First\nDeadline: -\nReview: first\n\n"
+            f"Event: {ids[1]}\nSummary: Second\nDeadline: -\nReview: second"
+        ),
+        "event_ids": ids,
+        "created_at": 1000.0,
+    }
 
 
 def pipeline_request(value=None, **params):
@@ -54,7 +92,7 @@ def make_boundary(state="LOCKED", audit_request=None, pipeline_uid=PIPELINE_UID)
         return {"ok": True, "state": states["value"]}
 
     def record(path, value):
-        events.append(value["event"])
+        events.append(value)
         return {"ok": True}
 
     boundary = proxy.LockedSignalBoundary(
@@ -70,20 +108,19 @@ def authorize(boundary, request, caller=PIPELINE_CALLER):
     return boundary.authorize(request, caller, proxy.Limiter())
 
 
-def test_trusted_pipeline_notification_is_reconstructed_and_audited_while_locked():
+def test_trusted_pipeline_notification_is_forwarded_unchanged_and_audited_while_locked():
     boundary, _, events = make_boundary()
     clean, reason = authorize(boundary, pipeline_request())
-    _, expected = render_envelope(notification())
     assert reason == ""
     assert clean == {
         "jsonrpc": "2.0", "id": 1, "method": "send",
-        "params": {"noteToSelf": True, "message": expected},
+        "params": {"noteToSelf": True, "message": notification()["body"]},
     }
     assert events[0]["decision"] == "allow"
     assert events[0]["reason"] == "validated_pipeline_notification"
     assert events[0]["caller"] == PIPELINE_CALLER
-    assert events[0]["event_id"] == "mail:event-123"
-    assert "summary" not in events[0] and "message" not in events[0]
+    assert events[0]["event_id"] == event_id()
+    assert "body" not in events[0] and "message" not in events[0]
 
 
 @pytest.mark.parametrize("state", ["LOCKING", "LOCKED"])
@@ -127,7 +164,11 @@ def test_missing_pipeline_identity_denies_even_with_valid_schema(monkeypatch):
     "candidate",
     [
         pipeline_request({**notification(), "extra": "field"}),
-        pipeline_request(notification(summary="https://example.invalid")),
+        pipeline_request(notification(body="https://example.invalid")),
+        pipeline_request({
+            "event_id": event_id(), "urgency": "normal", "summary": "raw",
+            "deadline": None, "review_reference": "local",
+        }),
         pipeline_request(message="arbitrary", notification=notification()),
         pipeline_request(notification=notification(), recipient="anyone"),
     ],
@@ -165,17 +206,17 @@ def test_per_event_and_aggregate_rate_limits():
     limiter = proxy.NotificationLimiter(
         burst=2, period=60.0, event_period=300.0, clock=lambda: now[0],
     )
-    assert limiter.allow("event-a") == ""
-    assert "event rate" in limiter.allow("event-a")
-    assert limiter.allow("event-b") == ""
-    assert "aggregate rate" in limiter.allow("event-c")
+    assert limiter.allow(("event-a",)) == ""
+    assert "event rate" in limiter.allow(("event-a",))
+    assert limiter.allow(("event-b",)) == ""
+    assert "aggregate rate" in limiter.allow(("event-c",))
     now[0] = 60.0
-    assert limiter.allow("event-c") == ""
+    assert limiter.allow(("event-c",)) == ""
     now[0] = 300.0
-    assert limiter.allow("event-a") == ""
+    assert limiter.allow(("event-a",)) == ""
 
 
-def test_pipeline_rate_rejection_is_audited():
+def test_pipeline_rate_rejection_is_audited_with_event_id():
     boundary, _, events = make_boundary()
     clean, _ = authorize(boundary, pipeline_request())
     assert clean is not None
@@ -184,6 +225,20 @@ def test_pipeline_rate_rejection_is_audited():
     assert "event rate limit" in reason
     assert events[-1]["decision"] == "deny"
     assert events[-1]["reason"] == "pipeline_rate_limited"
+    assert events[-1]["event_id"] == event_id()
+
+
+def test_digest_allow_and_rate_limit_audits_include_every_event_id():
+    boundary, _, events = make_boundary()
+    request = pipeline_request(digest_notification())
+    clean, _ = authorize(boundary, request)
+    assert clean is not None
+    assert [event["event_id"] for event in events] == [event_id(1), event_id(2)]
+    clean, reason = authorize(boundary, request)
+    assert clean is None and "event rate limit" in reason
+    assert [event["event_id"] for event in events[2:]] == [event_id(1), event_id(2)]
+    assert all(event["decision"] == "deny" for event in events[2:])
+    assert all(event["reason"] == "pipeline_rate_limited" for event in events[2:])
 
 
 def handle_request(request, boundary, monkeypatch, caller, forwarded):
@@ -220,7 +275,7 @@ def test_schema_and_audit_rejections_never_reach_upstream(monkeypatch):
     forwarded = []
     boundary, _, _ = make_boundary()
     response = handle_request(
-        pipeline_request(notification(summary="https://example.invalid")),
+        pipeline_request(notification(body="https://example.invalid")),
         boundary, monkeypatch, PIPELINE_CALLER, forwarded,
     )
     assert "error" in response and forwarded == []
@@ -244,6 +299,7 @@ def test_valid_pipeline_execution_occurs_once_after_audit(monkeypatch):
     assert "result" in response
     assert len(forwarded) == 1
     assert forwarded[0]["params"]["noteToSelf"] is True
+    assert forwarded[0]["params"]["message"] == notification()["body"]
     assert len(events) == 1 and events[0]["decision"] == "allow"
 
 

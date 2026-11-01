@@ -43,7 +43,8 @@ or replayed on unlock.
 
 The trusted pipeline instead uses `sendPipelineNotification`. Authorization
 uses the kernel `SO_PEERCRED` UID of the `diary-pipeline` account, never a
-request field. The request has exactly this shape:
+request field. The request carries the exact versioned eight-field record from
+PIPE-04 `Notification.as_dict()`:
 
 ```json
 {
@@ -52,28 +53,35 @@ request field. The request has exactly this shape:
   "method": "sendPipelineNotification",
   "params": {
     "notification": {
-      "event_id": "mail:event-123",
-      "urgency": "normal",
-      "summary": "Sanitized one-line summary",
-      "deadline": null,
-      "review_reference": "local/review/event-123"
+      "schema_version": 1,
+      "notification_id": "ntf_6a0b94c4cbe95bad638762e383e70ed6559be32e95327529f9cc33cf11f9d8f6",
+      "kind": "immediate",
+      "recipient": "note-to-self",
+      "envelope": "diary-pipeline-v1",
+      "body": "Diary notification\nEvent: evt_0000000000000000000000000000000000000000000000000000000000000001\nUrgency: high\nSummary: Sanitized summary\nDeadline: 2026-11-02\nReview: local-review-1",
+      "event_ids": ["evt_0000000000000000000000000000000000000000000000000000000000000001"],
+      "created_at": 1000.0
     }
   }
 }
 ```
 
-This is the PIPE-04 rendered-notification contract: PIPE-04 sanitizes the five
-model-result fields and emits no recipient, final message, or envelope. PIPE-05
-revalidates the exact schema, rejects unknown fields, URLs, control/formatting
-characters, invalid urgency/deadlines, and excessive lengths, then constructs
-the fixed `Diary triage notification` note-to-self envelope itself. Urgency is
-`low`, `normal`, or `high`; deadline is null or ISO 8601. Summaries are capped
-at 1000 characters and review references at 256.
+PIPE-04 alone sanitizes model text and renders the immediate or multi-event
+digest body. PIPE-05 has no raw five-field triage-result path and never
+resanitizes or rewrites that body. It rejects unknown fields and verifies schema
+version 1, kind `immediate`/`digest`, fixed `note-to-self` recipient and
+`diary-pipeline-v1` envelope, finite timestamp, unique `evt_<64 lowercase hex>`
+event IDs, and the deterministic notification ID derived from kind and the
+ordered event IDs. It also validates the exact immediate/digest template,
+rendered-field safety and length limits, and a 4000-character body cap before
+forwarding the original body unchanged with upstream `noteToSelf: true`.
+Digests are limited to 20 events.
 
 Pipeline sends are limited to one per event per five minutes and six per minute
-in aggregate. Rate-limited sends are audited and dropped without retry state.
-Audit records contain decision metadata and event ID, never summary or message
-content.
+in aggregate. Rate-limited sends are dropped without retry state. Every allowed
+or rate-limited pipeline decision produces one required audit record per
+validated event ID, so every digest member is included. Audit records contain
+decision metadata and event IDs, never body or message content.
 
 ## Download an attachment
 
@@ -125,10 +133,13 @@ keep using the **raw** socket — it is the receiver.
 ## Tests
 
 ```bash
-uv run --project diary-scripts pytest scripts/test_attachment_store.py scripts/test_signal_notify_proxy.py scripts/test_signal_attachment.py scripts/test_pipeline_notification.py scripts/test_signal_lockdown.py
+uv run --project diary-scripts pytest scripts/test_attachment_store.py scripts/test_signal_notify_proxy.py scripts/test_signal_attachment.py scripts/test_pipeline_notification.py scripts/test_signal_lockdown.py scripts/test_signal_audit_integration.py scripts/test_pipeline05_pipe04_contract.py
 ```
 
-Covers send validation, attachment traversal and symlink rejection, an
-end-to-end proxy read, the download CLI, the strict PIPE-04 contract, trusted
-identity and spoof rejection, lock/audit fail-closed behavior, per-event and
-aggregate rates, and no execution or replay of rejected sends.
+The cross-contract file uses the sibling `pipe04-safe-rendering-scripts`
+checkout by default, or `DIARY_PIPE04_CHECKOUT`, and skips when that read-only
+checkout is unavailable. Coverage includes attachment safety, the exact
+versioned PIPE-04 contract using real immediate and digest `Notification`
+objects, trusted identity and spoof rejection, real audit client/daemon round
+trips, lock/audit fail-closed behavior, per-event and aggregate rates with all
+digest event IDs, and no execution or replay of rejected sends.

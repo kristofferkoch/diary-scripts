@@ -16,8 +16,9 @@ and exposes only note-to-self sends and attachment reads:
   response is base64-encoded. Nothing is forwarded upstream for this method.
 * With explicit ``--enforce-lockdown``, lock and audit writes are mandatory,
   locked general-agent sends are denied, and only the kernel-authenticated
-  pipeline UID may use ``sendPipelineNotification`` with the strict PIPE-04
-  schema. The proxy renders the fixed envelope and never queues rejected sends.
+  pipeline UID may use ``sendPipelineNotification`` with the strict versioned
+  PIPE-04 record. Its fixed rendered body is forwarded unchanged, and rejected
+  sends are never queued.
 
 The upstream send call is a plain JSON-RPC client request — no receive loop —
 so the single-receiver rule (network/docs/signal-cli-mirror.md) is respected.
@@ -136,11 +137,13 @@ class NotificationLimiter:
         self.events: dict[str, float] = {}
         self.lock = threading.Lock()
 
-    def allow(self, event_id: str) -> str:
+    def allow(self, event_ids: tuple[str, ...]) -> str:
         with self.lock:
             now = self.clock()
-            previous = self.events.get(event_id)
-            if previous is not None and now - previous < self.event_period:
+            if any(
+                event_id in self.events and now - self.events[event_id] < self.event_period
+                for event_id in event_ids
+            ):
                 return "pipeline event rate limit exceeded"
             self.tokens = min(
                 self.burst,
@@ -149,10 +152,12 @@ class NotificationLimiter:
             self.stamp = now
             if self.tokens < 1:
                 return "pipeline aggregate rate limit exceeded"
-            if event_id not in self.events and len(self.events) >= 4096:
+            new_count = sum(event_id not in self.events for event_id in event_ids)
+            while len(self.events) + new_count > 4096:
                 oldest = min(self.events, key=self.events.__getitem__)
                 del self.events[oldest]
-            self.events[event_id] = now
+            for event_id in event_ids:
+                self.events[event_id] = now
             self.tokens -= 1
             return ""
 
@@ -220,9 +225,26 @@ class LockedSignalBoundary:
         if event_id is not None:
             event["event_id"] = event_id
         try:
-            self.audit_request(self.audit_socket, {"cmd": "write", "event": event})
+            self.audit_request(self.audit_socket, event)
         except Exception:
             return "audit unavailable; send denied"
+        return ""
+
+    def _record_events(
+        self,
+        operation: str,
+        decision: str,
+        state: str,
+        reason: str,
+        caller: dict[str, int],
+        event_ids: tuple[str, ...],
+    ) -> str:
+        for event_id in event_ids:
+            error = self._record(
+                operation, decision, state, reason, caller, event_id,
+            )
+            if error:
+                return error
         return ""
 
     def _deny(
@@ -278,27 +300,29 @@ class LockedSignalBoundary:
                 )
             params = {str(key): value for key, value in params.items()}
             try:
-                notification, message = pipeline_notification.render_envelope(
+                notification = pipeline_notification.validate_notification(
                     params["notification"],
                 )
             except (TypeError, ValueError) as exc:
                 return self._deny(
                     operation, state, "invalid_pipeline_schema", caller, str(exc),
                 )
-            rate_error = self.notification_limiter.allow(notification["event_id"])
+            event_ids = tuple(notification["event_ids"])
+            rate_error = self.notification_limiter.allow(event_ids)
             if rate_error:
-                return self._deny(
-                    operation, state, "pipeline_rate_limited", caller, rate_error,
+                audit_error = self._record_events(
+                    operation, "deny", state, "pipeline_rate_limited", caller, event_ids,
                 )
+                return None, audit_error or rate_error
             clean = {
                 "jsonrpc": "2.0",
                 "id": request.get("id"),
                 "method": "send",
-                "params": {"noteToSelf": True, "message": message},
+                "params": {"noteToSelf": True, "message": notification["body"]},
             }
-            audit_error = self._record(
+            audit_error = self._record_events(
                 operation, "allow", state, "validated_pipeline_notification",
-                caller, notification["event_id"],
+                caller, event_ids,
             )
             if audit_error:
                 return None, audit_error
