@@ -125,9 +125,10 @@ or Signal prompt. Queue and approval operations are serialized with an exclusive
 lock.
 
 The socket front-end also emits AUD-04 locked-mode decisions with kernel peer
-identity: diary/scripts requests are `would_deny`; the independent owner approval
-is `allow`. This observation does not alter queueing or approval and does not use
-the advisory model reviewer as an authority.
+identity: diary/scripts requests are `would_deny`; approval is `allow` only when
+the peer UID equals the service owner UID, and non-owner approval is `would_deny`
+with `reason=owner_required`. This observation does not alter queueing or approval
+and does not use the advisory model reviewer as an authority.
 
 An empty queue is a no-op. A changed queue OID, dirty approved/integration
 checkout, dirty queue, unexpected queue HEAD, wrong caller UID, or merge conflict

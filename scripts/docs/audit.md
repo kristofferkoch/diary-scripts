@@ -79,8 +79,10 @@ query *names* remain supported because the design explicitly requires them.
 with `lock_state=locked`: this is a hypothetical locked-mode classification, not
 a claim that the future controller is active. Safe operations use `allow`;
 external actions use `would_deny`. Signal attachment reads and sync
-`ping`/`status` are safe, as is the independent owner-only merge approval path.
-Signal sends, sync/start, diary/scripts merge requests, and ordinary sudo are
+`ping`/`status` are safe. Merge approval is `allow` only when the kernel caller
+UID equals the merge service owner UID; other callers and missing owner identity
+are `would_deny` with `reason=owner_required`. Signal sends, sync/start,
+diary/scripts merge requests, and ordinary sudo are
 `would_deny`. Unknown methods and unknown future brokers become
 `operation=unknown`, `decision=would_deny`, and `reason=unknown_operation`.
 There is no lock-safe sudo operation or break-glass path in this audit-only

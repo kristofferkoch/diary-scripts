@@ -25,7 +25,6 @@ CALLER = {"pid": 123, "uid": 1001, "gid": 1001}
         ("diary-sync", "status", "allow", "read_only"),
         ("diary-sync", "start", "would_deny", "service_start"),
         ("diary-sync", "sync", "would_deny", "external_sync"),
-        ("agent-merge", "approve", "allow", "owner_approval"),
         ("agent-merge", "diary", "would_deny", "publication_request"),
         ("agent-merge", "scripts", "would_deny", "publication_request"),
         ("sudo-broker", "execute", "would_deny", "privileged_execute"),
@@ -42,6 +41,27 @@ def test_locked_policy(component: str, operation: str, expected: str, reason: st
         "reason": reason,
         "caller": CALLER,
     }
+    normalized, redacted = diary_audit.normalize_event(event)
+    assert normalized == event and redacted == []
+
+
+@pytest.mark.parametrize(
+    ("caller_uid", "owner_uid", "decision", "reason"),
+    [
+        (1000, 1000, "allow", "owner_approval"),
+        (1001, 1000, "would_deny", "owner_required"),
+        (1001, None, "would_deny", "owner_required"),
+    ],
+)
+def test_agent_merge_approval_requires_trusted_owner_uid(
+    caller_uid: int, owner_uid: int | None, decision: str, reason: str,
+) -> None:
+    caller = {**CALLER, "uid": caller_uid}
+    event = broker_audit.build_event("agent-merge", "approve", caller, owner_uid)
+    assert event["operation"] == "approve"
+    assert event["decision"] == decision
+    assert event["reason"] == reason
+    assert event["caller"] == caller
     normalized, redacted = diary_audit.normalize_event(event)
     assert normalized == event and redacted == []
 
@@ -121,6 +141,20 @@ def test_cli_uses_kernel_peer_credentials(monkeypatch: pytest.MonkeyPatch) -> No
     assert events[0]["caller"] == {
         "pid": os.getpid(), "uid": os.geteuid(), "gid": os.getegid(),
     }
+
+
+def test_cli_nonowner_approval_is_would_deny(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = []
+    monkeypatch.setattr(broker_audit, "peer_credentials_fd", lambda fd: CALLER)
+    monkeypatch.setattr(broker_audit.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(
+        broker_audit, "request", lambda path, event: events.append(event) or {"ok": True},
+    )
+    assert broker_audit.main([
+        "--component", "agent-merge", "--operation", "approve", "--peer-fd", "0",
+    ]) == 0
+    assert events[0]["decision"] == "would_deny"
+    assert events[0]["reason"] == "owner_required"
 
 
 def test_peer_credentials_come_from_socketpair() -> None:

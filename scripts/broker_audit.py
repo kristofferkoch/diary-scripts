@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import socket
 import struct
 
@@ -26,7 +27,6 @@ POLICY = {
         "sync": ("would_deny", "external_sync"),
     },
     "agent-merge": {
-        "approve": ("allow", "owner_approval"),
         "diary": ("would_deny", "publication_request"),
         "scripts": ("would_deny", "publication_request"),
     },
@@ -50,7 +50,16 @@ def peer_credentials_fd(fd: int) -> dict[str, int]:
         sock.close()
 
 
-def classify(component: str, operation: str) -> tuple[str, str, str, str]:
+def classify(
+    component: str,
+    operation: str,
+    caller_uid: int,
+    owner_uid: int | None,
+) -> tuple[str, str, str, str]:
+    if component == "agent-merge" and operation == "approve":
+        if caller_uid == owner_uid:
+            return operation, "allow", "owner_approval", "locked"
+        return operation, "would_deny", "owner_required", "locked"
     known = POLICY.get(component, {}).get(operation)
     if known is None:
         return "unknown", "would_deny", "unknown_operation", "locked"
@@ -58,8 +67,15 @@ def classify(component: str, operation: str) -> tuple[str, str, str, str]:
     return operation, decision, reason, "locked"
 
 
-def build_event(component: str, operation: str, caller: dict[str, int]) -> dict:
-    operation, decision, reason, lock_state = classify(component, operation)
+def build_event(
+    component: str,
+    operation: str,
+    caller: dict[str, int],
+    owner_uid: int | None = None,
+) -> dict:
+    operation, decision, reason, lock_state = classify(
+        component, operation, caller["uid"], owner_uid,
+    )
     return {
         "event": "broker.decision",
         "component": component,
@@ -100,8 +116,9 @@ def audit(
     operation: str,
     caller: dict[str, int],
     socket_path: str = DEFAULT_SOCKET,
+    owner_uid: int | None = None,
 ) -> dict:
-    event = build_event(component, operation, caller)
+    event = build_event(component, operation, caller, owner_uid)
     try:
         request(socket_path, event)
     except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
@@ -120,7 +137,7 @@ def main(argv: list[str] | None = None) -> int:
         caller = peer_credentials_fd(args.peer_fd)
     except OSError:
         return 0
-    audit(args.component, args.operation, caller, args.socket)
+    audit(args.component, args.operation, caller, args.socket, os.geteuid())
     return 0
 
 
