@@ -15,10 +15,21 @@ The page prominently states **Enforcement: dark / audit-only**. Controller state
 is not represented as active containment before ACT-01. The page shows the
 controller's authoritative `LOCKING`/`LOCKED`/`ATTENDED` state, attendance expiry,
 component availability, and the fixed 24-hour baseline report grouped into
-network, DNS, broker, and other findings. It refreshes only by GET every 30
-seconds. Controller or audit failures render as unavailable, never as healthy or
-as an empty report. Empty categories refer only to returned records; a truncated
-report produces a prominent warning that omitted records may contain findings.
+network, DNS, broker, and other findings. Its report also contains the CTL-07
+`review_id`, `incomplete` marker, and AUD-05-classified `required_groups` from the
+same trusted review provider used for unlock decisions. `reason` and `unit` are
+preserved in both baseline and required groups for owner context and
+expected-flow matching.
+
+The dashboard mounts `/lock/workflow.js` in `#lock-workflow` and loads
+`/lock/dashboard.js`, which calls `DiaryLockWorkflow.mount` with `getReport`,
+`getState`, and a GET-only snapshot `refresh`. CSP permits scripts and
+connections only to self; there is no inline workflow script, third-party asset,
+or WebSocket. Page refresh is still read-only GET every 30 seconds and never
+extends attendance. Controller or audit failures render as unavailable, never
+as healthy or as an empty report. Empty categories refer only to returned
+records; a truncated report produces a prominent warning that omitted records
+may contain findings.
 
 ## Least-privilege read boundary
 
@@ -28,18 +39,21 @@ address family. Its supplementary `diary-lock-control` and `diary-audit`
 memberships permit socket connections, not unrestricted commands. Each root
 daemon checks the kernel peer identity and restricts this account independently:
 
-- `diary-lockd --dashboard-user diary-lock-dashboard` allows only the exact
-  `{"cmd":"status"}` request. `lock`, `break_glass`, extra fields, and attendance
-  changes are rejected without invoking a transition or failsafe.
-- `diary-auditd --dashboard-user diary-lock-dashboard` allows only `baseline` and
-  `review`. `write` and `ping` are rejected, so the dashboard cannot create audit
-  events or heartbeat writes. It has no native journal access.
+- Combined `diary-lockd --dashboard-user diary-lock-dashboard --ui-user
+  diary-lock-ui` allows the dashboard only the exact `{"cmd":"status"}` request
+  while separately authorizing UI `unlock`/`extend`. Dashboard `lock`,
+  `break_glass`, `unlock`, `extend`, and extra fields are rejected without a
+  transition or failsafe.
+- Combined `diary-auditd --dashboard-user diary-lock-dashboard --ui-user
+  diary-lock-ui` allows both accounts only `baseline` and `review`. `write` and
+  `ping` are rejected for each, so neither web identity can create audit events
+  or heartbeat writes. Neither has native journal access.
 
-The web process has fixed socket paths and fixed report arguments. HTTP clients
-cannot select commands, report expressions, controller operations, or firewall
-operations. Only GET and HEAD are implemented; there are no forms or lock,
-unlock, acknowledgement, attendance-extension, fresh-authorization, or consume
-controls. CTL-07 owns any later state-changing workflow.
+The dashboard web process has fixed socket paths and fixed report arguments and
+implements only GET/HEAD. HTTP clients cannot select commands, report
+expressions, controller operations, or firewall operations. State changes exist
+only in the separately authenticated CTL-07 workflow service and its explicit
+browser actions, not in dashboard snapshot code.
 
 ## Installation and live verification
 

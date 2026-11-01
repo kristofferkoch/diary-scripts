@@ -18,10 +18,14 @@ from pathlib import Path
 from typing import Any, Callable, cast
 from urllib.parse import urlsplit
 
+from scripts.diary_lock_ui import AuditReportProvider, ControllerClient, ReportProvider
+from scripts.diary_production_baseline import load_json
+
 SCHEMA_VERSION = 1
 DEFAULT_SOCKET = "/run/diary-lock-dashboard/http.sock"
 DEFAULT_CONTROLLER_SOCKET = "/run/diary-lock/socket"
 DEFAULT_AUDIT_SOCKET = "/run/diary-audit/socket"
+DEFAULT_EXPECTED_FLOWS = "/etc/diary/lock-expected-flows.json"
 DEFAULT_CADDY_USER = "caddy"
 DEFAULT_OWNER = "kek"
 DEFAULT_OWNER_GROUP = "lock-owner"
@@ -32,9 +36,29 @@ STATES = frozenset({"LOCKING", "LOCKED", "ATTENDED"})
 GROUP_KINDS = ("network", "dns", "broker", "other")
 FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}\Z")
 GROUP_FIELDS = (
-    "event", "component", "operation", "decision", "lock_state",
+    "event", "component", "operation", "decision", "lock_state", "reason", "unit",
     "destination_ip", "destination_port", "protocol", "dns_name", "caller_uid",
 )
+DASHBOARD_JS = """'use strict';
+let snapshot = {
+  controller: {state: 'UNAVAILABLE'},
+  report: {review_id: null, incomplete: true, required_groups: []},
+};
+async function refreshSnapshot() {
+  const response = await fetch('/lock/api/status', {cache: 'no-store'});
+  if (!response.ok) throw new Error(`Snapshot refresh failed (HTTP ${response.status}).`);
+  snapshot = await response.json();
+}
+const workflow = window.DiaryLockWorkflow.mount({
+  element: document.getElementById('lock-workflow'),
+  getReport: () => snapshot.report,
+  getState: () => snapshot.controller,
+  refresh: refreshSnapshot,
+});
+refreshSnapshot().then(workflow.render).catch(error => {
+  document.getElementById('workflow-error').textContent = error.message;
+});
+"""
 
 
 class DashboardError(ValueError):
@@ -192,13 +216,19 @@ class SnapshotReader:
         audit_socket: str = DEFAULT_AUDIT_SOCKET,
         reader: Callable[[str, dict[str, Any]], dict[str, Any]] = request,
         clock: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
+        workflow: ReportProvider | None = None,
+        expected: dict[str, Any] | None = None,
     ) -> None:
         self.controller_socket = controller_socket
         self.audit_socket = audit_socket
         self.reader = reader
         self.clock = clock
+        self.workflow = workflow or AuditReportProvider(
+            ControllerClient(controller_socket, reader), audit_socket, expected, reader,
+        )
 
     def snapshot(self) -> dict[str, Any]:
+        report: dict[str, Any]
         try:
             controller = _controller(self.reader(self.controller_socket, {"cmd": "status"}))
         except (DashboardError, KeyError, TypeError, ValueError):
@@ -228,6 +258,24 @@ class SnapshotReader:
                 "truncated": None,
                 "groups": {kind: [] for kind in GROUP_KINDS},
             }
+        workflow_available = True
+        try:
+            workflow = self.workflow.review()
+            if (
+                not isinstance(workflow.get("review_id"), str)
+                or not FINGERPRINT_RE.fullmatch(workflow["review_id"])
+                or not isinstance(workflow.get("incomplete"), bool)
+                or not isinstance(workflow.get("required_groups"), list)
+            ):
+                raise DashboardError("invalid workflow review")
+        except (DashboardError, KeyError, TypeError, ValueError):
+            workflow_available = False
+            workflow = {"review_id": None, "incomplete": True, "required_groups": []}
+        report.update({
+            "review_id": workflow["review_id"],
+            "incomplete": workflow["incomplete"],
+            "required_groups": workflow["required_groups"],
+        })
         return {
             "schema_version": SCHEMA_VERSION,
             "generated_at": self.clock().isoformat(),
@@ -236,6 +284,7 @@ class SnapshotReader:
             "components": [
                 {"name": "Controller status", "available": controller["available"]},
                 {"name": "Audit report", "available": report["available"]},
+                {"name": "Unlock review", "available": workflow_available},
             ],
             "report": report,
         }
@@ -270,6 +319,8 @@ def _group_html(group: dict[str, Any]) -> str:
         "operation": "Operation",
         "decision": "Decision",
         "lock_state": "Recorded lock state",
+        "reason": "Reason",
+        "unit": "Unit",
         "destination_ip": "Destination IP",
         "destination_port": "Destination port",
         "protocol": "Protocol",
@@ -350,15 +401,18 @@ a {{ color:inherit; }}
 <header><h1>Lockdown status</h1>
 <div class="banner"><strong>{ENFORCEMENT_LABEL}</strong>
 Controller state is not active general-agent containment. Network, DNS, broker, and turn
-enforcement remain dark until ACT-01. This dashboard is read-only.</div></header>
+enforcement remain dark until ACT-01. Dashboard displays are read-only; owner workflow
+controls require their own explicit actions and fresh unlock authorization.</div></header>
 <main><section><h2>Authoritative controller state</h2>
 <div class="state {state_class}">{_escape(state)}</div>
 <p><strong>Attendance expiry:</strong> {_expiry(controller)}</p>
 <p><strong>Boot ID:</strong> {_escape(controller['boot_id'] or 'Unavailable')}</p></section>
 <section><h2>Component health</h2><table><tbody>{components}</tbody></table></section>
 <section><h2>Audit findings</h2>{report_status}{''.join(sections)}</section>
+<section><h2>Owner workflow</h2><p>Acknowledge every listed novel or suspicious group before fresh unlock.</p>
+<p id="workflow-error" role="alert"></p><div id="lock-workflow"></div></section>
 <p><a href="/lock/">Refresh read-only snapshot</a> (automatic every 30 seconds).</p>
-</main></body></html>"""
+</main><script src="/lock/workflow.js"></script><script src="/lock/dashboard.js"></script></body></html>"""
 
 
 class DashboardServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
@@ -419,7 +473,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'")
+        self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Connection", "close")
@@ -437,8 +491,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._deny()
             return
         path = urlsplit(self.path)
-        if path.query or path.fragment or path.path not in {"/lock/", "/lock/api/status"}:
+        if path.query or path.fragment or path.path not in {"/lock/", "/lock/api/status", "/lock/dashboard.js"}:
             self._send(404, "text/plain; charset=utf-8", b"Not found\n", head)
+            return
+        if path.path == "/lock/dashboard.js":
+            self._send(200, "text/javascript; charset=utf-8", DASHBOARD_JS.encode("utf-8"), head)
             return
         snapshot = self.server.reader.snapshot()
         if path.path == "/lock/api/status":
@@ -471,6 +528,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--caddy-user", default=DEFAULT_CADDY_USER)
     parser.add_argument("--controller-socket", default=DEFAULT_CONTROLLER_SOCKET)
     parser.add_argument("--audit-socket", default=DEFAULT_AUDIT_SOCKET)
+    parser.add_argument("--expected-flows", default=DEFAULT_EXPECTED_FLOWS)
     parser.add_argument("--owner", default=DEFAULT_OWNER)
     parser.add_argument("--owner-group", default=DEFAULT_OWNER_GROUP)
     args = parser.parse_args(argv)
@@ -482,7 +540,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"unknown Caddy identity: {args.caddy_user}")
     server = DashboardServer(
         args.socket,
-        SnapshotReader(args.controller_socket, args.audit_socket),
+        SnapshotReader(
+            args.controller_socket, args.audit_socket, expected=load_json(args.expected_flows),
+        ),
         caddy.pw_uid,
         caddy.pw_gid,
         args.owner,

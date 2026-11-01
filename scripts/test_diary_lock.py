@@ -438,7 +438,7 @@ def test_real_socket_ui_peer_can_unlock_and_extend_without_owner_break_glass(tmp
     svc.startup()
     group = grp.getgrgid(os.getegid()).gr_name
     server = lock.LockDaemon(
-        str(tmp_path / "lock.sock"), svc, group, os.geteuid() + 1, os.geteuid(),
+        str(tmp_path / "lock.sock"), svc, group, os.geteuid() + 1, ui_uid=os.geteuid(),
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -457,6 +457,33 @@ def test_real_socket_ui_peer_can_unlock_and_extend_without_owner_break_glass(tmp
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_combined_controller_authorizes_dashboard_status_and_ui_transitions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    svc, _, _, _, _ = controller(tmp_path)
+    svc.startup()
+    group = grp.getgrgid(os.getegid()).gr_name
+    server = lock.LockDaemon(
+        str(tmp_path / "lock.sock"), svc, group, 1000, "diary-lock-dashboard", 1100,
+    )
+    monkeypatch.setattr(
+        lock.pwd,
+        "getpwuid",
+        lambda uid: SimpleNamespace(pw_name="diary-lock-dashboard" if uid == 1200 else "other"),
+    )
+    dashboard = peer(pid=1, uid=1200, gid=os.getegid())
+    ui = peer(pid=2, uid=1100, gid=os.getegid())
+    try:
+        assert server.authorized(dashboard) and server.read_only(dashboard)
+        assert server.authorized(ui) and not server.read_only(ui)
+        with pytest.raises(lock.RequestRejected):
+            svc.handle({"cmd": "unlock"}, dashboard, owner_uid=1000, ui_uid=1100)
+        assert svc.handle({"cmd": "unlock"}, ui, owner_uid=1000, ui_uid=1100)["state"] == "ATTENDED"
+    finally:
+        server.server_close()
 
 
 def test_unauthorized_partial_request_is_rejected_before_read_timeout(tmp_path: Path) -> None:

@@ -29,10 +29,10 @@ restart only those services in a controlled window and rerun the installer; it
 never kills unrelated services.
 The API additionally checks account identity on every connection, so retained
 client-group credentials cannot make `agent` or `diary-pipeline` trusted. The
-CTL-09 `diary-lock-dashboard` account may connect through the same group socket,
-but the daemon recognizes its kernel UID and permits only `baseline` and `review`;
-`write` and `ping` are rejected even though it is a group member. A
-fixed `ping` request emits a metadata-only `audit.heartbeat` with a unique
+CTL-09 `diary-lock-dashboard` and CTL-07 `diary-lock-ui` accounts may connect
+through the same group socket, but the daemon recognizes each kernel UID and
+permits only `baseline` and `review`; `write` and `ping` are rejected even though
+they are group members. A fixed `ping` request emits a metadata-only `audit.heartbeat` with a unique
 emission ID and requires journald read-back of that exact record. This checks
 the `JournalWriter`, journal socket, journald, and read path rather than merely
 answering from the daemon. Missing/unwritable sockets and accepted-but-unstored

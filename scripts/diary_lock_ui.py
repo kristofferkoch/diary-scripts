@@ -38,7 +38,7 @@ TRANSACTION_ID_RE = re.compile(r"[A-Za-z0-9_-]{32}\Z")
 ATTENTION_DECISIONS = frozenset({"deny", "would_deny", "error"})
 ROUTINE_DECISIONS = frozenset({"allow", "would_allow", "observed"})
 GROUP_FIELDS = (
-    "fingerprint", "event", "component", "operation", "decision", "lock_state",
+    "fingerprint", "event", "component", "operation", "decision", "lock_state", "reason", "unit",
     "destination_ip", "destination_port", "protocol", "dns_name", "caller_uid",
     "count", "records", "first_seen", "last_seen", "repeated",
 )
@@ -314,13 +314,18 @@ class Controller(Protocol):
 
 
 class ControllerClient:
-    def __init__(self, path: str = DEFAULT_CONTROLLER_SOCKET):
+    def __init__(
+        self,
+        path: str = DEFAULT_CONTROLLER_SOCKET,
+        reader: Callable[[str, dict[str, Any]], dict[str, Any]] = _unix_request,
+    ):
         self.path = path
+        self.reader = reader
 
     def call(self, command: str) -> dict[str, Any]:
         if command not in {"status", "lock", "unlock", "extend"}:
             raise OwnerUIError("unsupported controller command")
-        return _unix_request(self.path, {"cmd": command})
+        return self.reader(self.path, {"cmd": command})
 
 
 class ReportProvider(Protocol):
@@ -365,10 +370,12 @@ class AuditReportProvider:
     def __init__(
         self, controller: Controller, audit_socket: str = DEFAULT_AUDIT_SOCKET,
         expected: dict[str, Any] | None = None,
+        reader: Callable[[str, dict[str, Any]], dict[str, Any]] = _unix_request,
     ):
         self.controller = controller
         self.audit_socket = audit_socket
         self.expected = production_baseline.load_expected(expected)
+        self.reader = reader
 
     def review(self) -> dict[str, Any]:
         status = self.controller.call("status")
@@ -377,7 +384,7 @@ class AuditReportProvider:
             raise ServiceUnavailable("controller has no valid review window")
         since = dt.datetime.fromtimestamp(since_value, dt.UTC).isoformat()
         review, review_truncated = _report_groups(
-            _unix_request(self.audit_socket, {"cmd": "review", "since": since, "until": "now"}),
+            self.reader(self.audit_socket, {"cmd": "review", "since": since, "until": "now"}),
             "review",
         )
         findings = production_baseline.classify_groups(review, self.expected)

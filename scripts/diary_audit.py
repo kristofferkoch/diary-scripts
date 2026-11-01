@@ -851,11 +851,13 @@ class AuditDaemon(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         service: AuditService,
         group: str = DEFAULT_GROUP,
         dashboard_user: str | None = None,
+        ui_user: str | None = None,
     ) -> None:
         self.path = path
         self.service = service
         self.group = group
         self.dashboard_user = dashboard_user
+        self.ui_user = ui_user
         parent = Path(path).parent.stat()
         if parent.st_uid != os.geteuid() or parent.st_mode & 0o022:
             raise AuditError("audit socket directory must be private to the daemon")
@@ -873,13 +875,14 @@ class AuditDaemon(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         os.chmod(path, 0o660)
 
     def read_only(self, peer: dict[str, int]) -> bool:
-        if self.dashboard_user is None or peer["uid"] == 0:
+        readers = {self.dashboard_user, self.ui_user} - {None}
+        if not readers or peer["uid"] == 0:
             return False
         try:
             name = pwd.getpwuid(peer["uid"]).pw_name
         except KeyError:
             return False
-        return name == self.dashboard_user and name not in {"agent", "diary-pipeline"}
+        return name in readers and name not in {"agent", "diary-pipeline"}
 
     def authorized(self, peer: dict[str, int]) -> bool:
         if peer["uid"] == 0:
@@ -1009,13 +1012,14 @@ def daemon_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--state", default=DEFAULT_STATE)
     parser.add_argument("--group", default=DEFAULT_GROUP)
     parser.add_argument("--dashboard-user")
+    parser.add_argument("--ui-user")
     args = parser.parse_args(argv)
     if os.geteuid() != 0:
         parser.error("diary-auditd must run as root")
     server: AuditDaemon | None = None
     try:
         service = AuditService(DedupStore(args.state), JournalWriter(args.journal_socket))
-        server = AuditDaemon(args.listen, service, args.group, args.dashboard_user)
+        server = AuditDaemon(args.listen, service, args.group, args.dashboard_user, args.ui_user)
         sd_notify("READY=1")
     except (AuditError, KeyError, OSError) as exc:
         if server is not None:

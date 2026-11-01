@@ -36,6 +36,8 @@ def group(fingerprint: str, event: str, decision: str, count: int = 1) -> dict[s
         "operation": "connect" if event.startswith("network") else "request",
         "decision": decision,
         "lock_state": "locked",
+        "reason": "audit_only",
+        "unit": "test-agent.service",
         "count": count,
         "records": 1,
         "first_seen": "2026-01-01T00:00:00+00:00",
@@ -344,7 +346,7 @@ def test_audit_provider_requires_attention_groups_and_fails_on_truncation() -> N
         "groups": [group(FIRST_GROUP, "network.flow", "deny")],
     }
     with patch("scripts.diary_lock_ui._unix_request", return_value=review) as request_report:
-        result = ui.AuditReportProvider(controller, "/unused").review()
+        result = ui.AuditReportProvider(controller, "/unused", reader=request_report).review()
     assert [item["fingerprint"] for item in result["required_groups"]] == [FIRST_GROUP]
     assert result["required_groups"][0]["attention"] == "novel"
     assert "routine_groups" not in result
@@ -352,8 +354,8 @@ def test_audit_provider_requires_attention_groups_and_fails_on_truncation() -> N
     assert request_report.call_args.args[1]["cmd"] == "review"
 
     truncated = {**review, "truncated": True}
-    with patch("scripts.diary_lock_ui._unix_request", return_value=truncated):
-        result = ui.AuditReportProvider(controller, "/unused").review()
+    with patch("scripts.diary_lock_ui._unix_request", return_value=truncated) as request_report:
+        result = ui.AuditReportProvider(controller, "/unused", reader=request_report).review()
     assert result["incomplete"] is True
 
 
@@ -368,13 +370,16 @@ def test_owner_classified_routine_groups_do_not_block_but_novel_cannot_be_hidden
     expected_destination = {
         "schema_version": 1,
         "expected_destinations": [{
-            "match": {"event": "network.flow", "destination_ip": "192.0.2.1"},
+            "match": {
+                "event": "network.flow", "destination_ip": "192.0.2.1",
+                "reason": "audit_only", "unit": "test-agent.service",
+            },
             "reference": "owner-reviewed-destination",
         }],
         "routine_expected_failures": [],
     }
-    with patch("scripts.diary_lock_ui._unix_request", return_value=review):
-        result = ui.AuditReportProvider(controller, "/unused", expected_destination).review()
+    with patch("scripts.diary_lock_ui._unix_request", return_value=review) as request_report:
+        result = ui.AuditReportProvider(controller, "/unused", expected_destination, request_report).review()
     assert result["required_groups"] == []
 
     routine_rule_only = {
@@ -385,9 +390,11 @@ def test_owner_classified_routine_groups_do_not_block_but_novel_cannot_be_hidden
             "reference": "owner-reviewed-routine-rule",
         }],
     }
-    with patch("scripts.diary_lock_ui._unix_request", return_value=review):
-        result = ui.AuditReportProvider(controller, "/unused", routine_rule_only).review()
+    with patch("scripts.diary_lock_ui._unix_request", return_value=review) as request_report:
+        result = ui.AuditReportProvider(controller, "/unused", routine_rule_only, request_report).review()
     assert [item["fingerprint"] for item in result["required_groups"]] == [FIRST_GROUP]
+    assert result["required_groups"][0]["reason"] == "audit_only"
+    assert result["required_groups"][0]["unit"] == "test-agent.service"
 
 
 def test_workflow_asset_does_not_duplicate_dashboard_or_use_websockets(services: Services) -> None:

@@ -32,6 +32,7 @@ def controller_reply(state: str = "ATTENDED") -> dict[str, Any]:
         "state": state,
         "expires_at": 1_793_553_600.0 if attended else None,
         "remaining_seconds": 900 if attended else None,
+        "review_since": 1_793_500_000.0,
         "boot_id": "01234567-0123-0123-0123-012345678901",
     }
 
@@ -48,6 +49,8 @@ def finding(fingerprint: str, **changes: Any) -> dict[str, Any]:
         "operation": "connect",
         "decision": "would_deny",
         "lock_state": "locked",
+        "reason": "audit_only",
+        "unit": "test-agent.service",
         "destination_ip": "192.0.2.10",
         "destination_port": 443,
         "protocol": "tcp",
@@ -96,10 +99,18 @@ def clean_report() -> dict[str, Any]:
     return report
 
 
+def clean_review() -> dict[str, Any]:
+    report = clean_report()
+    report["report"] = "review"
+    report["groups"] = report["groups"][:3]
+    return report
+
+
 class FakeSources:
-    def __init__(self, controller: Any = None, report: Any = None) -> None:
+    def __init__(self, controller: Any = None, report: Any = None, review: Any = None) -> None:
         self.controller = controller_reply() if controller is None else controller
         self.report = clean_report() if report is None else report
+        self.review = clean_review() if review is None else review
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     def __call__(self, path: str, value: dict[str, Any]) -> dict[str, Any]:
@@ -109,9 +120,10 @@ class FakeSources:
                 raise self.controller
             return self.controller
         if path == AUDIT_SOCKET:
-            if isinstance(self.report, Exception):
-                raise self.report
-            return self.report
+            selected = self.review if value.get("cmd") == "review" else self.report
+            if isinstance(selected, Exception):
+                raise selected
+            return selected
         raise AssertionError(f"unexpected socket {path}")
 
 
@@ -127,10 +139,14 @@ def reader(sources: FakeSources) -> dashboard.SnapshotReader:
 def test_snapshot_uses_only_fixed_read_requests_and_groups_findings() -> None:
     sources = FakeSources()
     snapshot = reader(sources).snapshot()
-    assert sources.calls == [
+    assert sources.calls[:3] == [
         (CONTROLLER_SOCKET, {"cmd": "status"}),
         (AUDIT_SOCKET, {"cmd": "baseline", "since": "24h", "until": "now", "limit": 10_000}),
+        (CONTROLLER_SOCKET, {"cmd": "status"}),
     ]
+    assert sources.calls[3][0] == AUDIT_SOCKET
+    assert sources.calls[3][1]["cmd"] == "review"
+    assert sources.calls[3][1]["until"] == "now"
     assert snapshot["controller"]["state"] == "ATTENDED"
     assert snapshot["enforcement"] == {
         "mode": "dark",
@@ -138,6 +154,10 @@ def test_snapshot_uses_only_fixed_read_requests_and_groups_findings() -> None:
         "active": False,
     }
     assert [len(snapshot["report"]["groups"][kind]) for kind in dashboard.GROUP_KINDS] == [1, 1, 1, 1]
+    assert dashboard.FINGERPRINT_RE.fullmatch(snapshot["report"]["review_id"])
+    assert snapshot["report"]["incomplete"] is False
+    assert [group["fingerprint"] for group in snapshot["report"]["required_groups"]] == ["a" * 64, "b" * 64, "c" * 64]
+    assert all("classifications" in group for group in snapshot["report"]["required_groups"])
     assert all(component["available"] for component in snapshot["components"])
 
 
@@ -149,6 +169,8 @@ def test_actual_summarize_output_normalizes_journal_numeric_strings() -> None:
         "DIARY_AUDIT_OPERATION": "connect",
         "DIARY_AUDIT_DECISION": "would_deny",
         "DIARY_AUDIT_LOCK_STATE": "locked",
+        "DIARY_AUDIT_REASON": "audit_only",
+        "DIARY_AUDIT_UNIT": "test-agent.service",
         "DIARY_AUDIT_DESTINATION_IP": "192.0.2.10",
         "DIARY_AUDIT_DESTINATION_PORT": "443",
         "DIARY_AUDIT_PROTOCOL": "tcp",
@@ -169,6 +191,8 @@ def test_actual_summarize_output_normalizes_journal_numeric_strings() -> None:
     group = snapshot["report"]["groups"]["network"][0]
     assert group["destination_port"] == 443
     assert group["caller_uid"] == 1001
+    assert group["reason"] == "audit_only"
+    assert group["unit"] == "test-agent.service"
 
 
 @pytest.mark.parametrize("state", ["LOCKING", "LOCKED", "ATTENDED"])
@@ -394,14 +418,16 @@ class FakeAudit:
         pass
 
 
-def dashboard_peer_patch(module: Any, monkeypatch: pytest.MonkeyPatch) -> str:
+def dashboard_peer_patch(
+    module: Any, monkeypatch: pytest.MonkeyPatch, name: str = "diary-lock-dashboard",
+) -> str:
     current_uid = os.geteuid()
     current_name = pwd.getpwuid(current_uid).pw_name
     group_name = grp.getgrgid(os.getegid()).gr_name
     monkeypatch.setattr(
         module.pwd,
         "getpwuid",
-        lambda uid: SimpleNamespace(pw_name="diary-lock-dashboard" if uid == current_uid else current_name),
+        lambda uid: SimpleNamespace(pw_name=name if uid == current_uid else current_name),
     )
     return group_name
 
@@ -465,6 +491,37 @@ def test_audit_socket_dashboard_peer_cannot_write_or_heartbeat(
         for command in ("baseline", "review"):
             reply = audit.request(str(tmp_path / "audit.sock"), {"cmd": command})
             assert reply["report"] == command
+        for value in (
+            {"cmd": "ping"},
+            {"cmd": "write", "event": {"event": "audit.selftest"}},
+        ):
+            with pytest.raises(audit.AuditError, match="read-only"):
+                audit.request(str(tmp_path / "audit.sock"), value)
+        assert [call["cmd"] for call in service.calls] == ["baseline", "review"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_audit_socket_ui_peer_is_read_only_while_dashboard_access_is_preserved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = dashboard_peer_patch(audit, monkeypatch, "diary-lock-ui")
+    service = FakeReportService()
+    server = audit.AuditDaemon(
+        str(tmp_path / "audit.sock"),
+        cast(audit.AuditService, service),
+        group,
+        "diary-lock-dashboard",
+        "diary-lock-ui",
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        for command in ("baseline", "review"):
+            assert audit.request(str(tmp_path / "audit.sock"), {"cmd": command})["report"] == command
         for value in (
             {"cmd": "ping"},
             {"cmd": "write", "event": {"event": "audit.selftest"}},
