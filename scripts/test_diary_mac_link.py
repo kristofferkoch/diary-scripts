@@ -49,6 +49,7 @@ def evidence(config: mac.Config) -> str:
         "old_listener_absent": True,
         "default_route_unchanged": True,
         "other_routes_unchanged": True,
+        "dns_unchanged": True,
     })
 
 
@@ -161,19 +162,54 @@ def test_mac_evidence_is_exact_not_a_partial_attestation(tmp_path: Path) -> None
     del value["default_route_unchanged"]
     with pytest.raises(mac.MacLinkError):
         mac.validate_mac_evidence(json.dumps(value), config)
+    value = json.loads(evidence(config))
+    value["dns_unchanged"] = False
+    with pytest.raises(mac.MacLinkError):
+        mac.validate_mac_evidence(json.dumps(value), config)
 
 
-def test_route_verification_allows_only_the_new_interface_to_change() -> None:
-    before = {
+def route_snapshot() -> dict[str, list]:
+    return {
         "routes4": [{"dst": "default", "dev": "eth0"}, {"dst": "203.0.113.0/24", "dev": "eth1"}],
         "routes6": [], "rules4": [{"priority": 0}], "rules6": [],
     }
+
+
+def test_route_verification_permits_only_expected_connected_and_local_routes(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    before = route_snapshot()
     after = json.loads(json.dumps(before))
-    after["routes4"].append({"dst": "192.0.2.0/30", "dev": "enp9s0"})
-    mac.verify_routing(before, after, "enp9s0")
+    after["routes4"].extend([
+        {"dst": "192.0.2.0/30", "dev": "enp9s0", "scope": "link", "src": "192.0.2.1"},
+        {"type": "local", "dst": "192.0.2.1", "dev": "enp9s0", "scope": "host", "src": "192.0.2.1"},
+        {"type": "broadcast", "dst": "192.0.2.3", "dev": "enp9s0", "scope": "link", "src": "192.0.2.1"},
+    ])
+    mac.verify_routing(before, after, config)
     after["routes4"][1]["dev"] = "eth9"
     with pytest.raises(mac.MacLinkError, match="unrelated"):
-        mac.verify_routing(before, after, "enp9s0")
+        mac.verify_routing(before, after, config)
+
+
+@pytest.mark.parametrize(
+    ("family", "route"),
+    [
+        ("routes4", {"dst": "default", "dev": "enp9s0", "scope": "link"}),
+        ("routes4", {"dst": "192.0.2.0/30", "dev": "enp9s0", "scope": "link", "via": "192.0.2.2"}),
+        ("routes4", {"dst": "203.0.113.0/24", "dev": "enp9s0", "scope": "link"}),
+        ("routes4", {"type": "local", "dst": "192.0.2.2", "dev": "enp9s0", "scope": "host"}),
+        ("routes4", {"dst": "192.0.2.0/30", "dev": "enp9s0", "scope": "link", "src": "192.0.2.2"}),
+        ("routes6", {"dst": "2001:db8::/64", "dev": "enp9s0", "scope": "link"}),
+    ],
+)
+def test_route_verification_rejects_dedicated_default_gateway_ipv6_and_unrelated_routes(
+    tmp_path: Path, family: str, route: dict,
+) -> None:
+    config = make_config(tmp_path)
+    before = route_snapshot()
+    after = json.loads(json.dumps(before))
+    after[family].append(route)
+    with pytest.raises(mac.MacLinkError, match="dedicated interface|unexpected route"):
+        mac.verify_routing(before, after, config)
 
 
 class FakeSystem:
@@ -183,9 +219,20 @@ class FakeSystem:
         self.phase = "legacy"
         self.link_up = False
         self.commands: list[list[str]] = []
+        self.pipeline_active = True
+        self.pipeline_show_error = False
         self.fail_acceptance = False
+        self.acceptance_restarts = 0
         self.allow_denied_probe = False
+        self.probe_returncode = 28
+        self.missing_agent = False
+        self.broken_curl = False
         self.change_unrelated_route = False
+        self.preexisting_dedicated_route = False
+        self.fail_pipeline_stop = False
+        self.fail_link_stop = False
+        self.link_remains_up = False
+        self.profile_remains_active = False
         self.live_legacy = mac.render_legacy_nft(config, UID)
 
     def result(self, args: list[str], stdout: str = "", returncode: int = 0, check: bool = True):
@@ -195,8 +242,11 @@ class FakeSystem:
 
     def routes(self) -> dict[str, list]:
         routes4 = [{"dst": "default", "dev": "eth0", "protocol": "static"}]
-        if self.link_up:
-            routes4.append({"dst": "192.0.2.0/30", "dev": "enp9s0", "protocol": "kernel"})
+        if self.link_up or self.preexisting_dedicated_route:
+            routes4.append({
+                "dst": "192.0.2.0/30", "dev": "enp9s0", "protocol": "kernel",
+                "scope": "link", "src": "192.0.2.1",
+            })
         if self.change_unrelated_route and self.link_up:
             routes4.append({"dst": "203.0.113.0/24", "dev": "eth9", "protocol": "static"})
         return {"routes4": routes4, "routes6": [], "rules4": [{"priority": 0}], "rules6": []}
@@ -205,11 +255,10 @@ class FakeSystem:
         self.commands.append(args)
         check = kwargs.get("check", True)
         if args[:3] == ["/usr/bin/systemctl", "is-active", "--quiet"]:
-            unit = args[3]
-            active = unit in {"diary-locked.service", "diary-pipeline.service"}
+            active = args[3] == "diary-locked.service"
             return self.result(args, returncode=0 if active else 1, check=False)
         if args[:2] == ["/usr/bin/systemctl", "show"]:
-            prop = args[3]
+            unit, prop = args[2], args[3]
             if prop == "--property=FragmentPath":
                 path = self.layout.config.parent.parent / "diary-pipeline-acceptance.service"
                 return self.result(args, f"{path}\n")
@@ -217,14 +266,30 @@ class FakeSystem:
                 return self.result(args, "\n")
             if prop == "--property=Result":
                 return self.result(args, "success\n")
+            if prop == "--property=ActiveState" and unit == "diary-pipeline.service":
+                if self.pipeline_show_error:
+                    return self.result(args, returncode=1, check=check)
+                return self.result(args, "active\n" if self.pipeline_active else "inactive\n")
+            if prop == "--property=ActiveState" and unit == mac.LINK_UNIT:
+                return self.result(args, "active\n" if self.link_up else "inactive\n")
+            if prop == "--property=LoadState" and unit == mac.LINK_UNIT:
+                return self.result(args, "loaded\n" if self.layout.link_unit.exists() else "not-found\n")
         if args[:3] == ["/usr/bin/systemctl", "start", "--wait"]:
+            return self.result(args)
+        if args[:3] == ["/usr/bin/systemctl", "restart", "--wait"]:
+            self.acceptance_restarts += 1
             return self.result(args, returncode=1 if self.fail_acceptance else 0, check=check)
         if args[:3] == ["/usr/bin/systemctl", "start", mac.LINK_UNIT]:
             self.link_up = True
             return self.result(args)
+        if args[:3] == ["/usr/bin/systemctl", "stop", "diary-pipeline.service"]:
+            return self.result(args, returncode=1 if self.fail_pipeline_stop else 0, check=check)
         if args[:3] == ["/usr/bin/systemctl", "stop", mac.LINK_UNIT]:
-            self.link_up = False
-            return self.result(args, check=False)
+            if self.fail_link_stop:
+                return self.result(args, returncode=1, check=check)
+            if not self.link_remains_up:
+                self.link_up = False
+            return self.result(args, check=check)
         if args[:4] == ["/usr/bin/nft", "list", "table", "inet"]:
             table = args[4]
             if table == self.config.legacy_nft_table:
@@ -244,17 +309,31 @@ class FakeSystem:
                 self.phase = "legacy"
             return self.result(args)
         if args[:4] == ["/usr/bin/ip", "-json", "link", "show"]:
-            return self.result(args, json.dumps([{"ifname": "enp9s0"}]))
+            return self.result(args, json.dumps([{
+                "ifname": "enp9s0", "operstate": "UP" if self.link_up else "DOWN",
+            }]))
         if args[:4] == ["/usr/bin/ip", "-json", "addr", "show"]:
-            return self.result(args, json.dumps([{"ifname": "enp9s0", "addr_info": []}]))
+            addresses = [{"family": "inet", "scope": "global"}] if self.link_up else []
+            return self.result(args, json.dumps([{"ifname": "enp9s0", "addr_info": addresses}]))
         if args[0] == "/usr/bin/ip" and "route" in args:
             key = "routes6" if "-6" in args else "routes4"
             return self.result(args, json.dumps(self.routes()[key]))
         if args[0] == "/usr/bin/ip" and "rule" in args:
             key = "rules6" if "-6" in args else "rules4"
             return self.result(args, json.dumps(self.routes()[key]))
+        if args[0] == "/usr/bin/id":
+            if args[2] == "agent" and self.missing_agent:
+                return self.result(args, returncode=1, check=check)
+            return self.result(args, f"{UID if args[2] == self.config.pipeline_user else UID + 1}\n")
         if args[0] == "/usr/bin/runuser":
-            return self.result(args, returncode=0 if self.allow_denied_probe else 28, check=False)
+            if "--version" in args:
+                return self.result(args, "" if self.broken_curl else "curl 8.0.0\n",
+                                   returncode=127 if self.broken_curl else 0, check=check)
+            code = 0 if self.allow_denied_probe else self.probe_returncode
+            return self.result(args, returncode=code, check=False)
+        if args[:3] == ["/usr/bin/nmcli", "-t", "-f"]:
+            active = self.link_up or self.profile_remains_active
+            return self.result(args, f"{mac.PROFILE_NAME}\n" if active else "")
         if args[0] in {"/usr/bin/systemctl", "/usr/bin/nmcli", "/usr/bin/systemd-analyze"}:
             return self.result(args, check=check)
         raise AssertionError(f"unexpected system command: {args}")
@@ -290,7 +369,7 @@ def test_isolated_full_lifecycle_preserves_old_until_final_and_restores_it(tmp_p
     assert system.phase == "final"
     assert migration._state()["phase"] == "final"
     migration.verify()
-    assert sum(command[:3] == ["/usr/bin/systemctl", "start", "--wait"] for command in system.commands) == 5
+    assert system.acceptance_restarts == 5
     migration.rollback()
     assert system.phase == "legacy"
     assert not system.link_up
@@ -357,6 +436,88 @@ def test_preflight_requires_act01_and_rejects_bridge_enslaved_interface(
     monkeypatch.setattr(FakeSystem, "__call__", enslaved)
     with pytest.raises(mac.MacLinkError, match="enslaved"):
         migration.preflight()
+
+
+def test_verification_restarts_active_oneshot_instead_of_reusing_stale_success(tmp_path: Path) -> None:
+    migration, system, _layout = isolated_migration(tmp_path)
+    migration.install()
+    previous = system.acceptance_restarts
+    system.fail_acceptance = True
+    with pytest.raises(mac.MacLinkError, match="system command failed safely"):
+        migration.verify()
+    assert system.acceptance_restarts == previous + 1
+
+
+@pytest.mark.parametrize("failure", ["inactive", "systemctl_error"])
+def test_preflight_requires_active_integrated_pipeline_and_distinguishes_errors(
+    tmp_path: Path, failure: str,
+) -> None:
+    migration, system, _layout = isolated_migration(tmp_path)
+    if failure == "inactive":
+        system.pipeline_active = False
+        with pytest.raises(mac.MacLinkError, match="must initially be active, not inactive"):
+            migration.preflight()
+    else:
+        system.pipeline_show_error = True
+        with pytest.raises(mac.MacLinkError, match="system command failed safely"):
+            migration.preflight()
+
+
+@pytest.mark.parametrize("failure", ["missing_agent", "broken_curl"])
+def test_preflight_validates_both_probe_identities_and_per_user_curl(
+    tmp_path: Path, failure: str,
+) -> None:
+    migration, system, _layout = isolated_migration(tmp_path)
+    setattr(system, failure, True)
+    with pytest.raises(mac.MacLinkError, match="system command failed safely"):
+        migration.preflight()
+
+
+def test_unexpected_probe_exit_is_operational_error_not_denial(tmp_path: Path) -> None:
+    migration, system, _layout = isolated_migration(tmp_path)
+    migration.install()
+    system.probe_returncode = 1
+    with pytest.raises(mac.MacLinkError, match="operational error: curl exit 1"):
+        migration.finalize()
+    probe = next(command for command in system.commands if "--connect-timeout" in command)
+    assert probe[probe.index("/usr/bin/curl") + 1] == "-q"
+    assert system.phase == "legacy"
+
+
+def test_preflight_rejects_preexisting_routes_on_dedicated_interface(tmp_path: Path) -> None:
+    migration, system, _layout = isolated_migration(tmp_path)
+    system.preexisting_dedicated_route = True
+    with pytest.raises(mac.MacLinkError, match="still has routes"):
+        migration.preflight()
+
+
+def test_rollback_requires_pipeline_stop_before_changing_policy_or_state(tmp_path: Path) -> None:
+    migration, system, layout = isolated_migration(tmp_path)
+    migration.install()
+    system.fail_pipeline_stop = True
+    with pytest.raises(mac.MacLinkError, match="system command failed safely"):
+        migration.rollback()
+    assert system.phase == "staged"
+    assert layout.state.exists()
+    assert layout.pipeline_dropin.exists()
+    system.fail_pipeline_stop = False
+    migration.rollback()
+    assert not layout.state.exists()
+
+
+@pytest.mark.parametrize("failure", ["fail_link_stop", "link_remains_up", "profile_remains_active"])
+def test_rollback_requires_verified_link_and_profile_shutdown_before_cleanup(
+    tmp_path: Path, failure: str,
+) -> None:
+    migration, system, layout = isolated_migration(tmp_path)
+    migration.install()
+    setattr(system, failure, True)
+    with pytest.raises(mac.MacLinkError):
+        migration.rollback()
+    assert system.phase == "legacy"
+    assert layout.state.exists()
+    assert layout.pipeline_dropin.exists()
+    assert layout.nm_profile.exists()
 
 
 def test_cli_offline_check_and_render_do_not_call_system_commands(tmp_path: Path) -> None:

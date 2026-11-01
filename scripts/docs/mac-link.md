@@ -37,26 +37,40 @@ address are not added.
 The live commands use only fixed `/etc/diary` inputs, with no environment or
 ordinary-config override:
 
-- `preflight`: read-only ACT-01/locked-state, root-file, exact legacy-policy,
-  acceptance-unit, Mac-evidence, interface, and route-collision checks.
+- `preflight`: read-only ACT-01/locked-state, active integrated pipeline,
+  root-file, exact legacy-policy, acceptance-unit, Mac-evidence, probe
+  identity/tooling, interface, and route-collision checks.
 - `install`: stage both contained endpoints and run the acceptance unit. It does
   not remove the old allowance.
 - `verify`: check the recorded phase, exact live table, acceptance, Mac evidence,
-  and unrelated routing; final phase also runs forbidden-connect probes.
+  and routing; final phase also runs forbidden-connect probes.
 - `finalize`: independently requested removal of the old allowance, bracketed by
   acceptance runs and followed by pipeline/general-agent denial probes.
-- `rollback`: restore the exact contained legacy policy and previous files.
+- `rollback`: restore the exact contained legacy policy and previous files only
+  after successful stops and verified link/profile/address/route shutdown.
 
 Live commands require root and reject symlinked, non-root-owned, or
 group/other-writable security inputs. System commands use fixed argv and no
 shell. The acceptance unit is owner-supplied but its fragment and drop-ins must
-be root-owned. Nftables replacement is atomic and checked against the expected
+be root-owned. Every acceptance run uses `restart --wait`, including an already
+active oneshot. Nftables replacement is atomic and checked against the expected
 live table afterward. The tool never runs SSH or changes the Mac.
 
+Route comparison permits only the exact connected/local addresses on the
+dedicated interface (plus expected `/30` broadcast-local routes). Default,
+gateway, IPv6, unexpected-source, and unrelated routes are rejected even on that
+device. Mac evidence requires unchanged DNS as well as routing and listeners.
+Denial probes validate both identities and curl under each identity, disable
+per-user curl config with `-q`, and accept only exit 7 (connection refusal) or
+28 (timeout); missing tools, identity errors, and other exits are operational
+failures, not proof of denial.
+
 Failure during staging/finalization invokes rollback. Rollback restores only the
-reviewed fixed-IP deny-all legacy policy, never a broad permit. A failed Mac
-path can therefore reduce availability without weakening containment; remote
-Mac rollback remains a separate owner action.
+reviewed fixed-IP deny-all legacy policy, never a broad permit. Stop or
+link-down verification failure retains artifacts/state for recovery and never
+deletes state while the link may remain active. A failed Mac path can therefore
+reduce availability without weakening containment; remote Mac rollback remains
+a separate owner action.
 
 ## Isolated validation
 
@@ -66,7 +80,9 @@ uv run pytest scripts/test_diary_mac_link.py -q
 
 The tests use documentation addresses, a temporary filesystem, and a fake
 system-command runner. They cover config rejection, listener/interface binding,
-no default/DNS route changes, staged versus final policy, atomic rollback,
-exact Mac evidence, route drift, ACT-01 and bridge-interface gates, failed
-acceptance, forbidden-probe success, full lifecycle verification, and previous
-file restoration. They neither require nor change host networking.
+staged versus final policy, atomic rollback, exact Mac DNS/routing evidence,
+dedicated-route violations, ACT-01 and bridge-interface gates, active-oneshot
+restart, inactive/erroring pipeline detection, identity/tool failures,
+operational versus denied probes, stop/link-down rollback failures, full
+lifecycle verification, and previous file restoration. They neither require nor
+change host networking.

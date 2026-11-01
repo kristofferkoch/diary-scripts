@@ -357,9 +357,53 @@ def _without_dedicated_routes(snapshot: dict[str, Any], interface: str) -> dict[
     }
 
 
-def verify_routing(before: dict[str, Any], after: dict[str, Any], interface: str) -> None:
-    if _canonical(_without_dedicated_routes(before, interface)) != _canonical(_without_dedicated_routes(after, interface)):
+def require_no_dedicated_routes(snapshot: dict[str, Any], interface: str) -> None:
+    if any(
+        isinstance(route, dict) and route.get("dev") == interface
+        for family in ("routes4", "routes6") for route in snapshot[family]
+    ):
+        raise MacLinkError("dedicated interface still has routes")
+
+
+def _validate_dedicated_routes(snapshot: dict[str, Any], config: Config) -> None:
+    if any(
+        isinstance(route, dict) and route.get("dev") == config.interface
+        for route in snapshot["routes6"]
+    ):
+        raise MacLinkError("dedicated interface has an IPv6 route")
+    network = config.host_address.network
+    for route in snapshot["routes4"]:
+        if not isinstance(route, dict) or route.get("dev") != config.interface:
+            continue
+        destination = route.get("dst", "default")
+        kind = route.get("type", "unicast")
+        source = route.get("src", str(config.host_address.ip))
+        connected = (
+            kind == "unicast" and destination == str(network)
+            and route.get("scope") == "link"
+        )
+        local = (
+            kind == "local" and destination == str(config.host_address.ip)
+            and route.get("scope") == "host"
+        )
+        broadcast = (
+            kind == "broadcast" and network.prefixlen == 30
+            and destination in {str(network.network_address), str(network.broadcast_address)}
+            and route.get("scope") == "link"
+        )
+        if (
+            route.get("via") or route.get("gateway") or source != str(config.host_address.ip)
+            or not (connected or local or broadcast)
+        ):
+            raise MacLinkError(f"unexpected route on dedicated interface: {route}")
+
+
+def verify_routing(before: dict[str, Any], after: dict[str, Any], config: Config) -> None:
+    if _canonical(_without_dedicated_routes(before, config.interface)) != _canonical(
+        _without_dedicated_routes(after, config.interface)
+    ):
         raise MacLinkError("an unrelated host route or policy rule changed")
+    _validate_dedicated_routes(after, config)
 
 
 def validate_mac_evidence(raw: str, config: Config) -> None:
@@ -377,6 +421,7 @@ def validate_mac_evidence(raw: str, config: Config) -> None:
         "old_listener_absent": True,
         "default_route_unchanged": True,
         "other_routes_unchanged": True,
+        "dns_unchanged": True,
     }
     if evidence != expected:
         raise MacLinkError(f"Mac evidence must exactly attest {expected}")
@@ -464,6 +509,7 @@ class Migration:
         ):
             raise MacLinkError("dedicated interface already has a global address; refusing to reconfigure it")
         before = _routing_snapshot(self.run)
+        require_no_dedicated_routes(before, self.config.interface)
         for route in before["routes4"]:
             if not isinstance(route, dict) or route.get("dst", "default") == "default":
                 continue
@@ -471,14 +517,39 @@ class Migration:
                 network = ipaddress.IPv4Network(route["dst"], strict=False)
             except (KeyError, ValueError) as exc:
                 raise MacLinkError(f"unparseable existing IPv4 route: {route}") from exc
-            if network.overlaps(self.config.host_address.network) and route.get("dev") != self.config.interface:
+            if network.overlaps(self.config.host_address.network):
                 raise MacLinkError("dedicated subnet collides with an existing route on another interface")
         return before
+
+    def _pipeline_active(self) -> None:
+        state = self._call(
+            "/usr/bin/systemctl", "show", "diary-pipeline.service",
+            "--property=ActiveState", "--value",
+        ).stdout.strip()
+        if state != "active":
+            raise MacLinkError(f"integrated pipeline must initially be active, not {state or 'unknown'}")
+
+    def _probe_prerequisites(self) -> None:
+        for user in (self.config.pipeline_user, self.config.agent_user):
+            raw_uid = self._call("/usr/bin/id", "-u", user).stdout.strip()
+            try:
+                uid = int(raw_uid)
+            except ValueError as exc:
+                raise MacLinkError(f"probe identity returned an invalid UID for {user}") from exc
+            if user == self.config.pipeline_user and uid != self.uid:
+                raise MacLinkError("pipeline UID changed after configuration")
+            version = self._call(
+                "/usr/bin/runuser", "-u", user, "--", "/usr/bin/curl", "-q", "--version",
+            ).stdout
+            if not version.startswith("curl "):
+                raise MacLinkError(f"curl is not operational for probe identity {user}")
 
     def preflight(self) -> dict[str, Any]:
         self._require_root()
         _safe_file(self.layout.config, isolated=self.isolated)
         self._act01()
+        self._pipeline_active()
+        self._probe_prerequisites()
         legacy = self._legacy()
         validate_mac_evidence(_safe_file(self.layout.mac_evidence, isolated=self.isolated), self.config)
         self._acceptance_unit()
@@ -489,7 +560,7 @@ class Migration:
 
     def _acceptance(self) -> None:
         self._acceptance_unit()
-        self._call("/usr/bin/systemctl", "start", "--wait", self.config.acceptance_unit)
+        self._call("/usr/bin/systemctl", "restart", "--wait", self.config.acceptance_unit)
         result = self._call(
             "/usr/bin/systemctl", "show", self.config.acceptance_unit, "--property=Result", "--value",
         ).stdout.strip()
@@ -547,9 +618,6 @@ class Migration:
         if self.layout.state.exists():
             raise MacLinkError("a migration is already staged; finalize or roll it back")
         before = self.preflight()
-        active = self._call(
-            "/usr/bin/systemctl", "is-active", "--quiet", "diary-pipeline.service", check=False,
-        ).returncode == 0
         artifacts = self._artifacts()
         backups = {}
         for path in artifacts:
@@ -558,7 +626,7 @@ class Migration:
                 "mode": stat.S_IMODE(path.stat().st_mode),
             }
         self._save_state({"schema_version": 1, "phase": "installing", "before": before,
-                          "pipeline_was_active": active, "backups": backups})
+                          "pipeline_was_active": True, "backups": backups})
         try:
             for path, (content, mode) in artifacts.items():
                 self._write(path, content, mode)
@@ -567,11 +635,11 @@ class Migration:
             self._call("/usr/bin/systemd-analyze", "verify", "diary-pipeline.service")
             self._call("/usr/bin/nmcli", "connection", "reload")
             self._call("/usr/bin/systemctl", "start", LINK_UNIT)
-            verify_routing(before, _routing_snapshot(self.run), self.config.interface)
+            verify_routing(before, _routing_snapshot(self.run), self.config)
             self._apply_nft("staged")
             self._call("/usr/bin/systemctl", "restart", "diary-pipeline.service")
             self._acceptance()
-            verify_routing(before, _routing_snapshot(self.run), self.config.interface)
+            verify_routing(before, _routing_snapshot(self.run), self.config)
             state = self._state()
             state["phase"] = "staged"
             self._save_state(state)
@@ -582,14 +650,19 @@ class Migration:
     def _expect_denied(self, user: str, address: ipaddress.IPv4Address) -> None:
         url = f"http://{address}:{self.config.model_port}/"
         result = self._call(
-            "/usr/bin/runuser", "-u", user, "--", "/usr/bin/curl", "--noproxy", "*",
-            "--connect-timeout", "2", "--max-time", "3", "--silent", "--output", "/dev/null", url,
-            check=False,
+            "/usr/bin/runuser", "-u", user, "--", "/usr/bin/curl", "-q", "--noproxy", "*",
+            "--connect-timeout", "2", "--max-time", "3", "--silent", "--show-error",
+            "--output", "/dev/null", url, check=False,
         )
         if result.returncode == 0:
             raise MacLinkError(f"containment probe unexpectedly reached {url} as {user}")
+        if result.returncode not in {7, 28}:
+            raise MacLinkError(
+                f"containment probe for {user} had an operational error: curl exit {result.returncode}"
+            )
 
     def _verify_final_probes(self) -> None:
+        self._probe_prerequisites()
         self._expect_denied(self.config.pipeline_user, self.config.legacy_model_address)
         self._expect_denied(self.config.agent_user, self.config.legacy_model_address)
         self._expect_denied(self.config.agent_user, self.config.model_address)
@@ -600,6 +673,7 @@ class Migration:
         if state.get("phase") != "staged":
             raise MacLinkError("only a verified staged migration can be finalized")
         self._act01()
+        self._pipeline_active()
         validate_mac_evidence(_safe_file(self.layout.mac_evidence, isolated=self.isolated), self.config)
         for path, (content, _mode) in self._artifacts().items():
             if _safe_file(path, isolated=self.isolated) != content:
@@ -609,7 +683,7 @@ class Migration:
             self._apply_nft("final")
             self._acceptance()
             self._verify_final_probes()
-            verify_routing(state["before"], _routing_snapshot(self.run), self.config.interface)
+            verify_routing(state["before"], _routing_snapshot(self.run), self.config)
             state["phase"] = "final"
             self._save_state(state)
         except BaseException:
@@ -622,6 +696,7 @@ class Migration:
         if state.get("phase") not in {"staged", "final"}:
             raise MacLinkError("no staged or final migration is installed")
         self._act01()
+        self._pipeline_active()
         validate_mac_evidence(_safe_file(self.layout.mac_evidence, isolated=self.isolated), self.config)
         table = self._call("/usr/bin/nft", "list", "table", "inet", NEW_TABLE).stdout
         if _normalize_nft(table) != _normalize_nft(render_nft(self.config, self.uid, state["phase"])):
@@ -629,14 +704,52 @@ class Migration:
         self._acceptance()
         if state["phase"] == "final":
             self._verify_final_probes()
-        verify_routing(state["before"], _routing_snapshot(self.run), self.config.interface)
+        verify_routing(state["before"], _routing_snapshot(self.run), self.config)
+
+    def _stop_link(self) -> None:
+        load_state = self._call(
+            "/usr/bin/systemctl", "show", LINK_UNIT, "--property=LoadState", "--value",
+        ).stdout.strip()
+        if load_state == "not-found":
+            return
+        if load_state != "loaded":
+            raise MacLinkError(f"cannot confirm dedicated link unit state: {load_state or 'unknown'}")
+        self._call("/usr/bin/systemctl", "stop", LINK_UNIT)
+
+    def _verify_link_down(self, before: dict[str, Any]) -> None:
+        active_state = self._call(
+            "/usr/bin/systemctl", "show", LINK_UNIT, "--property=ActiveState", "--value",
+        ).stdout.strip()
+        if active_state != "inactive":
+            raise MacLinkError(f"dedicated link unit is still {active_state or 'unknown'}")
+        active_profiles = self._call(
+            "/usr/bin/nmcli", "-t", "-f", "NAME", "connection", "show", "--active",
+        ).stdout.splitlines()
+        if PROFILE_NAME in active_profiles:
+            raise MacLinkError("dedicated NetworkManager profile is still active")
+        link = json.loads(self._call(
+            "/usr/bin/ip", "-json", "link", "show", "dev", self.config.interface,
+        ).stdout)
+        if len(link) != 1 or link[0].get("operstate") != "DOWN":
+            raise MacLinkError("dedicated interface is not down")
+        addresses = json.loads(self._call(
+            "/usr/bin/ip", "-json", "addr", "show", "dev", self.config.interface,
+        ).stdout)
+        if len(addresses) != 1 or any(
+            item.get("scope") == "global" for item in addresses[0].get("addr_info", [])
+        ):
+            raise MacLinkError("dedicated interface still has a global address")
+        after = _routing_snapshot(self.run)
+        require_no_dedicated_routes(after, self.config.interface)
+        verify_routing(before, after, self.config)
 
     def rollback(self) -> None:
         self._require_root()
         state = self._state()
-        self._call("/usr/bin/systemctl", "stop", "diary-pipeline.service", check=False)
+        self._call("/usr/bin/systemctl", "stop", "diary-pipeline.service")
         self._apply_nft("rollback")
-        self._call("/usr/bin/systemctl", "stop", LINK_UNIT, check=False)
+        self._stop_link()
+        self._verify_link_down(state["before"])
         for path_text, backup in state["backups"].items():
             path = Path(path_text)
             if backup is None:
@@ -650,7 +763,6 @@ class Migration:
         self._call("/usr/bin/nmcli", "connection", "reload")
         if state.get("pipeline_was_active"):
             self._call("/usr/bin/systemctl", "start", "diary-pipeline.service")
-        verify_routing(state["before"], _routing_snapshot(self.run), self.config.interface)
         live = self._call("/usr/bin/nft", "list", "table", "inet", self.config.legacy_nft_table).stdout
         if _normalize_nft(live) != _normalize_nft(render_legacy_nft(self.config, self.uid)):
             raise MacLinkError("rollback did not restore the exact contained legacy policy")
