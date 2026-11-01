@@ -36,11 +36,12 @@ events may also contain one approved question name as described in
 and packet sources are never sent to the audit writer. Unsupported fragments or
 truncated extension headers are skipped rather than inventing flow metadata.
 
-The reader calls the existing root-owned `diary-auditd` Unix socket. It writes
-`network.flow` events with decision `would_deny`, reason `audit_only`, and
-lock state `not_applicable`: this is a simulated locked-policy baseline, not a
-claim that the future controller is locked or attended. `connect` identifies a
-new flow and `flow` an established-flow sample. Caller PID is zero because
+The reader calls the existing root-owned `diary-auditd` Unix socket. Audit and
+dark prefixes produce `would_deny` / `not_applicable` / `audit_only`; locked
+prefixes produce real `deny` / `locked` / `non_loopback` decisions, and attended
+new flows produce `allow` / `attended` / `attended_destination`. CTL-04's
+loopback resolver drops use `deny` / `locked` / `loopback_dns`. `connect`
+identifies a new flow and `flow` an established-flow sample. Caller PID is zero because
 NFLOG has no stable process identity. Caller UID/GID comes from kernel socket
 credentials when available or the root-configured nftables-selected identity
 otherwise; the audit daemon resolves that UID to `agent`. The writer itself remains

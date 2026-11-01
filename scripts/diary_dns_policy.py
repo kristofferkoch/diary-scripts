@@ -13,6 +13,7 @@ import socketserver
 import stat
 import struct
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -20,6 +21,7 @@ from typing import Any, Protocol, cast
 DEFAULT_SOCKET = "/run/diary-dns-policy/socket"
 DEFAULT_LOCK_SOCKET = "/run/diary-lock/socket"
 DEFAULT_AUDIT_SOCKET = "/run/diary-audit/socket"
+ARM_FILE = "/etc/diary/network-policy-enabled"
 MAX_REQUEST_BYTES = 2048
 MAX_RESPONSE_BYTES = 4096
 REFUSED = 5
@@ -76,6 +78,22 @@ def dns_name(value: object) -> str:
     return normalized
 
 
+def enforcement_armed(path: str = ARM_FILE) -> bool:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise DNSPolicyError("enforcement arm file is unreadable") from exc
+    try:
+        info = os.fstat(fd)
+    finally:
+        os.close(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+        raise DNSPolicyError("enforcement arm file has unsafe type, ownership, or mode")
+    return True
+
+
 def request(socket_path: str, value: dict[str, Any], timeout: float = 2.0) -> dict[str, Any]:
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
@@ -130,16 +148,24 @@ class AuditClient:
 
 
 class DNSPolicyService:
-    def __init__(self, lock_state: LockState, audit: AuditSink, agent_uid: int, agent_gid: int) -> None:
+    def __init__(
+        self,
+        lock_state: LockState,
+        audit: AuditSink,
+        agent_uid: int,
+        agent_gid: int,
+        armed: Callable[[], bool] | None = None,
+    ) -> None:
         if any(isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 2_147_483_647 for value in (agent_uid, agent_gid)):
             raise DNSPolicyError("invalid fixed agent identity")
         self.lock_state = lock_state
         self.audit = audit
         self.agent_uid = agent_uid
         self.agent_gid = agent_gid
+        self.armed = armed or (lambda: enforcement_armed(ARM_FILE))
 
     def _reply(self, decision: str, state: str, reason: str) -> PolicyReply:
-        allow = decision == "allow"
+        allow = decision in {"allow", "would_allow"}
         return PolicyReply(allow, decision, state.lower(), reason, NOERROR if allow else REFUSED)
 
     def _record(self, name: str, protocol: str, reply: PolicyReply) -> None:
@@ -163,6 +189,24 @@ class DNSPolicyService:
         protocol = value["protocol"]
         if not isinstance(protocol, str) or protocol not in PROTOCOLS:
             raise DNSPolicyError("protocol must be udp or tcp")
+        try:
+            armed = self.armed()
+            if not isinstance(armed, bool):
+                raise DNSPolicyError("enforcement arm state is invalid")
+        except (DNSPolicyError, OSError):
+            reply = self._reply("error", "unknown", "arm_unavailable")
+            try:
+                self._record(name, protocol, reply)
+            except (DNSPolicyError, OSError):
+                pass
+            return reply
+        if not armed:
+            reply = self._reply("would_allow", "not_applicable", "audit_only")
+            try:
+                self._record(name, protocol, reply)
+            except (DNSPolicyError, OSError):
+                pass
+            return reply
         try:
             state = self.lock_state.state()
             if state not in STATES:
@@ -196,24 +240,38 @@ def _validate_reply(value: object) -> PolicyReply:
     if isinstance(value["rcode"], bool) or not isinstance(value["rcode"], int):
         raise DNSPolicyError("policy response has an invalid rcode")
     reply = PolicyReply(value["allow"], value["decision"], value["lock_state"], value["reason"], value["rcode"])
-    if reply.allow:
-        if (reply.decision, reply.lock_state, reply.reason, reply.rcode) != ("allow", "attended", "attended", NOERROR):
-            raise DNSPolicyError("policy response has inconsistent allow fields")
-    elif reply.rcode != REFUSED or reply.decision not in {"deny", "error"}:
-        raise DNSPolicyError("policy response has inconsistent refusal fields")
+    valid = {
+        (True, "allow", "attended", "attended", NOERROR),
+        (True, "would_allow", "not_applicable", "audit_only", NOERROR),
+        (False, "deny", "locking", "locking", REFUSED),
+        (False, "deny", "locked", "locked", REFUSED),
+        (False, "error", "unknown", "arm_unavailable", REFUSED),
+        (False, "error", "unknown", "lock_unavailable", REFUSED),
+        (False, "error", "unknown", "policy_unavailable", REFUSED),
+        (False, "error", "locking", "audit_unavailable", REFUSED),
+        (False, "error", "locked", "audit_unavailable", REFUSED),
+        (False, "error", "attended", "audit_unavailable", REFUSED),
+    }
+    if (reply.allow, reply.decision, reply.lock_state, reply.reason, reply.rcode) not in valid:
+        raise DNSPolicyError("policy response violates the decision contract")
     return reply
 
 
 class PolicyClient:
-    def __init__(self, socket_path: str = DEFAULT_SOCKET) -> None:
+    def __init__(self, socket_path: str = DEFAULT_SOCKET, timeout: float = 2.0) -> None:
+        if timeout <= 0:
+            raise ValueError("policy timeout must be positive")
         self.socket_path = socket_path
+        self.timeout = timeout
 
     def authorize(self, name: str, protocol: str) -> PolicyReply:
         try:
             name = dns_name(name)
             if protocol not in PROTOCOLS:
                 raise DNSPolicyError("protocol must be udp or tcp")
-            reply = request(self.socket_path, {"dns_name": name, "protocol": protocol})
+            reply = request(
+                self.socket_path, {"dns_name": name, "protocol": protocol}, timeout=self.timeout,
+            )
             return _validate_reply(reply)
         except (DNSPolicyError, OSError):
             return REFUSE_UNAVAILABLE
@@ -298,19 +356,26 @@ def daemon_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--listen", default=DEFAULT_SOCKET)
     parser.add_argument("--lock-socket", default=DEFAULT_LOCK_SOCKET)
     parser.add_argument("--audit-socket", default=DEFAULT_AUDIT_SOCKET)
-    parser.add_argument("--proxy-user", default="diary-dns-proxy")
+    parser.add_argument("--proxy-user", default="root")
+    parser.add_argument("--proxy-group", default="diary-dns-proxy")
     parser.add_argument("--agent-user", default="agent")
+    parser.add_argument("--arm-file", default=ARM_FILE)
     args = parser.parse_args(argv)
     if os.geteuid() != 0:
         parser.error("diary-dns-policyd must run as root")
     server: PolicyDaemon | None = None
     try:
         proxy = pwd.getpwnam(args.proxy_user)
+        proxy_group = grp.getgrnam(args.proxy_group)
         agent = pwd.getpwnam(args.agent_user)
         service = DNSPolicyService(
-            ControllerState(args.lock_socket), AuditClient(args.audit_socket), agent.pw_uid, agent.pw_gid,
+            ControllerState(args.lock_socket),
+            AuditClient(args.audit_socket),
+            agent.pw_uid,
+            agent.pw_gid,
+            armed=lambda: enforcement_armed(args.arm_file),
         )
-        server = PolicyDaemon(args.listen, service, proxy.pw_uid, proxy.pw_gid)
+        server = PolicyDaemon(args.listen, service, proxy.pw_uid, proxy_group.gr_gid)
         sd_notify_ready()
         server.serve_forever()
     except KeyboardInterrupt:

@@ -175,12 +175,24 @@ def test_policy_prefixes_produce_real_mode_decisions(
     prefix: bytes, operation: str, decision: str, state: str, reason: str,
 ) -> None:
     event = network.events_from_datagram(packet_message(ipv4(), prefix=prefix), GROUP, UID, GID)[0]
-    assert event["operation"] == operation
-    assert event["decision"] == decision
-    assert event["lock_state"] == state
-    assert event["reason"] == reason
+    assert (event["operation"], event["decision"], event["lock_state"], event["reason"]) == (
+        operation, decision, state, reason,
+    )
     normalized, redacted = audit.normalize_event(event)
     assert normalized == event and redacted == []
+
+
+def test_loopback_dns_drop_has_real_locked_decision_and_accurate_reason() -> None:
+    packet = bytearray(ipv4(network.UDP, 53))
+    packet[16:20] = socket.inet_aton("127.0.0.1")
+    event = network.events_from_datagram(
+        packet_message(bytes(packet), prefix=b"diary-locked-new\0"), GROUP, UID, GID,
+    )[0]
+    assert (event["decision"], event["lock_state"], event["reason"]) == (
+        "deny", "locked", "loopback_dns",
+    )
+    assert event["destination_ip"] == "127.0.0.1"
+
 
 
 def test_one_datagram_can_contain_multiple_packet_messages() -> None:

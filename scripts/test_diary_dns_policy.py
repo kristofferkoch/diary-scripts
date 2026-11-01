@@ -45,7 +45,7 @@ class FakeAudit:
 def service(state: str = "LOCKED") -> tuple[policy.DNSPolicyService, FakeLock, FakeAudit]:
     lock = FakeLock(state)
     events = FakeAudit()
-    return policy.DNSPolicyService(lock, events, 1001, 1002), lock, events
+    return policy.DNSPolicyService(lock, events, 1001, 1002, armed=lambda: True), lock, events
 
 
 @pytest.mark.parametrize("state", ["LOCKING", "LOCKED"])
@@ -77,6 +77,54 @@ def test_attended_query_is_the_only_allowance() -> None:
     assert reply.allow is True and reply.rcode == policy.NOERROR
     assert reply.decision == "allow" and reply.lock_state == "attended"
     assert events.events[0]["protocol"] == "tcp"
+
+
+def test_unarmed_dark_policy_preserves_audit_only_resolution() -> None:
+    svc, lock, events = service("LOCKED")
+    svc.armed = lambda: False
+    lock.error = policy.DNSPolicyError("controller unavailable in dark mode")
+    events.error = OSError("audit unavailable in dark mode")
+    reply = svc.authorize({"dns_name": "example.test", "protocol": "udp"})
+    assert reply.allow is True and reply.rcode == policy.NOERROR
+    assert (reply.decision, reply.lock_state, reply.reason) == (
+        "would_allow", "not_applicable", "audit_only",
+    )
+    assert lock.calls == 0
+
+
+def test_arm_state_uncertainty_fails_closed() -> None:
+    svc, lock, _ = service("ATTENDED")
+
+    def uncertain() -> bool:
+        raise OSError("unsafe arm file")
+
+    svc.armed = uncertain
+    reply = svc.authorize({"dns_name": "example.test", "protocol": "udp"})
+    assert reply.allow is False and reply.rcode == policy.REFUSED
+    assert (reply.decision, reply.lock_state, reply.reason) == (
+        "error", "unknown", "arm_unavailable",
+    )
+    assert lock.calls == 0
+
+
+def test_arm_file_requires_regular_owner_only_nonsymlink(tmp_path: Path) -> None:
+    arm = tmp_path / "armed"
+    assert policy.enforcement_armed(str(arm)) is False
+    arm.write_text("")
+    arm.chmod(0o644)
+    assert policy.enforcement_armed(str(arm)) is True
+    arm.chmod(0o600)
+    assert policy.enforcement_armed(str(arm)) is True
+    arm.chmod(0o666)
+    with pytest.raises(policy.DNSPolicyError):
+        policy.enforcement_armed(str(arm))
+    arm.chmod(0o600)
+    target = tmp_path / "target"
+    target.write_text("")
+    arm.unlink()
+    arm.symlink_to(target)
+    with pytest.raises(policy.DNSPolicyError):
+        policy.enforcement_armed(str(arm))
 
 
 @pytest.mark.parametrize("error", [policy.DNSPolicyError("bad state"), OSError("missing socket")])
@@ -149,12 +197,30 @@ def test_policy_client_treats_every_transport_failure_as_refused(tmp_path: Path)
         {"ok": True, "allow": True, "decision": "allow", "lock_state": "locked", "reason": "locked", "rcode": 0},
         {"ok": True, "allow": False, "decision": "allow", "lock_state": "attended", "reason": "attended", "rcode": 5},
         {"ok": True, "allow": False, "decision": "deny", "lock_state": "locked", "reason": "locked", "rcode": 0},
+        {"ok": True, "allow": False, "decision": "deny", "lock_state": "locked", "reason": "attended", "rcode": 5},
+        {"ok": True, "allow": False, "decision": "deny", "lock_state": "attended", "reason": "attended", "rcode": 5},
+        {"ok": True, "allow": False, "decision": "error", "lock_state": "unknown", "reason": "attended", "rcode": 5},
+        {"ok": True, "allow": True, "decision": "would_allow", "lock_state": "locked", "reason": "audit_only", "rcode": 0},
     ],
 )
 def test_policy_client_rejects_inconsistent_or_malformed_answers(reply: dict) -> None:
     client = policy.PolicyClient()
     with patch.object(policy, "request", return_value=reply):
         assert client.authorize("example.test", "udp") == policy.REFUSE_UNAVAILABLE
+
+
+def test_policy_client_accepts_only_the_exact_dark_allowance() -> None:
+    client = policy.PolicyClient()
+    reply = {
+        "ok": True,
+        "allow": True,
+        "decision": "would_allow",
+        "lock_state": "not_applicable",
+        "reason": "audit_only",
+        "rcode": 0,
+    }
+    with patch.object(policy, "request", return_value=reply):
+        assert client.authorize("example.test", "udp").allow is True
 
 
 def test_real_socket_enforces_fixed_proxy_and_agent_identity(tmp_path: Path) -> None:
@@ -204,6 +270,33 @@ def test_real_socket_uses_bounded_json_and_never_forwards_upstream(tmp_path: Pat
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("kind", ["oversized", "timeout"])
+def test_real_socket_oversized_or_slow_reply_is_refused(tmp_path: Path, kind: str) -> None:
+    path = tmp_path / f"{kind}.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(path))
+    listener.listen(1)
+
+    def respond() -> None:
+        try:
+            conn, _ = listener.accept()
+            with conn:
+                conn.recv(policy.MAX_REQUEST_BYTES)
+                if kind == "oversized":
+                    conn.sendall(b" " * (policy.MAX_RESPONSE_BYTES + 1) + b"\n")
+                else:
+                    threading.Event().wait(0.2)
+        finally:
+            listener.close()
+
+    thread = threading.Thread(target=respond, daemon=True)
+    thread.start()
+    reply = policy.PolicyClient(str(path), timeout=0.02).authorize("example.test", "udp")
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    assert reply == policy.REFUSE_UNAVAILABLE
 
 
 def test_policy_daemon_refuses_unprivileged_execution(monkeypatch: pytest.MonkeyPatch) -> None:

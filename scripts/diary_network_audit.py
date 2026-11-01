@@ -361,6 +361,8 @@ def event_from_packet_message(
     if sequence_callback is not None:
         sequence_callback(sequence)
     destination, port, protocol, transport = transport_from_packet(attributes[NFULA_PAYLOAD], family)
+    if prefix == "diary-locked-new" and port in {53, 853, 5353, 5355} and ipaddress.ip_address(destination).is_loopback:
+        reason = "loopback_dns"
     event = {
         "event": "dns.alternate" if prefix in DNS_PREFIXES else "network.flow",
         "component": "nftables",
