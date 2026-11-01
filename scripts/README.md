@@ -35,8 +35,9 @@ names and the important-senders list) live in `config/local.toml` +
 `config/important_senders.txt` in the diary repo, read via `mail_reader.config`
 (`$DIARY_CONFIG` env var or the `~/.config/diary/config.toml` symlink).
 Non-secret host endpoints live in root-owned world-readable
-`/etc/diary/hosts.toml`; privileged collector and fixed-pipeline settings stay in
-`root:kek` `0640` `/etc/diary/trusted.toml`. Neither has an env or local-config override. Legacy
+`/etc/diary/hosts.toml`; privileged collector settings stay in `root:kek` `0640`
+`/etc/diary/trusted.toml`. Fixed pipeline model settings use separate root-owned
+`/etc/diary/pipeline.toml`. None has an env or local-config override. Legacy
 Spond/Vigilo/Skolemelding cursors, JSONL, and attachments live only in
 `/var/lib/diary/legacy-state`; trusted collector state and immutable events stay
 in their separate `/var/lib/diary` roots. The submodule ships only placeholder
