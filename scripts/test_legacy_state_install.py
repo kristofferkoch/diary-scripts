@@ -268,3 +268,36 @@ def test_attachment_temp_is_unlinked_before_final_directory_sync(roots, monkeypa
     final = destination / "vigilo/attachments/crash.pdf"
     assert final.stat().st_nlink == 1
     assert list(final.parent.glob("*.migrate.tmp")) == []
+
+
+def test_malformed_truncated_and_nonobject_lines_survive_with_valid_path_conversion(roots):
+    source, destination = roots
+    path = source / "vigilo/2026-11-01.jsonl"
+    path.write_bytes(
+        b'{"data":{"attachments":[{"path":"/home/kek/diary/memory/vigilo/attachments/a.pdf"}]}}\n'
+        b'{"unterminated middle line\n'
+        b'[1,2]\n'
+        b'"valid scalar"\n'
+        b'\xff\n'
+        b'{"data":{"attachments":[{"path":"/etc/diary/workspace/memory/vigilo/attachments/b.pdf"}]}}\r\n'
+        b'{"data":{"truncated":'
+    )
+
+    migrate(source, destination)
+    lines = (destination / "vigilo/2026-11-01.jsonl").read_bytes().splitlines(keepends=True)
+
+    assert b"/var/lib/diary/legacy-state/vigilo/attachments/a.pdf" in lines[0]
+    assert lines[1] == b'{"unterminated middle line\n'
+    assert lines[2] == b'[1,2]\n'
+    assert lines[3] == b'"valid scalar"\n'
+    assert lines[4] == b'\xff\n'
+    assert b"/var/lib/diary/legacy-state/vigilo/attachments/b.pdf" in lines[5]
+    assert lines[5].endswith(b"\r\n")
+    assert lines[6] == b'{"data":{"truncated":'
+    assert b"/home/kek/diary/memory" not in lines[0]
+    assert b"/etc/diary/workspace/memory" not in lines[5]
+
+    original = (destination / "vigilo/2026-11-01.jsonl").read_bytes()
+    result = migrate(source, destination)
+    assert result["identical"] == 6
+    assert (destination / "vigilo/2026-11-01.jsonl").read_bytes() == original

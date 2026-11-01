@@ -84,18 +84,23 @@ def _rewrite_paths(value: Any, track: str) -> Any:
 def _normalise_content(data: bytes, name: str, track: str) -> bytes:
     if not name.endswith(".jsonl"):
         return data
-    records = []
-    for line in data.decode("utf-8").splitlines():
-        if not line.strip():
+    normalized = []
+    for line in data.splitlines(keepends=True):
+        ending = b"\r\n" if line.endswith(b"\r\n") else b"\n" if line.endswith(b"\n") else b""
+        body = line[:-len(ending)] if ending else line
+        try:
+            record = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            normalized.append(line)
             continue
-        record = json.loads(line)
         if not isinstance(record, dict):
-            raise OSError("legacy JSONL record is not an object")
-        records.append(_rewrite_paths(record, track))
-    return "".join(
-        json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
-        for record in records
-    ).encode("utf-8")
+            normalized.append(line)
+            continue
+        normalized.append(
+            json.dumps(_rewrite_paths(record, track), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            + ending
+        )
+    return b"".join(normalized)
 
 
 def _publish_replace(parent_fd: int, name: str, data: bytes, mode: int, uid: int, gid: int) -> None:
