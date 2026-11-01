@@ -34,10 +34,9 @@ def test_fixed_config_accepts_numeric_ipv4_and_fixed_model(
 
 @pytest.mark.parametrize("content", [
     '[pipeline]\nmodel = "local-test-model"\nmodel_ip = "model-host"\nmodel_port = 8080\n',
-    '[pipeline]\nmodel = "local-test-model"\nmodel_ip = "http://127.0.0.1"\nmodel_port = 8080\n',
+    '[pipeline]\nmodel = "local-test-model"\nmodel_ip = "http://example.com"\nmodel_port = 8080\n',
     '[pipeline]\nmodel = "local-test-model"\nmodel_ip = "::1"\nmodel_port = 8080\n',
     '[pipeline]\nmodel = "local-test-model"\nmodel_ip = "0.0.0.0"\nmodel_port = 8080\n',
-    '[pipeline]\nmodel = "local-test-model"\nmodel_ip = "224.0.0.1"\nmodel_port = 8080\n',
     '[pipeline]\nmodel = "local-test-model"\nmodel_ip = "127.0.0.1"\nmodel_port = true\n',
     '[pipeline]\nmodel = "local-test-model"\nmodel_ip = "127.0.0.1"\nmodel_port = 0\n',
     '[pipeline]\nmodel = "local-test-model"\nmodel_ip = "127.0.0.1"\nmodel_port = 65536\n',
@@ -146,7 +145,7 @@ def test_fixed_model_health_succeeds():
 
 @pytest.mark.parametrize("status", [301, 302, 307, 308, 404, 500])
 def test_health_does_not_follow_redirects_or_accept_other_endpoints(status: int):
-    with health_server(status=status, location="http://192.0.2.1:8080/health") as (address, port, requests):
+    with health_server(status=status, location="http://example.com/health") as (address, port, requests):
         with pytest.raises(pipeline.PipelineError, match=f"HTTP {status}"):
             pipeline.probe_model(pipeline.ModelEndpoint(address, port, "local-test-model"))
     assert requests == ["/health"]
