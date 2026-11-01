@@ -47,7 +47,7 @@ STATE_FIELDS = frozenset({
     "schema_version", "prompt_version", "event_id", "input_sha256", "status",
     "attempts", "updated_at", "next_eligible_at", "error", "result",
 })
-MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,127}\Z")
+MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 DATETIME_RE = re.compile(
@@ -398,11 +398,11 @@ class TriageStore:
         self.root = Path(root)
 
     def _open_root(self, *, create: bool = False) -> int:
-        fd = open_dir(self.root, create=create, mode=0o700)
+        fd = open_dir(self.root, create=create, mode=0o750)
         try:
             info = os.fstat(fd)
-            if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077:
-                raise StateError("triage state directory must be private")
+            if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o750:
+                raise StateError("triage state directory must have the provisioned 0750 mode")
             return fd
         except BaseException:
             os.close(fd)
@@ -566,6 +566,7 @@ def run_once(
                 except ResultValidationError as exc:
                     state.update(status="review", next_eligible_at=None, error=str(exc)[:500])
                 except ModelTransportError as exc:
+                    failure_time = _now()
                     if state["attempts"] >= MAX_ATTEMPTS:
                         state.update(
                             status="review",
@@ -575,14 +576,14 @@ def run_once(
                     else:
                         state.update(
                             status="retry",
-                            next_eligible_at=_iso(current_time + _backoff(state["attempts"])),
+                            next_eligible_at=_iso(failure_time + _backoff(state["attempts"])),
                             error=str(exc)[:500],
                         )
                 else:
                     state.update(
                         status="completed", next_eligible_at=None, error=None, result=result,
                     )
-            state["updated_at"] = _iso(current_time)
+            state["updated_at"] = _iso(_now())
             store.save(state)
             counts[state["status"]] += 1
     return counts

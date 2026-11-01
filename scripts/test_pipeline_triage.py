@@ -159,7 +159,19 @@ def test_valid_event_sends_minimum_content_and_commits_exact_result(tmp_path: Pa
     assert state["result"] == valid_result(event["event_id"])
     assert list(store.completed_results()) == [state["result"]]
     assert stat.S_IMODE(store.path_for(event["event_id"]).stat().st_mode) == 0o600
-    assert stat.S_IMODE(state_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(state_dir.stat().st_mode) == 0o750
+
+
+def test_pipeline02_provisioned_0750_state_directory_is_accepted(tmp_path: Path):
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(mode=0o750)
+    with triage.TriageStore(state_dir).lock():
+        pass
+    assert stat.S_IMODE(state_dir.stat().st_mode) == 0o750
+    state_dir.chmod(0o700)
+    with pytest.raises(triage.StateError):
+        with triage.TriageStore(state_dir).lock():
+            pass
 
 
 @pytest.mark.parametrize(
@@ -284,6 +296,31 @@ def test_transport_retry_defers_then_success_preserves_attempt_history(tmp_path:
     assert state["next_eligible_at"] is None
 
 
+def test_slow_failure_backoff_starts_at_failure_commit_time(tmp_path: Path, monkeypatch):
+    event = make_event()
+    spool = tmp_path / "events"
+    write_event(spool, event)
+    current = [START]
+
+    def slow_failure(*args: object) -> dict[str, Any]:
+        current[0] += dt.timedelta(seconds=300)
+        raise triage.ModelTransportError("slow fixed endpoint failure")
+
+    monkeypatch.setattr(triage, "_now", lambda: current[0])
+    monkeypatch.setattr(triage, "call_model", slow_failure)
+    counts = triage.run_once(
+        spool, tmp_path / "state", config=model_config("http://127.0.0.1:9"),
+    )
+    assert counts["retry"] == 1
+    state = triage.TriageStore(tmp_path / "state").load(event["event_id"])
+    failure_time = START + dt.timedelta(seconds=300)
+    assert state is not None and state["updated_at"] == failure_time.isoformat()
+    assert state["next_eligible_at"] == (failure_time + dt.timedelta(seconds=60)).isoformat()
+    assert triage.run_once(
+        spool, tmp_path / "state", config=model_config("http://127.0.0.1:9"),
+    )["deferred"] == 1
+
+
 def test_persistent_attempt_ceiling_and_backoff_survive_restarts(tmp_path: Path, monkeypatch):
     event = make_event()
     spool = tmp_path / "events"
@@ -377,7 +414,7 @@ def test_corrupt_state_fails_closed_without_calling_model(tmp_path: Path, monkey
     spool = tmp_path / "events"
     write_event(spool, event)
     state_dir = tmp_path / "state"
-    state_dir.mkdir(mode=0o700)
+    state_dir.mkdir(mode=0o750)
     triage.TriageStore(state_dir).path_for(event["event_id"]).write_text("{}")
 
     def unexpected(*args: object) -> dict[str, Any]:
@@ -447,6 +484,22 @@ def test_config_rejects_unknown_or_collector_settings(config_path: Path, extra: 
     config_path.write_text(config_path.read_text() + extra)
     with pytest.raises(triage.ConfigError):
         triage.load_config(config_path)
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["", "bad/model", "-leading", ".leading", "white space", "unicode-æ", "a" * 129, "line\nbreak", True],
+)
+def test_config_rejects_model_identifier_outside_pipeline02_grammar(model: Any):
+    document = {"pipeline": {"model": model, "model_ip": "127.0.0.1", "model_port": 8080}}
+    with pytest.raises(triage.ConfigError):
+        triage._parse_document(document)
+
+
+def test_config_accepts_model_identifier_ascii_boundaries():
+    for model in ("A", "a0._-Z", "a" * 128):
+        document = {"pipeline": {"model": model, "model_ip": "127.0.0.1", "model_port": 8080}}
+        assert triage._parse_document(document).model == model
 
 
 @pytest.mark.parametrize("model_ip", [None, "model.local", "http://127.0.0.1", "::1", "0.0.0.0"])

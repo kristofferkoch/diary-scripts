@@ -37,9 +37,12 @@ model_port = 8080
 
 The active file is root-owned, group `diary-pipeline`, mode `0640`, single-link,
 and not group/other writable. The table has exactly `model`, `model_ip`, and
-`model_port`. The address must be numeric IPv4; hostnames, URLs, IPv6,
-unspecified/multicast addresses, unknown keys, alternate endpoints, hard links,
-symlinks, unsafe ownership/modes, and oversized/malformed files are rejected.
+`model_port`. The model identifier is 1–128 ASCII letters, digits, dots,
+underscores, or hyphens and starts with an alphanumeric character; slashes and
+all other characters are rejected. The address must be numeric IPv4; hostnames,
+URLs, IPv6, unspecified/multicast addresses, unknown keys, alternate endpoints,
+hard links, symlinks, unsafe ownership/modes, and oversized/malformed files are
+rejected.
 There is no ordinary-config or environment fallback and no reason for the
 pipeline to read any collector setting. Direct HTTP does not use proxies or
 follow redirects. There is no cloud, alternate-endpoint, or alternate-model
@@ -78,8 +81,8 @@ no notification or second-model attempt.
 
 ## Durable state, backoff, and exhaustion
 
-PIPE-02 provisions `/var/lib/diary/triage-state`; PIPE-03 consumes that fixed
-directory and no other production state path. Each
+PIPE-02 provisions `/var/lib/diary/triage-state` with the reviewed `0750` mode;
+PIPE-03 consumes that fixed directory and no other production state path. Each
 `/var/lib/diary/triage-state/<event-id>.json` is a private `0600` file written
 atomically under a per-store lock. Its exact state schema records the input hash,
 prompt version, attempts, update time, next-eligible time, bounded error, and
@@ -95,7 +98,9 @@ optional result. Status is unambiguous:
 
 There are at most five model attempts per event. Transient failures use
 persistent exponential backoff of 60, 120, 240, and 480 seconds after attempts
-one through four. Before that timestamp, later invocations record no new attempt
+one through four. Each interval starts at the fresh failure/commit timestamp, so
+a slow request cannot consume its own backoff. Before the next-eligible timestamp,
+later invocations record no new attempt
 and report the event as deferred. After the fifth failure, the event becomes
 terminal local `review` with no next-eligible time and no notification. Redirects,
 HTTP 400, and other deterministic HTTP 4xx responses except 408/429 go directly
