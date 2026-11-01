@@ -28,7 +28,10 @@ with real UID 0 that dropped to a nonzero effective UID. The owner must stop or
 restart only those services in a controlled window and rerun the installer; it
 never kills unrelated services.
 The API additionally checks account identity on every connection, so retained
-client-group credentials cannot make `agent` or `diary-pipeline` trusted.
+client-group credentials cannot make `agent` or `diary-pipeline` trusted. A
+fixed, content-free `ping` request lets `diary-lockd` supervise audit health
+without emitting records. `controller.break_glass` events are warning priority
+even when their decision is `allow`, so local recovery overrides are prominent.
 
 Writer PID/UID/GID come from `SO_PEERCRED`. A broker may additionally supply a
 `caller` object only when it obtained PID/UID/GID from its own peer credentials

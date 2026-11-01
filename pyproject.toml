@@ -63,6 +63,8 @@ agent-merge-approve = "scripts.agent_merge_queue:approve_main"
 agent-merge-review = "scripts.agent_merge_review:main"
 diary-audit       = "scripts.diary_audit:main"
 diary-auditd      = "scripts.diary_audit:daemon_main"
+diary-lock        = "scripts.diary_lock:main"
+diary-lockd       = "scripts.diary_lock:daemon_main"
 
 [build-system]
 requires = ["hatchling"]

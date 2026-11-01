@@ -65,6 +65,7 @@ DECISIONS = frozenset({"allow", "deny", "would_allow", "would_deny", "observed",
 LOCK_STATES = frozenset({"locking", "locked", "attended", "unknown", "not_applicable"})
 PROTOCOLS = frozenset({"tcp", "udp", "icmp", "ipv6-icmp"})
 ATTENTION_DECISIONS = frozenset({"deny", "would_deny", "error"})
+ATTENTION_EVENTS = frozenset({"controller.break_glass"})
 TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@=-]{0,127}\Z")
 EVENT_RE = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+\Z")
 DURATION_RE = re.compile(r"([1-9][0-9]{0,3})([mhd])\Z")
@@ -497,7 +498,9 @@ class DedupStore:
 def _journal_fields(event: dict, peer: dict[str, int], redacted: list[str]) -> dict[str, str]:
     fields = {
         "MESSAGE": f"diary-lock audit {event['event']} {event['decision']}",
-        "PRIORITY": "4" if event["decision"] in ATTENTION_DECISIONS else "6",
+        "PRIORITY": "4" if (
+            event["decision"] in ATTENTION_DECISIONS or event["event"] in ATTENTION_EVENTS
+        ) else "6",
         "SYSLOG_IDENTIFIER": "diary-audit",
         "DIARY_AUDIT_SCHEMA_VERSION": str(SCHEMA_VERSION),
         "DIARY_AUDIT_WRITER_PID": str(peer["pid"]),
@@ -712,12 +715,16 @@ class AuditService:
         if not isinstance(request, dict):
             raise AuditError("unknown audit request")
         request = cast(dict[str, Any], request)
-        if request.get("cmd") not in {"write", "baseline", "review"}:
+        if request.get("cmd") not in {"write", "baseline", "review", "ping"}:
             raise AuditError("unknown audit request")
         cmd = request["cmd"]
-        allowed = {"cmd", "event"} if cmd == "write" else {"cmd", "since", "until", "limit"}
+        allowed = {"cmd", "event"} if cmd == "write" else {"cmd"}
+        if cmd in {"baseline", "review"}:
+            allowed = {"cmd", "since", "until", "limit"}
         if set(request) - allowed or (cmd == "write" and "event" not in request):
             raise AuditError("invalid audit request fields")
+        if cmd == "ping":
+            return {"ok": True, "pong": True}
         if cmd == "write":
             return self.write(request["event"], peer)
         result = self.report(request)
@@ -797,10 +804,10 @@ def stat_is_socket(mode: int) -> bool:
     return mode & 0o170000 == 0o140000
 
 
-def request(socket_path: str, value: dict) -> dict:
+def request(socket_path: str, value: dict, timeout: float = 40.0) -> dict:
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        sock.settimeout(40.0)
+        sock.settimeout(timeout)
         sock.connect(socket_path)
         sock.sendall(json.dumps(value, separators=(",", ":")).encode("ascii") + b"\n")
         data = b""
