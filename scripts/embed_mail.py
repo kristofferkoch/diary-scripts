@@ -29,7 +29,7 @@ rebuilds only those tables — resumable, just re-run if interrupted.
 
 Env:
     PG_DSN              postgres://user@host/mailvec      (default: dbname=mailvec)
-    Embedding URL       hosts.embed in /etc/diary/trusted.toml (fixed; no env override)
+    Embedding URL       hosts.embed in /etc/diary/hosts.toml (fixed; no env override)
     EMBED_MODEL         qwen3-embedding                   (default; server alias)
     EMBED_DIMS          4096                              (stored dim = the served
                         model's native width since 2026-08-03; wider vectors
@@ -113,7 +113,7 @@ except Exception:
 ME = [a.strip() for a in os.environ.get(
     "ME_ADDRS", "user@example.com").split(",") if a.strip()]
 PG_DSN = os.environ.get("PG_DSN", "dbname=mailvec")
-EMBED = embed_url()  # fixed trusted hosts.embed (see config.embed_url)
+EMBED = embed_url()  # fixed public hosts.embed (see config.embed_url)
 MODEL = os.environ.get("EMBED_MODEL", "qwen3-embedding")
 EMBED_DIMS = int(os.environ.get("EMBED_DIMS", "4096"))
 BATCH_CHUNKS = int(os.environ.get("EMBED_BATCH", "32"))

@@ -30,7 +30,7 @@ the hot loop.
 
 Env:
     PG_DSN              postgres://user@host/mailvec      (default: dbname=mailvec)
-    VLM URL             hosts.vlm in /etc/diary/trusted.toml (fixed; no env override)
+    VLM URL             hosts.vlm in /etc/diary/hosts.toml (fixed; no env override)
     VLM_MODEL           qwen3.8-flash-next                (default; config vlm.model)
     EMBED_MODEL / EMBED_DIMS / EMBED_BATCH / EMBED_BATCH_CHARS
                         shared with embed_mail (see its docstring)
@@ -70,7 +70,7 @@ from scripts.embed_mail import (
 from scripts.embed_messages import BUILDERS, SIGNAL_ATTACH_DIR, iter_records
 
 PG_DSN = os.environ.get("PG_DSN", "dbname=mailvec")
-VLM = vlm_url()  # fixed trusted hosts.vlm (see config.vlm_url)
+VLM = vlm_url()  # fixed public hosts.vlm (see config.vlm_url)
 VLM_MODEL = os.environ.get("VLM_MODEL") or cfg("vlm.model", "qwen3.8-flash-next")
 
 SOURCES = ("mail", "signal", "vigilo")

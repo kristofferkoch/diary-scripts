@@ -28,7 +28,7 @@ Auth: API key from ``$IMMICH_API_KEY``, else the fixed argv
 needs ``asset.read`` (search) + ``asset.view`` (thumbnails), plus ``map.read``
 for ``--near`` — keep it read-only; add ``asset.download`` only if originals
 must ever be fetched via the API.
-Base URL: ``hosts.immich`` in the root-owned ``/etc/diary/trusted.toml``.
+Base URL: ``hosts.immich`` in the root-owned ``/etc/diary/hosts.toml``.
 Thumbnails
 are written as ``NN-<originalFileName>.jpg`` so names match the listing
 order; ``originalPath`` is the container-side path — the library root is

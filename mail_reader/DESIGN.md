@@ -83,8 +83,9 @@ LIMIT 1`.
   values (`paths.project`, family names, coordinates, …) live in
   `config/local.toml` in the diary repo, symlinked to the XDG path
   (`~/.config/diary/config.toml`) or pointed to via `$DIARY_CONFIG`.
-  Security-sensitive hosts come only from root-owned
-  `/etc/diary/trusted.toml`. See `mail_reader/config.py` for both lookup paths.
+  Non-secret hosts come only from root-owned `/etc/diary/hosts.toml`;
+  privileged collector settings come from `/etc/diary/trusted.toml`.
+  See `mail_reader/config.py` for the lookup paths.
 
 ## 6. Routes
 

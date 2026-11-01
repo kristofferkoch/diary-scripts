@@ -25,9 +25,9 @@ Full policy (branch naming, review-before-merge, publication + cleanup): `~/diar
 
 ## Red lines
 
-- **No PII, ever.** Real hostnames, family names, and addresses must never appear here — not in code, and not in comments, docstrings, or examples either. Security-sensitive hosts come from fixed root-owned `/etc/diary/trusted.toml` via `mail_reader.config.trusted_cfg` (`hosts.*` keys + helpers like `embed_url()`); examples use the `gpu-host` / `server` placeholders. New code that needs a host adds a trusted `hosts.*` key plus a config helper — never a hardcoded default, env override, or agent-publishable fallback.
+- **No PII, ever.** Real hostnames, family names, and addresses must never appear here — not in code, and not in comments, docstrings, or examples either. Non-secret hosts come from fixed root-owned world-readable `/etc/diary/hosts.toml` via the host URL helpers; privileged collector settings come from fixed `root:kek` `0640` `/etc/diary/trusted.toml` via `mail_reader.config.trusted_cfg`. Examples use the `gpu-host` / `server` placeholders. New code that needs a host adds an approved `hosts.*` key plus a config helper — never a hardcoded default, env override, or agent-publishable fallback.
 - Code that needs the workspace path calls `mail_reader.config.workspace_root()` — never walk `__file__`.
-- Ordinary private runtime values (family names, coordinates) belong in the diary repo's `config/local.toml`; real hosts and privileged collector settings belong in `/etc/diary/trusted.toml`, not here. See `~/diary/AGENTS.md` for the public/private split.
+- Ordinary private runtime values (family names, coordinates) belong in the diary repo's `config/local.toml`; real non-secret hosts belong in `/etc/diary/hosts.toml`, while privileged collector settings belong in `/etc/diary/trusted.toml`, not here. See `~/diary/AGENTS.md` for the public/private split.
 
 ## Working here
 

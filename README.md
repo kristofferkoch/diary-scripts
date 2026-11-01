@@ -87,11 +87,11 @@ Ordinary private values (paths, home coordinates, family names and the
 important-senders list) live in `config/local.toml` +
 `config/important_senders.txt` in the parent diary repo, read via
 `mail_reader.config` (`$DIARY_CONFIG` env var or the
-`~/.config/diary/config.toml` symlink). Security-sensitive hosts and privileged
-collector settings live only in root-owned `/etc/diary/trusted.toml`; host
-helpers have no environment override or local-config fallback. Placeholder
-defaults are baked in, so everything compiles and the tests pass without any
-config file present.
+`~/.config/diary/config.toml` symlink). Non-secret hosts live in root-owned
+world-readable `/etc/diary/hosts.toml`; privileged collector settings stay in
+`root:kek` `0640` `/etc/diary/trusted.toml`. Host helpers have no environment
+override or local-config fallback. Placeholder examples and sanitized test
+fixtures are provided.
 
 New code that needs the workspace path must call
 `mail_reader.config.workspace_root()` — never walk `__file__`.

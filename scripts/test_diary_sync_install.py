@@ -178,6 +178,7 @@ def test_shell_installer_requires_root_config_and_uses_approved_units(
         integration / "sync",
         approved_diary / "sync",
         approved_scripts / "scripts",
+        approved_scripts / "mail_reader",
         approved_scripts / ".venv/bin",
         owner_home / ".config/diary",
         owner_home / ".password-store/spond",
@@ -196,9 +197,10 @@ def test_shell_installer_requires_root_config_and_uses_approved_units(
         (approved_diary / "sync" / name).write_text("reviewed\n")
     for name in (
         "diary_sync_broker.py", "diary_sync_install.py", "safe_io.py",
-        "event_spool.py", "event_export.py",
+        "event_spool.py", "event_export.py", "public_hosts_config.py",
     ):
         (approved_scripts / "scripts" / name).write_text("")
+    (approved_scripts / "mail_reader/hosts_config.py").write_text("")
     (approved_scripts / ".venv/bin/diary-event-export").write_text("")
     for path in (
         owner_home / ".config/diary/vigilo-tokens.json",
@@ -291,6 +293,7 @@ printf '%s\n' "$SYNC_INSTALL_TEST_CONFIG_UID"
     assert "install -d -o kek -g diary-pipeline -m 2750 /var/lib/diary/events" in operations
     assert "install -d -o kek -g kek -m 0700 /var/lib/diary/collector-state" in operations
     assert "groupadd --system --force diary-pipeline" in operations
+    assert "python3 -P -m scripts.public_hosts_config" in operations
     assert not any(f"{integration}/sync" in line for line in operations)
     assert not any("config/local.toml" in line for line in operations)
     assert "systemctl restart diary-sync-runtime.service diary-sync-broker.service" in operations

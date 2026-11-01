@@ -34,9 +34,10 @@ the daemon is run from the installed copy, never via `uv run`.
 names and the important-senders list) live in `config/local.toml` +
 `config/important_senders.txt` in the diary repo, read via `mail_reader.config`
 (`$DIARY_CONFIG` env var or the `~/.config/diary/config.toml` symlink).
-Security-sensitive hosts and privileged collector settings live only in
-root-owned `/etc/diary/trusted.toml`, with no env or local-config override.
-The submodule ships only placeholder defaults. New code must resolve the
+Non-secret host endpoints live in root-owned world-readable
+`/etc/diary/hosts.toml`; privileged collector settings stay in `root:kek` `0640`
+`/etc/diary/trusted.toml`. Neither has an env or local-config override. The
+submodule ships only placeholder examples. New code must resolve the
 workspace data root (where `CALENDAR.md`,
 `memory/`, topic files live) via `mail_reader.config.workspace_root()` (from
 config `paths.project`) — not by walking `__file__`.

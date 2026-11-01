@@ -84,31 +84,31 @@ def test_cfg_path_default_when_absent(with_config):
     assert config.cfg_path("important_senders", fallback) == fallback
 
 
+HOSTS_TEXT = """
+[hosts]
+embed = "studio.example:8081"
+vlm = "studio.example:8083"
+immich = "server.example:2283"
+tailnet_base = "https://server.example"
+dsh_web = "https://server.example:8444"
+kimi_web = "https://server.example:8446"
+"""
+
+
 @pytest.fixture
-def with_trusted_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Point the fixed trusted-config path at a temp file and reset its cache."""
-    def _write(text: str) -> Path:
-        p = tmp_path / "trusted.toml"
+def with_hosts_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Point the fixed public hosts path at a temp file and reset caches."""
+    def _write(text: str = HOSTS_TEXT) -> Path:
+        p = tmp_path / "hosts.toml"
         p.write_text(text)
-        monkeypatch.setattr(config, "TRUSTED_CONFIG_PATH", p)
+        monkeypatch.setattr(config, "HOSTS_CONFIG_PATH", p)
         config.reload()
         return p
     yield _write
     config.reload()
 
 
-def test_host_urls_come_from_trusted_config(with_trusted_config):
-    with_trusted_config(
-        """
-        [hosts]
-        embed = "studio.example:8081"
-        vlm = "studio.example:8083"
-        immich = "server.example:2283"
-        tailnet_base = "https://server.example"
-        dsh_web = "https://server.example:8444"
-        kimi_web = "https://server.example:8446"
-        """
-    )
+def assert_host_urls() -> None:
     assert config.embed_url() == "http://studio.example:8081"
     assert config.vlm_url() == "http://studio.example:8083"
     assert config.immich_url() == "http://server.example:2283"
@@ -117,8 +117,24 @@ def test_host_urls_come_from_trusted_config(with_trusted_config):
     assert config.kimi_web_url() == "https://server.example:8446"
 
 
+def test_host_urls_come_from_public_hosts_config(with_hosts_config):
+    with_hosts_config()
+    assert_host_urls()
+
+
+def test_token_and_host_helpers_work_when_trusted_config_is_unreadable(
+    with_hosts_config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    private = tmp_path / "trusted.toml"
+    private.write_text("not readable by this user")
+    private.chmod(0)
+    monkeypatch.setattr(config, "TRUSTED_CONFIG_PATH", private)
+    with_hosts_config()
+    assert_host_urls()
+
+
 def test_agent_config_and_env_cannot_redirect_host_urls(
-    with_config, with_trusted_config, monkeypatch: pytest.MonkeyPatch
+    with_config, with_hosts_config, monkeypatch: pytest.MonkeyPatch
 ):
     with_config(
         """
@@ -131,37 +147,28 @@ def test_agent_config_and_env_cannot_redirect_host_urls(
         kimi_web = "https://attacker.invalid:5"
         """
     )
-    with_trusted_config(
-        """
-        [hosts]
-        embed = "studio.example:8081"
-        vlm = "studio.example:8083"
-        immich = "server.example:2283"
-        tailnet_base = "https://server.example"
-        dsh_web = "https://server.example:8444"
-        kimi_web = "https://server.example:8446"
-        """
-    )
+    with_hosts_config()
     for name in ("EMBED_URL", "VLM_URL", "IMMICH_URL", "MAIL_WEB_URL",
-                 "DSH_WEB_URL", "KIMI_WEB_URL"):
+                 "DSH_WEB_URL", "KIMI_WEB_URL", "DIARY_HOSTS_CONFIG"):
         monkeypatch.setenv(name, "https://attacker.invalid/")
-
-    assert config.embed_url() == "http://studio.example:8081"
-    assert config.vlm_url() == "http://studio.example:8083"
-    assert config.immich_url() == "http://server.example:2283"
-    assert config.mail_web_url() == "https://server.example/mail"
-    assert config.dsh_web_url() == "https://server.example:8444"
-    assert config.kimi_web_url() == "https://server.example:8446"
+    assert_host_urls()
 
 
-def test_missing_trusted_config_does_not_fall_back_to_agent_config(
+def test_missing_public_hosts_config_fails_closed_without_agent_fallback(
     with_config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     with_config('[hosts]\nembed = "attacker.invalid:9999"\n')
-    monkeypatch.setattr(config, "TRUSTED_CONFIG_PATH", tmp_path / "missing.toml")
+    monkeypatch.setattr(config, "HOSTS_CONFIG_PATH", tmp_path / "missing.toml")
     monkeypatch.setenv("EMBED_URL", "http://attacker.invalid:9999")
     config.reload()
-    assert config.embed_url() == "http://gpu-host:8081"
+    with pytest.raises(FileNotFoundError):
+        config.embed_url()
+
+
+def test_malformed_public_hosts_config_fails_closed(with_hosts_config):
+    with_hosts_config('[hosts]\nembed = "only-one-key.example"\n')
+    with pytest.raises(ValueError, match="missing or unapproved"):
+        config.embed_url()
 
 
 def test_explicit_missing_config_raises(monkeypatch: pytest.MonkeyPatch):
