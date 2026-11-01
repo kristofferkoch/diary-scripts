@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Human-approved publication queues for code and private-workspace changes.
 
-Only regular-file memory changes may publish unattended. Other requests fetch
-agent-created bundles into an isolated ``queue/automatic`` repository. Only
-``agent-merge-approve`` from the account owner's UID, naming the exact reviewed
-commit OID, may merge that commit into the approved repository and push
-``master``.
+Only regular-file memory changes and explicitly allowlisted data topics may
+publish unattended. Other requests fetch agent-created bundles into an isolated
+``queue/automatic`` repository. Only ``agent-merge-approve`` from the account
+owner's UID, naming the exact reviewed commit OID, may merge that commit into
+the approved repository and push ``master``.
 
 The module is intentionally stdlib-only apart from the workspace config
 lookup. The service runs a root-owned copy installed from the approved tree.
@@ -46,6 +46,18 @@ AGENT_SOURCES = {
     "diary": AGENT_WORKTREE_ROOT / "_sources" / "diary",
     "scripts": AGENT_WORKTREE_ROOT / "_sources" / "diary-scripts",
 }
+DIARY_UNATTENDED_TOPICS = frozenset({
+    "BILLS.md",
+    "CALENDAR-PAST.md",
+    "CALENDAR.md",
+    "CONTEXT.md",
+    "DELIVERIES.md",
+    "FINANCE.md",
+    "MEMORY.md",
+    "NORCAP.md",
+    "RECEIPTS.md",
+    "SCHOOL.md",
+})
 
 
 class QueueError(RuntimeError):
@@ -295,7 +307,7 @@ def enforce_scripts_pii(paths: QueuePaths, reviewed: str) -> None:
         config = read_config(paths.review_config)
     except PiiError as exc:
         raise QueueError(f"cannot verify identity allowlist: {exc}") from exc
-    base = git(paths.queue, "rev-parse", "master").stdout.strip()
+    base = git(paths.approved, "rev-parse", "master").stdout.strip()
     diff = git(paths.queue, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", f"{base}...{reviewed}").stdout
     messages = git(paths.queue, "log", "--format=%B", f"{base}..{reviewed}").stdout
     raw_paths = git(paths.queue, "diff", "--name-only", "-z", "--no-renames", f"{base}...{reviewed}").stdout
@@ -439,7 +451,7 @@ def approve_queue(
 
 
 def diary_review_required(repo: Path, reviewed: str) -> list[str]:
-    """Return changed paths outside the unattended regular-file memory boundary."""
+    """Return changed paths outside the unattended regular-file data boundary."""
     if not OID_RE.fullmatch(reviewed):
         raise QueueError("diary publication requires a full commit OID")
     raw = git(repo, "diff", "--raw", "-z", "--no-renames", f"master...{reviewed}").stdout
@@ -453,8 +465,13 @@ def diary_review_required(repo: Path, reviewed: str) -> list[str]:
         if len(parts) != 5 or not parts[0].startswith(":"):
             raise QueueError("unexpected Git raw-diff response")
         old_mode, new_mode, status = parts[0][1:], parts[1], parts[4]
-        if not (
+        unattended_path = (
             path.startswith("memory/")
+            or path in DIARY_UNATTENDED_TOPICS
+            or (path.startswith("FDV_") and path.endswith(".md") and "/" not in path)
+        )
+        if not (
+            unattended_path
             and status in {"A", "M", "D"}
             and old_mode in {"100644", "000000"}
             and new_mode in {"100644", "000000"}
@@ -466,7 +483,7 @@ def diary_review_required(repo: Path, reviewed: str) -> list[str]:
 def publish_diary_unattended(
     branch: str, expected: str, paths: QueuePaths, *, push: bool = True
 ) -> bool:
-    """Publish only regular-file memory changes from the expected bundle."""
+    """Publish only regular-file memory and data-topic changes from the expected bundle."""
     with queue_lock(paths):
         fetched = fetch_expected(paths.approved, paths, "diary", branch, expected)
         sensitive = diary_review_required(paths.approved, fetched)
@@ -575,7 +592,9 @@ def queue_main(argv: list[str] | None = None) -> int:
     approved.add_argument("--repo", choices=("scripts", "diary"), default="scripts")
     approved.add_argument("reviewed")
     approved.add_argument("--peer-fd", type=int, required=True)
-    unattended = sub.add_parser("publish-diary", help="publish only regular-file memory changes")
+    unattended = sub.add_parser(
+        "publish-diary", help="publish only regular-file memory and data-topic changes"
+    )
     unattended.add_argument("branch")
     unattended.add_argument("expected")
     client = sub.add_parser("client", help="request approval as the account owner")

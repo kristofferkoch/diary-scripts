@@ -168,6 +168,19 @@ def test_pii_rejection_preserves_producer_work_and_allows_fix_and_retry(paths: a
     fixed_bundle.unlink()
 
 
+def test_pii_prescan_uses_approved_master_with_stale_queue_master(paths: amq.QueuePaths):
+    historical = "host" + ' = "' + "private" + '-host"\n'
+    commit(paths.approved, "historical.py", historical)
+    run("git", "fetch", str(paths.approved), "master", cwd=source_repo(paths))
+    run("git", "merge", "--ff-only", "FETCH_HEAD", cwd=source_repo(paths))
+    run("git", "clone", "--no-hardlinks", str(paths.approved), str(paths.queue))
+    run("git", "checkout", "-b", amq.QUEUE_BRANCH, "master", cwd=paths.queue)
+    run("git", "update-ref", "refs/heads/master", "master^", cwd=paths.queue)
+    source_branch(paths)
+
+    assert queue_source(paths) is True
+
+
 def test_already_queued_request_reemits_review_event(paths: amq.QueuePaths):
     source_branch(paths)
     source, expected, bundle = make_bundle(paths, "dev/change")
@@ -314,9 +327,26 @@ def test_diary_regular_memory_change_publishes_without_owner_review(paths: amq.Q
         assert (repo / "memory/2026-10-31.md").read_text() == "routine notes\n"
 
 
+@pytest.mark.parametrize("name", sorted(amq.DIARY_UNATTENDED_TOPICS) + ["FDV_EXAMPLE.md"])
+def test_diary_data_topic_change_publishes_without_owner_review(paths: amq.QueuePaths, name: str):
+    source = empty_source(paths)
+    commit(source, name, "routine topic update\n")
+
+    assert publish_source(paths) is True
+
+    for repo in (paths.approved, paths.integration):
+        assert (repo / name).read_text() == "routine topic update\n"
+
+
 @pytest.mark.parametrize("name", [
     "AGENTS.md",
     "CLAUDE.md",
+    "TOOLS.md",
+    "CALENDAR-RULES.md",
+    "SJEKK.md",
+    "USER.md",
+    "docs/CALENDAR.md",
+    "nested/FDV_EXAMPLE.md",
     ".agents/skills/example/SKILL.md",
     "dsh/agent-uid/agent-merge",
     "systemd/install-user",
@@ -330,6 +360,15 @@ def test_diary_instruction_executable_and_service_paths_require_review(paths: am
     oid = run("git", "rev-parse", "HEAD", cwd=source)
 
     assert amq.diary_review_required(source_repo(paths), oid) == [name]
+
+
+def test_diary_mixed_topic_and_instruction_changes_require_review(paths: amq.QueuePaths):
+    source = empty_source(paths)
+    commit(source, "CALENDAR.md", "routine topic update\n")
+    commit(source, "TOOLS.md", "agent-controlled instructions\n")
+    oid = run("git", "rev-parse", "HEAD", cwd=source)
+
+    assert amq.diary_review_required(source_repo(paths), oid) == ["TOOLS.md"]
 
 
 def test_diary_sensitive_change_cannot_publish_without_exact_oid_approval(paths: amq.QueuePaths):
@@ -356,26 +395,29 @@ def test_diary_sensitive_change_cannot_publish_without_exact_oid_approval(paths:
     assert run("git", "--git-dir", remote, "rev-parse", "master") == oid
 
 
-def test_diary_executable_memory_file_requires_review(paths: amq.QueuePaths):
+@pytest.mark.parametrize("name", ["memory/run-me", "CALENDAR.md"])
+def test_diary_executable_unattended_file_requires_review(paths: amq.QueuePaths, name: str):
     source = empty_source(paths)
-    commit(source, "memory/run-me", "ordinary file\n")
-    (source / "memory/run-me").chmod(0o755)
-    run("git", "add", "memory/run-me", cwd=source)
+    commit(source, name, "ordinary file\n")
+    (source / name).chmod(0o755)
+    run("git", "add", name, cwd=source)
     run("git", "commit", "-m", "make executable", cwd=source)
     oid = run("git", "rev-parse", "HEAD", cwd=source)
 
-    assert amq.diary_review_required(source_repo(paths), oid) == ["memory/run-me"]
+    assert amq.diary_review_required(source_repo(paths), oid) == [name]
 
 
-def test_diary_symlink_memory_file_requires_review(paths: amq.QueuePaths):
+@pytest.mark.parametrize("name", ["memory/link", "CALENDAR.md"])
+def test_diary_symlink_unattended_file_requires_review(paths: amq.QueuePaths, name: str):
     source = empty_source(paths)
-    (source / "memory").mkdir()
-    (source / "memory/link").symlink_to("../AGENTS.md")
-    run("git", "add", "memory/link", cwd=source)
+    link = source / name
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to("../AGENTS.md" if name.startswith("memory/") else "AGENTS.md")
+    run("git", "add", name, cwd=source)
     run("git", "commit", "-m", "add symlink", cwd=source)
     oid = run("git", "rev-parse", "HEAD", cwd=source)
 
-    assert amq.diary_review_required(source_repo(paths), oid) == ["memory/link"]
+    assert amq.diary_review_required(source_repo(paths), oid) == [name]
 
 
 def test_diary_publication_pins_the_fetched_oid(paths: amq.QueuePaths, monkeypatch: pytest.MonkeyPatch):

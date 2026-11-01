@@ -3,11 +3,14 @@
 > Index: [scripts/](../README.md)
 
 Only additions, modifications, and deletions of regular, non-executable files
-under the private diary's `memory/` directory publish unattended. Every other
-diary change and every `diary-scripts` change requires owner review. This covers
-instructions, executables, installers, units, service configuration, submodule
-pointers, symlinks, and mode changes without relying on a sensitive-path
-denylist.
+under the private diary's `memory/` directory and in its explicit data-topic
+allowlist publish unattended. The allowlist contains `BILLS.md`, `CALENDAR.md`,
+`CALENDAR-PAST.md`, `CONTEXT.md`, `DELIVERIES.md`, `FINANCE.md`, `MEMORY.md`,
+`NORCAP.md`, `RECEIPTS.md`, `SCHOOL.md`, and root-level `FDV_*.md` files. Every
+other diary change and every `diary-scripts` change requires owner review. This
+covers instructions, executables, installers, units, service configuration,
+submodule pointers, symlinks, and mode changes without relying on a
+sensitive-path denylist.
 
 ```
 agent source clone + worktree
@@ -21,7 +24,7 @@ reviewed queue OID + owner UID ────────────────�
                                                                       │
                                                    after approval ────┴──▶ integration + queue
 
-regular-file memory bundle ──OID verification + classification──▶ approved diary
+unattended diary bundle ──OID verification + classification──▶ approved diary
 ```
 
 The agent source, integration, queue, and approved checkouts are four separate
@@ -42,7 +45,7 @@ does not invoke `upload-pack`, read source config, or follow source alternates.
 Queueing never pushes and never modifies approved `master`, integration, source
 refs, or source worktrees. Approval publishes exactly the reviewed queue commit,
 then synchronizes only the approved repository into the queue and integration
-checkouts. Unattended memory publication classifies the exact verified object
+checkouts. Unattended diary publication classifies the exact verified object
 against approved `master`. A source branch or source `master` changed after bundle
 creation cannot alter the commit being published.
 
