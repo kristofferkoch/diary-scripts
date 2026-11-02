@@ -20,6 +20,7 @@ def test_first_run_has_no_lower_bound():
 def test_next_run_starts_at_the_previous_upper_bound():
     cursor = {"signal": {"to": "2026-11-01T19:41:56Z"}}
     since, until = cur.window(cursor, "signal", NOW)
+    assert since is not None
     assert cur.format_iso(since) == "2026-11-01T19:41:56Z"
     assert until == NOW
 
@@ -27,6 +28,7 @@ def test_next_run_starts_at_the_previous_upper_bound():
 def test_mail_widens_the_lower_bound_by_the_overlap():
     cursor = {"mail": {"to": "2026-11-01T06:52:57Z"}}
     since, until = cur.window(cursor, "mail", NOW)
+    assert since is not None
     assert cur.format_iso(since) == "2026-10-31T06:52:57Z"
     assert until == NOW
 
