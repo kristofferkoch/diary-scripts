@@ -259,8 +259,20 @@ class MergeConsole:
         return DecisionResult(action, reviewed_oid, reviewed_base, "merged")
 
 
-def render_console(snapshot: QueueSnapshot | None, action_path: str = "/lock/merge/decide") -> str:
-    """Render a fixed, escaped HTML fragment for CTL-07's independent owner UI."""
+def render_console(
+    snapshot: QueueSnapshot | None,
+    action_path: str = "/lock/merge/decide",
+    csrf_token: str | None = None,
+) -> str:
+    """Render a fixed, escaped HTML fragment for the owner console host.
+
+    The CSRF token is placed only in the two decision forms; it is a
+    double-submit value backed by the host's session-bound token store, never
+    authority by itself.
+    """
+    token = "" if csrf_token is None else (
+        f'<input type="hidden" name="csrf" value="{html.escape(csrf_token, quote=True)}">'
+    )
     if snapshot is None:
         content = "<p>No queued diary-scripts changes require review.</p>"
     else:
@@ -281,12 +293,14 @@ def render_console(snapshot: QueueSnapshot | None, action_path: str = "/lock/mer
   <pre class="advisory">{html.escape(snapshot.advisory.text)}</pre>
   <p>The report is advisory only. Missing or stale reports do not block owner review or approval.</p>
   <form method="post" action="{html.escape(action_path, quote=True)}">
+    {token}
     <input type="hidden" name="action" value="merge">
     <input type="hidden" name="queue_oid" value="{html.escape(snapshot.queue_oid, quote=True)}">
     <input type="hidden" name="base_oid" value="{html.escape(snapshot.base_oid, quote=True)}">
     <button type="submit" name="confirm" value="merge"{disabled}>Merge exact reviewed queue/base OIDs</button>
   </form>
   <form method="post" action="{html.escape(action_path, quote=True)}">
+    {token}
     <input type="hidden" name="action" value="deny">
     <input type="hidden" name="queue_oid" value="{html.escape(snapshot.queue_oid, quote=True)}">
     <input type="hidden" name="base_oid" value="{html.escape(snapshot.base_oid, quote=True)}">

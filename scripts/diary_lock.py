@@ -37,6 +37,7 @@ DEFAULT_AUDIT_SOCKET = "/run/diary-audit/socket"
 DEFAULT_GROUP = "diary-lock-control"
 DEFAULT_OWNER = "kek"
 DEFAULT_ATTENDED_SECONDS = 15 * 60
+DEFAULT_UI_ACTIONS_FILE = "/etc/diary/lock-ui-actions-enabled"
 AUDIT_HEALTH_INTERVAL = 30.0
 MAX_REQUEST_BYTES = 4096
 MAX_STATE_BYTES = 4096
@@ -1285,6 +1286,7 @@ class Controller:
         clock: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
         identity: CgroupIdentity | None = None,
+        ui_actions_file: str = DEFAULT_UI_ACTIONS_FILE,
     ) -> None:
         if not 60 <= attended_seconds <= 3600:
             raise LockError("attended duration must be between 60 and 3600 seconds")
@@ -1295,6 +1297,7 @@ class Controller:
         self.clock = clock
         self.monotonic = monotonic
         self.identity = identity
+        self.ui_actions_file = ui_actions_file
         self.state = "LOCKING"
         self.expires_at: float | None = None
         self.deadline_monotonic: float | None = None
@@ -1373,6 +1376,25 @@ class Controller:
         self.audit.emit(event, "attended", "allow", "ATTENDED", reason, peer)
         self.next_audit_check = self.monotonic() + AUDIT_HEALTH_INTERVAL
         return self.status()
+
+    def ui_actions_enabled(self) -> bool:
+        """Defense in depth: the UI build may not unlock until a root file exists.
+
+        The controller runs as root, so requiring the enablement file to be owned
+        by the controller's own effective UID makes it root-only in production
+        while staying testable without privileges.
+        """
+        try:
+            info = os.lstat(self.ui_actions_file)
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise LockError("UI enablement file cannot be inspected") from exc
+        return (
+            stat.S_ISREG(info.st_mode)
+            and info.st_uid == os.geteuid()
+            and not info.st_mode & 0o022
+        )
 
     def break_glass(self, peer: dict[str, int]) -> dict[str, Any]:
         with self.lock:
@@ -1473,6 +1495,12 @@ class Controller:
             return self.status()
         if value["cmd"] == "break_glass" and peer["uid"] in {0, owner_uid}:
             return self.break_glass(peer)
+        if value["cmd"] in {"unlock", "extend"} and peer["uid"] == ui_uid:
+            if not self.ui_actions_enabled():
+                raise RequestRejected(
+                    "UI unlock and attendance are disabled until the root-owned "
+                    "enablement file exists"
+                )
         if value["cmd"] == "unlock" and peer["uid"] == ui_uid:
             return self.unlock(peer)
         if value["cmd"] == "extend" and peer["uid"] == ui_uid:
