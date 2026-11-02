@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import ipaddress
 import os
 import signal
@@ -24,6 +25,7 @@ DEFAULT_POLICY_SOCKET = "/run/diary-dns-policy/socket"
 UPSTREAM_TIMEOUT = 5.0
 MAX_CLIENTS = 128
 SHUTDOWN_TIMEOUT = 5.0
+EPHEMERAL_BIND_ATTEMPTS = 32
 
 
 class DNSAuditError(ValueError):
@@ -225,6 +227,30 @@ class PolicyClientProtocol(Protocol):
     def authorize(self, name: str | None, protocol: str) -> Any: ...
 
 
+def _bind_proxy_servers(listen: str, port: int) -> tuple[_UDPServer, _TCPServer]:
+    """Bind the UDP and TCP listeners on one port number.
+
+    UDP and TCP port spaces are independent, so a kernel-chosen ephemeral UDP
+    port says nothing about whether the same number is free for TCP; binding
+    TCP can then fail with EADDRINUSE.  Only ``port == 0`` asks the kernel to
+    pick a port, so only then is the pair re-picked on that collision.  A fixed
+    port still fails closed on the first attempt.
+    """
+    attempts = EPHEMERAL_BIND_ATTEMPTS if port == 0 else 1
+    for attempt in range(1, attempts + 1):
+        udp = _UDPServer((listen, port), _UDPHandler)
+        try:
+            tcp = _TCPServer((listen, udp.server_address[1]), _TCPHandler)
+        except BaseException as exc:
+            udp.server_close()
+            collision = isinstance(exc, OSError) and exc.errno == errno.EADDRINUSE
+            if attempt == attempts or not collision:
+                raise
+        else:
+            return udp, tcp
+    raise AssertionError("ephemeral bind attempts exhausted without an error")
+
+
 class DNSProxy:
     def __init__(
         self,
@@ -246,12 +272,7 @@ class DNSProxy:
         self.stopping = threading.Event()
         self.tcp_lock = threading.Lock()
         self.tcp_clients: set[socket.socket] = set()
-        self.udp = _UDPServer((self.listen, port), _UDPHandler)
-        try:
-            self.tcp = _TCPServer((self.listen, self.udp.server_address[1]), _TCPHandler)
-        except BaseException:
-            self.udp.server_close()
-            raise
+        self.udp, self.tcp = _bind_proxy_servers(self.listen, port)
         self.udp.owner = self
         self.tcp.owner = self
         self.threads = [

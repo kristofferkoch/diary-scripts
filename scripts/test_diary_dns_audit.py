@@ -1,6 +1,7 @@
 """Isolated DNS proxy, metadata, and alternate-resolution audit tests."""
 from __future__ import annotations
 
+import errno
 import json
 import socket
 import struct
@@ -346,6 +347,116 @@ def test_attended_tcp_forwards_after_exact_policy_allowance() -> None:
         proxy.close()
         listener.close()
         thread.join(2)
+
+
+class RecordingUDPServer:
+    """Stand-in UDP listener for construction-failure tests: records server_close."""
+
+    def __init__(self, address: tuple[str, int]) -> None:
+        self.server_address = address
+        self.closed = False
+
+    def server_close(self) -> None:
+        self.closed = True
+
+
+def test_ephemeral_bind_retries_a_tcp_port_collision(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_udp = dns._UDPServer
+    real_tcp = dns._TCPServer
+    tcp_binds: list[tuple[str, int]] = []
+    udp_servers: list[dns._UDPServer] = []
+
+    def udp_factory(address: tuple[str, int], handler: type) -> dns._UDPServer:
+        server = real_udp(address, handler)
+        udp_servers.append(server)
+        return server
+
+    def tcp_factory(address: tuple[str, int], handler: type) -> dns._TCPServer:
+        tcp_binds.append(address)
+        if len(tcp_binds) == 1:
+            raise OSError(errno.EADDRINUSE, "Address already in use")
+        return real_tcp(address, handler)
+
+    monkeypatch.setattr(dns, "_UDPServer", udp_factory)
+    monkeypatch.setattr(dns, "_TCPServer", tcp_factory)
+    proxy = dns.DNSProxy(
+        "127.0.0.1", 0, "127.0.0.1", 53, UID, GID, policy_client=locked_policy(),
+    )
+    try:
+        assert len(tcp_binds) >= 2
+        assert len(udp_servers) == len(tcp_binds)
+        assert udp_servers[0].socket.fileno() == -1
+        assert proxy.port == tcp_binds[-1][1] == udp_servers[-1].server_address[1]
+    finally:
+        proxy.close()
+
+
+def test_fixed_port_tcp_collision_still_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    udp_servers: list[RecordingUDPServer] = []
+
+    def udp_factory(address: tuple[str, int], handler: type) -> RecordingUDPServer:
+        server = RecordingUDPServer(address)
+        udp_servers.append(server)
+        return server
+
+    def tcp_factory(address: tuple[str, int], handler: type) -> None:
+        raise OSError(errno.EADDRINUSE, "Address already in use")
+
+    monkeypatch.setattr(dns, "_UDPServer", udp_factory)
+    monkeypatch.setattr(dns, "_TCPServer", tcp_factory)
+    with pytest.raises(OSError) as failure:
+        dns.DNSProxy(
+            "127.0.0.1", dns.DEFAULT_PORT, "127.0.0.1", 53, UID, GID,
+            policy_client=locked_policy(),
+        )
+    assert failure.value.errno == errno.EADDRINUSE
+    assert len(udp_servers) == 1
+    assert udp_servers[0].closed
+
+
+def test_ephemeral_bind_does_not_retry_permanent_tcp_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    udp_servers: list[RecordingUDPServer] = []
+
+    def udp_factory(address: tuple[str, int], handler: type) -> RecordingUDPServer:
+        server = RecordingUDPServer(address)
+        udp_servers.append(server)
+        return server
+
+    def tcp_factory(address: tuple[str, int], handler: type) -> None:
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(dns, "_UDPServer", udp_factory)
+    monkeypatch.setattr(dns, "_TCPServer", tcp_factory)
+    with pytest.raises(OSError) as failure:
+        dns.DNSProxy(
+            "127.0.0.1", 0, "127.0.0.1", 53, UID, GID, policy_client=locked_policy(),
+        )
+    assert failure.value.errno == errno.EACCES
+    assert len(udp_servers) == 1
+    assert udp_servers[0].closed
+
+
+def test_ephemeral_bind_gives_up_after_bounded_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(dns, "EPHEMERAL_BIND_ATTEMPTS", 2)
+    udp_servers: list[RecordingUDPServer] = []
+
+    def udp_factory(address: tuple[str, int], handler: type) -> RecordingUDPServer:
+        server = RecordingUDPServer(address)
+        udp_servers.append(server)
+        return server
+
+    def tcp_factory(address: tuple[str, int], handler: type) -> None:
+        raise OSError(errno.EADDRINUSE, "Address already in use")
+
+    monkeypatch.setattr(dns, "_UDPServer", udp_factory)
+    monkeypatch.setattr(dns, "_TCPServer", tcp_factory)
+    with pytest.raises(OSError) as failure:
+        dns.DNSProxy(
+            "127.0.0.1", 0, "127.0.0.1", 53, UID, GID, policy_client=locked_policy(),
+        )
+    assert failure.value.errno == errno.EADDRINUSE
+    assert len(udp_servers) == 2
+    assert all(server.closed for server in udp_servers)
 
 
 def test_armed_udp_and_tcp_denials_never_call_upstream(monkeypatch: pytest.MonkeyPatch) -> None:
