@@ -444,13 +444,42 @@ def queue_change(branch: str, expected: str, paths: QueuePaths, *, repo: str = "
         return True
 
 
+def fetch_superproject(repo: Path, source: Path) -> None:
+    """Fetch ``master`` without recursing into recorded submodule revisions.
+
+    A fetched commit can name a submodule revision that no longer exists
+    anywhere: a branch whose submodule pointer was rebased keeps the old value
+    in its history, and that value is not an approved commit. Recursing here
+    turned such history into "upload-pack: not our ref" and failed a
+    publication after approved master had already advanced, leaving approved
+    and integration out of sync. Only the current pointer matters for a
+    checkout, so fetch the superproject alone and update it explicitly.
+    """
+    git(repo, "-c", "fetch.recurseSubmodules=no",
+        "fetch", "--no-tags", str(source), "master")
+
+
+def update_submodule(repo: Path, name: str = "diary-scripts") -> None:
+    """Bring an initialized submodule working tree to the reviewed pointer."""
+    if not (repo / name / ".git").exists():
+        return
+    proc = git(repo, "submodule", "update", "--init", "--", name, check=False)
+    if proc.returncode:
+        print(
+            f"agent-merge: warning: could not update the {name} checkout in "
+            f"{repo}: {(proc.stderr or proc.stdout).strip()}",
+            file=sys.stderr,
+        )
+
+
 def sync_integration(paths: QueuePaths) -> None:
-    git(paths.integration, "fetch", "--no-tags", str(paths.approved), "master")
+    fetch_superproject(paths.integration, paths.approved)
     git(paths.integration, "merge", "--ff-only", "FETCH_HEAD")
+    update_submodule(paths.integration)
 
 
 def sync_queue(paths: QueuePaths) -> None:
-    git(paths.queue, "fetch", "--no-tags", str(paths.approved), "master")
+    fetch_superproject(paths.queue, paths.approved)
     git(paths.queue, "merge", "--ff-only", "FETCH_HEAD")
 
 

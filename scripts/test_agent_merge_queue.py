@@ -846,3 +846,46 @@ def test_queue_merge_pins_its_own_committer_identity(
     assert "user.email=user@example.com" in amq.merge_identity()
     monkeypatch.setenv("AGENT_MERGE_IDENTITY_EMAIL", "  ")
     assert "user.email=user@example.com" in amq.merge_identity()
+
+
+def test_sync_does_not_require_historical_submodule_commits(
+    paths: amq.QueuePaths, tmp_path: Path
+) -> None:
+    """A recorded submodule revision that no longer exists must not fail a sync.
+
+    A branch whose submodule pointer was rebased keeps the discarded value in
+    history. Fetch recursion used to demand that commit from the submodule
+    remote, which failed after approved master had already advanced.
+    """
+    submodule = tmp_path / "submodule.git"
+    run("git", "init", "--bare", str(submodule))
+    seed = tmp_path / "submodule-seed"
+    seed.mkdir()
+    run("git", "init", "-b", "master", cwd=seed)
+    run("git", "config", "user.name", "Queue Test", cwd=seed)
+    run("git", "config", "user.email", "queue@example.invalid", cwd=seed)
+    commit(seed, "file.txt", "submodule\n")
+    run("git", "remote", "add", "origin", str(submodule), cwd=seed)
+    run("git", "push", "origin", "master", cwd=seed)
+
+    # Populate the submodule in the integration checkout, exactly like the real
+    # one, so a recursive fetch has somewhere to recurse into.
+    run("git", "-c", "protocol.file.allow=always", "submodule", "add",
+        str(submodule), "diary-scripts", cwd=paths.integration)
+    run("git", "commit", "-m", "add the submodule", cwd=paths.integration)
+    run("git", "fetch", str(paths.integration), "master", cwd=paths.approved)
+    run("git", "reset", "--hard", "FETCH_HEAD", cwd=paths.approved)
+
+    approved = paths.approved
+    vanished = "1" * 40
+    run("git", "update-index", "--cacheinfo",
+        f"160000,{vanished},diary-scripts", cwd=approved)
+    run("git", "commit", "-m", "record a vanished submodule revision", cwd=approved)
+
+    run("git", "config", "fetch.recurseSubmodules", "true", cwd=paths.integration)
+    amq.sync_integration(paths)
+
+    assert run("git", "rev-parse", "HEAD", cwd=paths.integration) == run(
+        "git", "rev-parse", "HEAD", cwd=approved
+    )
+    assert run("git", "ls-tree", "HEAD", "diary-scripts", cwd=paths.integration).split()[2] == vanished
