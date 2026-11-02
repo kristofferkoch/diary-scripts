@@ -40,7 +40,11 @@ QUEUE_REF = f"refs/heads/{QUEUE_BRANCH}"
 #: Identity for queue merge commits. Pinned here rather than inherited from the
 #: account owner's git config (which has no `user.email`); a merge commit needs
 #: one and `git merge --no-ff` otherwise dies with "Committer identity unknown".
-MERGE_IDENTITY = ("-c", "user.name=diary agent", "-c", "user.email=agent@localhost")
+#: The address must be one verified on the owner's GitHub account: this service
+#: writes these commits onto the default branch, and `agent@localhost` belongs to
+#: no account, so they were attributed to nobody and shown as unverified.
+MERGE_IDENTITY = ("-c", "user.name=diary agent",
+                  "-c", "user.email=koch+agent@kristofferkoch.com")
 BRANCH_RE = re.compile(r"^(dev|mem)/[a-z0-9][a-z0-9-]*$")
 OID_RE = re.compile(r"^[0-9a-f]{40}$")
 LOCK_PATH = Path("/var/lib/agent-merge/queue.lock")

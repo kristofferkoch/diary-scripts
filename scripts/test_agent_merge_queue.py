@@ -837,4 +837,5 @@ def test_queue_merge_pins_its_own_committer_identity(
     proc = amq.git(queue_repo, *amq.MERGE_IDENTITY, "merge", "--no-ff",
                    "--no-edit", "-m", "queue test", "topic", check=False)
     assert proc.returncode == 0, proc.stderr
-    assert amq.git(queue_repo, "log", "-1", "--format=%ae").stdout.strip() == "agent@localhost"
+    assert amq.git(queue_repo, "log", "-1", "--format=%ae").stdout.strip() \
+        == "koch+agent@kristofferkoch.com"
