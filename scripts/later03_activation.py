@@ -203,7 +203,9 @@ def validate_units(
     required_sets: tuple[str, ...],
 ) -> None:
     slice_text = _unit_text(diary_repo, "systemd/units/agent.slice")
-    controller_unit = _unit_text(diary_repo, "systemd/units/diary-lockd.service")
+    controller_unit = _unit_text(
+        diary_repo, "systemd/units/diary-lockd.service.d/60-cgroup-identity.conf",
+    )
     expected = [AUDIT_SET, *required_sets]
     _exact_set_collection(_slice_sets(slice_text), [f"cgroup:{item}" for item in expected], "agent.slice")
     _exact_set_collection(_controller_sets(controller_unit), expected, "diary-lockd")

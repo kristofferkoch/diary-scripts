@@ -45,7 +45,7 @@ def layout(root: Path) -> tuple[Path, Path, Path]:
     scripts = root / "diary-scripts-approved"
     for relative in (
         "systemd/units/agent.slice",
-        "systemd/units/diary-lockd.service",
+        "systemd/units/diary-lockd.service.d/60-cgroup-identity.conf",
         "dsh/dsh-web.service",
         "kimi/kimi-web.service",
     ):
@@ -56,7 +56,7 @@ def layout(root: Path) -> tuple[Path, Path, Path]:
         f"NFTSet=cgroup:{activation.AUDIT_SET.replace(':', ':', 1)}\n"
         f"NFTSet=cgroup:{POLICY_SET}\n"
     )
-    (diary / "systemd/units/diary-lockd.service").write_text(
+    (diary / "systemd/units/diary-lockd.service.d/60-cgroup-identity.conf").write_text(
         f"ExecStart=/usr/local/sbin/diary-lockd --cgroup-set {activation.AUDIT_SET} "
         f"--cgroup-set {POLICY_SET}\n"
     )
@@ -149,7 +149,7 @@ def test_every_enforcement_set_must_be_in_slice_and_controller(tmp_path: Path) -
     with pytest.raises(activation.ActivationError, match="agent.slice set collection mismatch"):
         validate(evidence, diary, scripts, FakeGit(diary, scripts))
     slice_path.write_text(f"NFTSet=cgroup:{activation.AUDIT_SET}\nNFTSet=cgroup:{POLICY_SET}\n")
-    unit = diary / "systemd/units/diary-lockd.service"
+    unit = diary / "systemd/units/diary-lockd.service.d/60-cgroup-identity.conf"
     unit.write_text(f"ExecStart=/usr/local/sbin/diary-lockd --cgroup-set {activation.AUDIT_SET}\n")
     with pytest.raises(activation.ActivationError, match="diary-lockd set collection mismatch"):
         validate(evidence, diary, scripts, FakeGit(diary, scripts))
@@ -163,7 +163,7 @@ def test_extra_set_is_rejected(tmp_path: Path, target: str) -> None:
         path = diary / "systemd/units/agent.slice"
         path.write_text(path.read_text() + f"NFTSet=cgroup:{extra}\n")
     else:
-        path = diary / "systemd/units/diary-lockd.service"
+        path = diary / "systemd/units/diary-lockd.service.d/60-cgroup-identity.conf"
         path.write_text(path.read_text().rstrip() + f" --cgroup-set {extra}\n")
     with pytest.raises(activation.ActivationError, match="extra="):
         validate(evidence, diary, scripts, FakeGit(diary, scripts))
@@ -176,7 +176,7 @@ def test_duplicate_set_is_rejected(tmp_path: Path, target: str) -> None:
         path = diary / "systemd/units/agent.slice"
         path.write_text(path.read_text() + f"NFTSet=cgroup:{POLICY_SET}\n")
     else:
-        path = diary / "systemd/units/diary-lockd.service"
+        path = diary / "systemd/units/diary-lockd.service.d/60-cgroup-identity.conf"
         path.write_text(path.read_text().rstrip() + f" --cgroup-set {POLICY_SET}\n")
     with pytest.raises(activation.ActivationError, match="duplicate cgroup sets"):
         validate(evidence, diary, scripts, FakeGit(diary, scripts))

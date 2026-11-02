@@ -13,28 +13,33 @@ root-only arm file exists, every transition retains accept-only dark observation
 Turn cancellation stays dark unless its separate CTL-02 drop-in is installed;
 DNS, broker, and Signal enforcement remain separate cards.
 
-The prepared LATER-03 controller revision additionally verifies cgroup network
-identity. It requires active `agent.slice`, `dsh-web.service`, and
-`kimi-web.service`; stats the slice's real cgroup inode; and requires that
-inode in every `--cgroup-set FAMILY:TABLE:SET` nftables `cgroupv2` set. Both web
-services must be active descendants with canonical paths and real cgroup
-directories. `verify_scope()` applies the same check to `dsh-turn-*.scope` and
+Before LATER-03, the controller constructs no cgroup identity checker and its
+base and CTL-02 units have no `agent.slice` dependency, `--cgroup-set` argument,
+`CAP_NET_ADMIN`, or `AF_NETLINK` requirement. Dashboard/UI and CTL-02 behavior
+remain independent of that migration.
+
+Only the migration-installed `60-cgroup-identity.conf` activates cgroup network
+identity. It orders after and wants `agent.slice`, `dsh-web.service`, and
+`kimi-web.service`, supplies every required `--cgroup-set FAMILY:TABLE:SET`, and
+adds `CAP_NET_ADMIN` plus `AF_NETLINK` while preserving the UI and CTL-02
+arguments and access. The controller then stats the slice's real cgroup inode
+and requires it in every configured nftables `cgroupv2` set. Both web services
+must be active descendants with canonical paths and real cgroup directories.
+`verify_scope()` applies the same check to `dsh-turn-*.scope` and
 `kimi-turn-*.scope`, plus CTL-02's actual `diary-dsh-turn-*.scope` and
-`diary-kimi-turn-*.scope` names. Every maintenance pass repeats
-slice/web verification and discovers active turn scopes, so post-transition
-membership removal or scope escape enters the existing fatal supervision and
-watchdog failsafe rather than leaving a healthy-looking controller. A scope
-that became inactive after listing is ignored; an active escaped scope,
-traversal/malformed path, missing cgroup, wrong-type set, or command uncertainty
-fails closed. Repeat `--cgroup-set` for every ACT-01 audit and enforcement set.
-This verification does not itself install or prove locked packet rules;
+`diary-kimi-turn-*.scope` names. Every maintenance pass repeats slice/web
+verification and discovers active turn scopes, so post-transition membership
+removal or scope escape enters the existing fatal supervision and watchdog
+failsafe rather than leaving a healthy-looking controller. A scope that became
+inactive after listing is ignored; an active escaped scope, traversal/malformed
+path, missing cgroup, wrong-type set, or command uncertainty fails closed.
+Repeat `--cgroup-set` for every ACT-01 audit and enforcement set. This
+verification does not itself install or prove locked packet rules;
 CTL-03/ACT-01 retains that responsibility.
 
-Do not deploy this controller revision alone with the older CTL-01 installer:
-its new unit intentionally orders after and wants the LATER-03 agents and needs
-`CAP_NET_ADMIN` plus `AF_NETLINK` for nftables verification. Use the integrated
-LATER-03 migration only after ACT-01 and CTL-02 pass their gates. The current
-live CTL-01 controller and UID/user-unit baseline are unchanged by preparation.
+Use the integrated LATER-03 migration only after ACT-01 and CTL-02 pass their
+gates. The current live CTL-01 controller and UID/user-unit baseline are
+unchanged by preparation.
 
 `later03_activation.py` is the install-time guard for that integrated migration.
 It accepts only root-owned mode-`0600` evidence with explicit ACT-01 acceptance

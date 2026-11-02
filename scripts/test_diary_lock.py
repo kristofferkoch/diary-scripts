@@ -674,7 +674,7 @@ def test_sd_notify_abstract_socket(monkeypatch: pytest.MonkeyPatch) -> None:
     sink.close()
 
 
-def test_real_daemon_exits_when_transition_and_first_failsafe_fail(
+def test_real_daemon_without_cgroup_set_exits_when_transition_and_first_failsafe_fail(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -696,9 +696,10 @@ def test_real_daemon_exits_when_transition_and_first_failsafe_fail(
     events = FakeAudit()
     monkeypatch.setattr(lock, "SystemdModes", lambda: modes)
     monkeypatch.setattr(lock, "AuditClient", lambda _: events)
-    monkeypatch.setattr(
-        lock, "NftCgroupIdentity", lambda *_: SimpleNamespace(verify=lambda: None),
-    )
+    def unexpected_identity(*_args):
+        raise AssertionError("default daemon constructed cgroup identity")
+
+    monkeypatch.setattr(lock, "NftCgroupIdentity", unexpected_identity)
     monkeypatch.setattr(lock.signal, "signal", lambda *_: None)
     notifications: list[str] = []
     monkeypatch.setattr(lock, "sd_notify", lambda message: notifications.append(message) or True)

@@ -1719,8 +1719,9 @@ def daemon_main(argv: list[str] | None = None) -> int:
             SystemdModes(),
             AuditClient(args.audit_socket),
             args.attended_seconds,
-            identity=NftCgroupIdentity(
-                tuple(args.cgroup_set or DEFAULT_CGROUP_SETS), args.cgroup_root,
+            identity=(
+                NftCgroupIdentity(tuple(args.cgroup_set), args.cgroup_root)
+                if args.cgroup_set else None
             ),
         )
         turns: SystemdTurns | None = None
