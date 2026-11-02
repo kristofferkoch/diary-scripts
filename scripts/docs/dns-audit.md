@@ -37,8 +37,11 @@ Policy calls are synchronous and bounded; there is no proxy audit queue or
 conflicting `would_deny` event. Shutdown stops listeners, wakes persistent TCP
 clients, and waits a bounded period for active handlers. At most 128 concurrent
 client handlers are accepted; excess datagrams/connections retain ordinary DNS
-timeout behavior. The CTL-04 installer deploys the proxy plus its root-owned
-policy-client library and policy daemon together.
+timeout behavior. AUD-03 deploys the proxy together with its root-owned
+policy-client library and the unarmed `diary-dns-policyd`, because the proxy
+forwards only what that daemon permits and the daemon is the sole writer of
+query evidence. CTL-04 later arms the same daemon, adds the locked-DNS rules,
+and installs the proxy's failsafe drop-in.
 
 ## Direct and alternate paths
 
@@ -67,10 +70,35 @@ loopback flow exclusion. The initial proxy/upstream redirect supports the
 owner-selected IPv4 resolver; direct IPv6 DNS and all IPv6 alternate paths are
 still observed by the inet-family filter rules.
 
+## Failure behavior
+
+Proxy loss fails open: `diary-dns-audit-rules.service` binds to the proxy, so
+stopping or crashing it removes the redirect and the observation table, and the
+proxy's `ExecStartPost` restores them when systemd restarts it. The proxy also
+binds to `diary-auditd`, so losing the trusted journal stops observation and
+returns resolution to the direct path instead of breaking it.
+
+Policy loss fails closed: the proxy answers `REFUSED` whenever
+`diary-dns-policyd`'s socket is unavailable, so a policy-daemon outage suspends
+agent resolution until it returns. The policy daemon only wants, and does not
+require, `diary-auditd`: while dark it tolerates a failed audit write and still
+forwards, and while armed the same failure becomes `audit_unavailable` and
+refuses. Bounded recovery while dark is `systemctl stop
+diary-dns-audit-rules.service`, which returns resolution to the configured
+resolver and loses query evidence until the unit is started again. After ACT-01
+the same behavior is intended to fail closed.
+
+`dns.query` events carry the fixed configured agent UID/GID, not a kernel peer
+credential. The listener accepts any local client of `127.0.0.1:1053`, so a
+local process that queries the proxy directly is recorded as `agent`; the policy
+daemon still accepts requests only from the root proxy. The direct-path rules
+match every packet rather than `ct state new`, so retransmitted direct queries
+repeat their `dns.alternate` record.
+
 ## Approved installation
 
-After both repositories are approved and synchronized, install with the
-host's actual resolver, for example:
+After both repositories are approved and synchronized, install with the address
+the agent actually queries, for example:
 
 ```bash
 sudo-ask /home/kek/diary-approved/systemd/install-dns-audit-root --upstream 127.0.0.53
@@ -79,20 +107,30 @@ sudo-ask /home/kek/diary-approved/systemd/install-dns-audit-root --upstream 127.
 The example is not an auto-detected default. The installer requires an explicit
 numeric IPv4 argument, stages and byte-compiles approved executables, validates
 a uniquely named table with `nft --check`, and verifies rendered units before
-changing the running deployment. Activation failure stops and disables the new
-units and removes only the dedicated DNS table. It does not install drop/reject
-rules, run unapproved code, or send test traffic.
+changing the running deployment. It also creates the `diary-dns-proxy` group,
+installs the policy-client library and the unarmed `diary-dns-policyd`, and
+refuses to install while `/etc/diary/network-policy-enabled` exists. Activation
+failure stops and disables the new units and removes only the dedicated DNS
+table. It does not install CTL-04's lock rules or failsafe drop-in, install
+drop/reject rules, run unapproved code, or send test traffic.
+
+Pass the resolver the clients are configured with, not the uplink resolver. The
+NAT rule matches that exact address, so installing the uplink address leaves the
+stub path unredirected: there is no `dns.query` evidence and ordinary lookups
+are recorded as `direct`.
 
 ## Live verification
 
 These checks remain deployment work; isolated unit tests do not prove host
 rules, identity selection, or resolution availability.
 
-1. Confirm `diary-dns-auditd`, `diary-dns-audit-rules`, and the AUD-01/02
-   services are active. Inspect `nft list table inet diary_agent_dns_audit` and
+1. Confirm `diary-dns-policyd`, `diary-dns-auditd`, `diary-dns-audit-rules`, and
+   the AUD-01/02 services are active, and that
+   `/run/diary-dns-policy/socket` is `root:diary-dns-proxy` mode `0660`.
+   Inspect `nft list table inet diary_agent_dns_audit` and
    require the exact agent UID, upstream, proxy port, fixed prefixes, counters,
    `policy accept`, and no drop/reject statement. Confirm no lock-state or
-   enforcement unit changed.
+   enforcement unit changed and that the CTL-03 arm file is still absent.
 2. As `agent`, perform normal UDP and TCP lookups through the configured system
    resolver. Confirm correct answers and `dns.query` journal evidence with
    `DIARY_AUDIT_CALLER_USER=agent`, the expected normalized `dns_name`,
@@ -106,11 +144,14 @@ rules, identity selection, or resolution availability.
    query names must be present only for complete parseable requests; DoH/DoT
    evidence must not contain URLs or payloads.
 4. In dark mode, freeze `diary-auditd`, make normal lookups, and confirm
-   resolution still succeeds with the same answers and latency bounds, then thaw
-   it. Stop the proxy and confirm the DNS
-   table is removed and normal resolution still succeeds; restart it and
-   confirm rules and query evidence return. Repeat ordinary DSH/Kimi model,
-   search/fetch, local UI, and Unix-socket operations.
+   resolution still succeeds with the same answers (bounded extra latency while
+   the audit write times out), then thaw it. Stop `diary-auditd` and confirm the
+   proxy stops, the DNS table is removed, and normal resolution still succeeds;
+   start both again and confirm rules and query evidence return. Stop
+   `diary-dns-policyd` and confirm lookups return `REFUSED` until it is started,
+   because policy loss is fail-closed by design. Stop the proxy alone and
+   confirm the DNS table is removed and normal resolution still succeeds. Repeat
+   ordinary DSH/Kimi model, search/fetch, local UI, and Unix-socket operations.
 5. In an owner-approved window, reload/restart the host firewall and global
    nftables service, then inspect both the ordinary firewall and dedicated DNS
    table. Reboot and repeat normal resolution, alternate-path evidence, service
