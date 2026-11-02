@@ -287,6 +287,29 @@ def test_timer_and_path_activation_cannot_start_workload_after_lock() -> None:
     svc = turns(fake)
     svc.cancel()
     assert not any(fake.scheduled.values())
+    stops = [unit for action, unit in fake.calls if action == "stop"]
+    assert stops.index("agent-escape.timer") < stops.index("dsh-web.service")
+
+
+def test_timer_that_fires_during_cancellation_is_caught_by_the_next_pass() -> None:
+    fake = FakeSystemd()
+    fake.scheduled["agent-arm.timer"] = True
+    svc = turns(fake)
+    original = fake.stop
+    fired = False
+
+    def stop(unit: str, no_block: bool = False) -> None:
+        nonlocal fired
+        original(unit, no_block=no_block)
+        if unit == "agent-arm.timer" and not fired:
+            fired = True
+            fake.services["escape.service"] = True
+            fake.membership["escape.service"] = {4242}
+
+    cast(Any, fake).stop = stop
+    svc.cancel()
+    assert fired
+    assert not fake.services["escape.service"]
 
 
 def test_scheduled_unit_created_during_cancellation_is_found_by_next_rescan() -> None:
@@ -657,6 +680,32 @@ def test_systemd_workload_listing_includes_dbus_and_arbitrary_services() -> None
     assert systemd.workload_services() == [
         "dbus-broker.service", "dsh-web-token.service", "escape.service",
     ]
+
+
+def test_manager_pid_reports_systemctl_failure_as_unavailable() -> None:
+    def run(argv, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="")
+
+    systemd = lock.SystemdUser("agent", runner=run)
+    with pytest.raises(lock.SystemdUnavailable):
+        systemd.manager_pid()
+
+
+def test_manager_pid_rejects_malformed_output() -> None:
+    def run(argv, **kwargs):
+        return SimpleNamespace(returncode=0, stdout="not-a-pid\n")
+
+    systemd = lock.SystemdUser("agent", runner=run)
+    with pytest.raises(lock.LockError):
+        systemd.manager_pid()
+
+
+def test_manager_pid_reports_inactive_manager_as_none() -> None:
+    def run(argv, **kwargs):
+        return SimpleNamespace(returncode=0, stdout="0\n")
+
+    systemd = lock.SystemdUser("agent", runner=run)
+    assert systemd.manager_pid() is None
 
 
 def test_turn_socket_uses_kernel_agent_uid_and_preserves_protocol(tmp_path: Path) -> None:

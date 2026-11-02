@@ -828,12 +828,15 @@ class SystemdUser:
     def manager_pid(self) -> int | None:
         uid = os.geteuid() if self.user is None else pwd.getpwnam(self.user).pw_uid
         result = self._run_system(["show", f"user@{uid}.service", "--property=MainPID", "--value"])
+        # A failed systemctl call means the system manager is unavailable, not
+        # that the output was malformed: keep the two distinct so callers can
+        # attempt recovery instead of treating it as a hard failure.
+        if result.returncode != 0:
+            raise SystemdUnavailable("cannot identify the agent user manager")
         try:
             pid = int(result.stdout.strip())
         except (AttributeError, ValueError) as exc:
             raise LockError("cannot identify the agent user manager") from exc
-        if result.returncode != 0:
-            raise SystemdUnavailable("cannot identify the agent user manager")
         return pid if pid > 0 else None
 
     def _bus_socket_path(self) -> str:
