@@ -186,28 +186,57 @@ def run_sync(target: str, *, runner=run_command,
     return result
 
 
+#: What `systemctl --user is-active` can legitimately print. Anything else in
+#: that field means the query itself failed: `run_command` merges stdout and
+#: stderr, so a broker that cannot reach the user manager answers with an error
+#: sentence ("Failed to connect to user scope bus …") that used to be printed
+#: as if it were the unit state, with exit code 0.
+UNIT_STATES = frozenset({
+    "active", "inactive", "failed", "activating", "deactivating", "reloading",
+    "maintenance", "unknown", "not-found",
+})
+
+#: systemd's own failure phrasing, used to tell a failed `show` query from the
+#: (normally empty) `ExecMainExitTimestamp` value.
+ERROR_MARKERS = (
+    "Failed to ", "Failed:", "No such file or directory", "Transport endpoint",
+    "Permission denied",
+)
+
+
 def unit_state(unit: str, *, runner=run_command) -> dict:
     """`is-active` plus the last exit timestamp for one user unit."""
     active = runner(["systemctl", "--user", "is-active", unit], STATUS_TIMEOUT)
     last = runner(["systemctl", "--user", "show", unit,
                    "-p", "ExecMainExitTimestamp", "--value"], STATUS_TIMEOUT)
-    state = {
-        "active": (active.get("output") or "").strip().splitlines()[:1] or ["unknown"],
-    }
-    state["active"] = state["active"][0] or "unknown"
+    value = (active.get("output") or "").strip().splitlines()[:1] or ["unknown"]
+    state: dict = {"active": value[0] or "unknown", "query_ok": True}
+    if state["active"] not in UNIT_STATES:
+        state["query_ok"] = False
+        state["query_error"] = state["active"]
     stamp = (last.get("output") or "").strip()
     if stamp:
         state["last_run"] = stamp
+        if any(marker in stamp for marker in ERROR_MARKERS):
+            state["query_ok"] = False
+            state.setdefault("query_error", stamp)
     return state
 
 
 def services_status(*, runner=run_command) -> dict:
     """State of every pipeline unit the services track asks about."""
-    return {
-        "ok": True,
-        "cmd": "status",
-        "units": {unit: unit_state(unit, runner=runner) for unit in STATUS_UNITS},
+    units = {unit: unit_state(unit, runner=runner) for unit in STATUS_UNITS}
+    errors = {
+        unit: state.get("query_error", "unknown error")
+        for unit, state in units.items()
+        if not state.get("query_ok", True)
     }
+    reply: dict = {"ok": not errors, "cmd": "status", "units": units}
+    if errors:
+        reply["errors"] = errors
+        reply["error"] = "systemctl --user is unreachable: " + "; ".join(
+            f"{unit}: {message}" for unit, message in errors.items())
+    return reply
 
 
 def _start_unit(unit: str, *, runner=run_command) -> dict:
@@ -483,10 +512,11 @@ def client_main(argv: list[str] | None = None) -> int:
         print(f"ok (broker {reply.get('version')}, pid {reply.get('pid')})" if reply.get("ok")
               else f"diary-sync: {reply.get('error')}")
     elif reply.get("cmd") == "status":
-        if not reply.get("ok"):
-            print(f"diary-sync: {reply.get('error')}", file=sys.stderr)
-            return 1
         _print_status(reply)
+        if not reply.get("ok"):
+            print(f"diary-sync: {reply.get('error', 'status query failed')}",
+                  file=sys.stderr)
+            return 1
     else:
         out = (reply.get("output") or "").strip()
         if out:

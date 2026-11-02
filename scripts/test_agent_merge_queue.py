@@ -9,6 +9,9 @@ import pytest
 
 from scripts import agent_merge_queue as amq
 
+#: Captured before the autouse fixture below replaces the module attribute.
+REAL_SYNC_VENV = amq.sync_venv
+
 
 def run(*args: str, cwd: Path | None = None) -> str:
     proc = subprocess.run(args, cwd=cwd, check=True, capture_output=True, text=True)
@@ -619,3 +622,54 @@ def test_agent_request_refuses_non_agent_uid(monkeypatch: pytest.MonkeyPatch):
     )
 
     assert amq.agent_request("scripts", "dev/change") == 1
+
+
+def _pyproject(repo: Path) -> None:
+    (repo / "pyproject.toml").write_text(
+        "[project]\nname = 'example'\nversion = '0'\n", encoding="utf-8")
+
+
+def test_sync_venv_also_refreshes_the_agent_checkout(
+    paths: amq.QueuePaths, monkeypatch: pytest.MonkeyPatch
+):
+    _pyproject(paths.integration)
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(amq.subprocess, "run", fake_run)
+    REAL_SYNC_VENV(paths)
+
+    projects = [c[c.index("--project") + 1] for c in calls]
+    assert projects == [str(paths.approved), str(paths.integration)]
+
+
+def test_sync_venv_only_warns_when_the_agent_checkout_fails(
+    paths: amq.QueuePaths, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    _pyproject(paths.integration)
+
+    def fake_run(argv, **kwargs):
+        approved = argv[argv.index("--project") + 1] == str(paths.approved)
+        return subprocess.CompletedProcess(
+            argv, 0 if approved else 1, "", "" if approved else "network down"
+        )
+
+    monkeypatch.setattr(amq.subprocess, "run", fake_run)
+    REAL_SYNC_VENV(paths)  # must not raise
+
+    assert "agent virtualenv sync failed" in capsys.readouterr().err
+
+
+def test_sync_venv_still_fails_when_the_approved_checkout_fails(
+    paths: amq.QueuePaths, monkeypatch: pytest.MonkeyPatch
+):
+    _pyproject(paths.integration)
+    monkeypatch.setattr(
+        amq.subprocess, "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1, "", "boom"),
+    )
+    with pytest.raises(amq.QueueError):
+        REAL_SYNC_VENV(paths)

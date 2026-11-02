@@ -363,12 +363,36 @@ def sync_queue(paths: QueuePaths) -> None:
 
 
 def sync_venv(paths: QueuePaths) -> None:
+    """Refresh the approved venv (privileged tools) and the agent-facing one.
+
+    The approved checkout's venv is part of the execution boundary: a failed
+    sync there is fatal. The integration checkout (`~/diary/diary-scripts`, the
+    one agents run `uv run --project diary-scripts` against) is a convenience
+    artifact, but nothing else refreshes it — which is why every agent `uv run`
+    used to die with `Read-only file system` while trying to rebuild the
+    console scripts. A failure only warns: a code approval must not be blocked
+    by it, and the agent-side convention is `UV_NO_SYNC=1` anyway.
+    """
     proc = subprocess.run(
         ["uv", "sync", "--frozen", "--project", str(paths.approved)],
         capture_output=True, text=True,
     )
     if proc.returncode:
         raise QueueError(f"approved virtualenv sync failed: {(proc.stderr or proc.stdout).strip()}")
+
+    agent_scripts = paths.integration
+    if agent_scripts == paths.approved or not (agent_scripts / "pyproject.toml").is_file():
+        return
+    proc = subprocess.run(
+        ["uv", "sync", "--frozen", "--project", str(agent_scripts)],
+        capture_output=True, text=True,
+    )
+    if proc.returncode:
+        print(
+            "agent-merge: warning: agent virtualenv sync failed: "
+            f"{(proc.stderr or proc.stdout).strip()}",
+            file=sys.stderr,
+        )
 
 
 def enforce_expected_base(paths: QueuePaths, expected_base: str | None) -> None:

@@ -183,6 +183,40 @@ def test_status_reports_every_unit():
     assert reply["units"]["mail-sync.timer"]["active"] == "active"
 
 
+def test_status_is_not_ok_when_the_user_manager_is_unreachable():
+    error = ("Failed to connect to user scope bus via local transport: "
+             "No such file or directory")
+    reply = _handle({"cmd": "status"},
+                    runner=lambda argv, timeout: {"ok": False, "output": error})
+    assert reply["ok"] is False
+    assert set(reply["errors"]) == set(broker.STATUS_UNITS)
+    assert "unreachable" in reply["error"]
+
+
+def test_client_status_exits_nonzero_when_the_query_failed(tmp_path, capsys):
+    sock_path = str(tmp_path / "s.sock")
+    error = ("Failed to connect to user scope bus via local transport: "
+             "No such file or directory")
+    thread = threading.Thread(
+        target=broker.serve, args=(sock_path,),
+        kwargs={"runner": lambda argv, timeout: {"ok": False, "output": error}},
+        daemon=True)
+    thread.start()
+    for _ in range(100):
+        try:
+            broker.call({"cmd": "ping"}, socket_path=sock_path, timeout=2)
+            break
+        except broker.BrokerUnavailable:
+            threading.Event().wait(0.05)
+    else:  # pragma: no cover - only on a badly broken broker
+        pytest.fail("broker never came up")
+
+    assert broker.client_main(["--socket", sock_path, "status"]) == 1
+    captured = capsys.readouterr()
+    assert "mail-sync.timer" in captured.out      # the rows are still printed
+    assert "unreachable" in captured.err
+
+
 def test_tail_truncates_with_a_marker():
     text = "x" * 5000
     out = broker.tail(text, limit=100)
@@ -198,7 +232,8 @@ def test_socket_round_trip(tmp_path):
     sock_path = str(tmp_path / "s.sock")
     thread = threading.Thread(
         target=broker.serve, args=(sock_path,),
-        kwargs={"runner": lambda argv, timeout: {"ok": True, "output": "ok"}},
+        # `is-active` prints a state; anything else counts as a failed query.
+        kwargs={"runner": lambda argv, timeout: {"ok": True, "output": "active"}},
         daemon=True)
     thread.start()
     for _ in range(100):
