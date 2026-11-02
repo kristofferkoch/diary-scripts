@@ -82,3 +82,16 @@ def test_dashboard_mount_data_drives_real_fresh_workflow(services: Any, web: Any
     assert services.controller.extensions == 1
     assert dashboard.ENFORCEMENT_LABEL.encode() in page
     assert ui.WORKFLOW_JS.encode() == workflow_script
+
+
+def test_dashboard_script_survives_a_missing_workflow_asset(web: Any) -> None:
+    """CTL-09 deploys before CTL-07: /lock/workflow.js may not be served yet."""
+    server, _ = web
+    status, _, script = server.request("GET", "/lock/dashboard.js", owner_headers())
+    assert status == 200
+    body = script.decode("utf-8")
+    assert "!window.DiaryLockWorkflow || typeof window.DiaryLockWorkflow.mount !== 'function'" in body
+    assert "Owner workflow is unavailable" in body
+    assert 'document.getElementById(\'workflow-error\')' in body
+    assert body.index("try {") < body.index("DiaryLockWorkflow.mount({") < body.index("} catch (error)")
+    assert "/lock/api/status" in body

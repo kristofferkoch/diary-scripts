@@ -72,8 +72,18 @@ The dashboard installer refreshes the approved controller/audit readers, checks
 the loaded capability-free unit, and proves the service identity can read status
 and reports but cannot lock, write an event, or ping the audit journal. It also
 rejects forged owner headers from root and owner peers and rejects a Caddy peer
-that lacks authenticated owner headers. It does not configure or enforce
-firewall policy.
+that lacks authenticated owner headers. Denial checks alone also pass when Caddy
+cannot reach the socket at all (mode, SELinux label, or a dead snapshot reader),
+so the installer additionally proves the positive Caddy path: as the `caddy`
+account, with the owner headers Caddy forwards after Authelia, it must read
+`/lock/api/status` and render `/lock/` with the dark enforcement label. The owner
+peer probe proves filesystem denial, because that account cannot traverse the
+runtime directory. The installer does not configure or enforce firewall policy.
+
+Before CTL-07 is deployed, `/lock/workflow.js` is not served. The page renders
+its read-only snapshot server-side and the served `dashboard.js` states
+explicitly that the owner workflow asset is unavailable; a missing workflow
+script never aborts the read-only page.
 
 Complete these deployed checks before deleting CTL-09:
 

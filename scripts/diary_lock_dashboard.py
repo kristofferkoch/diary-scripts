@@ -49,15 +49,26 @@ async function refreshSnapshot() {
   if (!response.ok) throw new Error(`Snapshot refresh failed (HTTP ${response.status}).`);
   snapshot = await response.json();
 }
-const workflow = window.DiaryLockWorkflow.mount({
-  element: document.getElementById('lock-workflow'),
-  getReport: () => snapshot.report,
-  getState: () => snapshot.controller,
-  refresh: refreshSnapshot,
-});
-refreshSnapshot().then(workflow.render).catch(error => {
-  document.getElementById('workflow-error').textContent = error.message;
-});
+const workflowError = document.getElementById('workflow-error');
+try {
+  // CTL-07 is a separate service: before it is deployed, /lock/workflow.js
+  // fails to load and the workflow object is absent. Report that explicitly
+  // rather than throwing before the read-only page has rendered.
+  if (!window.DiaryLockWorkflow || typeof window.DiaryLockWorkflow.mount !== 'function') {
+    throw new Error('Owner workflow is unavailable: the CTL-07 workflow asset did not load.');
+  }
+  const workflow = window.DiaryLockWorkflow.mount({
+    element: document.getElementById('lock-workflow'),
+    getReport: () => snapshot.report,
+    getState: () => snapshot.controller,
+    refresh: refreshSnapshot,
+  });
+  refreshSnapshot().then(workflow.render).catch(error => {
+    workflowError.textContent = error.message;
+  });
+} catch (error) {
+  workflowError.textContent = error.message;
+}
 """
 
 
