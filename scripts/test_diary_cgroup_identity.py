@@ -171,6 +171,9 @@ def test_controller_does_not_declare_mode_when_identity_is_missing(tmp_path: Pat
         def activate(self, mode: str) -> None:
             pass
 
+        def verify_network_audit(self) -> None:
+            pass
+
     class Audit:
         def emit(
             self, event: str, operation: str, decision: str, state: str,
@@ -207,6 +210,9 @@ def test_maintenance_rechecks_identity_after_transition(
 ) -> None:
     class Modes:
         def activate(self, mode: str) -> None:
+            pass
+
+        def verify_network_audit(self) -> None:
             pass
 
     class Audit:
