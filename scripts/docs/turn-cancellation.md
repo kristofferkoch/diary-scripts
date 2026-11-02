@@ -98,12 +98,15 @@ CTL-02 is dark. The CTL-02 drop-in changes `ProtectHome` to `tmpfs` and binds
 back only `/run/user/<uid>/systemd`, read-only. It binds the directory rather
 than the socket inode so a replacement manager and its new private socket remain
 visible. `/home`, `/root`, every other user runtime, and the agent public bus
-stay hidden. `CAP_DAC_OVERRIDE` is the sole capability in the bounding set: the
-controller runs as root but otherwise cannot traverse the agent-owned
-`0700` runtime directories and connect to the `0600` private socket. No ambient
-capability is needed for the root service, and the read-only bind still permits
-Unix-socket connections. This is required for both scope operations and unlock;
-unit tests outside the controller mount/capability namespace do not prove it.
+stay hidden. `CAP_DAC_OVERRIDE` and `CAP_KILL` are the only capabilities in the
+bounding set. The controller runs as root but otherwise cannot traverse the
+agent-owned `0700` runtime directories and connect to the `0600` private socket;
+`CAP_KILL` separately permits its pidfd `SIGSTOP`/`SIGKILL` operations against
+agent-UID processes during independent containment. No ambient capability is
+needed for the root service, and the read-only bind still permits Unix-socket
+connections. These capabilities are required for scope operations, unlock, and
+the PID fallback; unit tests outside the controller mount/capability namespace
+do not prove them.
 
 The controller immediately re-pins and verifies the replacement manager's
 identity. Manager startup may activate `default.target` and its enabled web
@@ -195,11 +198,13 @@ sudo-ask /home/kek/diary-approved/systemd/test-controller-turn-sandbox
 
 It starts a uniquely named transient system service with the controller's
 CTL-02 mount and capability settings. Only the agent manager directory is bound
-into that namespace, so the public bus is absent. The gate proves the sole
-effective/bounding capability is `CAP_DAC_OVERRIDE`, then performs real private
-socket/broker recovery and transient-scope status/control operations. It uses
-only unique synthetic units, requires the existing manager, and never starts,
-stops, or kills the production manager, public bus, or agent workloads.
+into that namespace, so the public bus is absent. The gate proves the only
+effective/bounding capabilities are `CAP_DAC_OVERRIDE` and `CAP_KILL`, performs
+real private socket/broker recovery and transient-scope operations, and uses
+pidfd to stop and kill one unique synthetic agent-owned process. Cleanup checks
+that process's UID and kernel start time. The gate uses only unique synthetic
+units/processes, requires the existing manager, and never starts, stops, or
+kills the production manager, public bus, or agent workloads.
 
 The ordinary suite includes a production-shaped `SystemdUser("agent")`
 transport regression with the public socket and broker stopped. It rejects any
