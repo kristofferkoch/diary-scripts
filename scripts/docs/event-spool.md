@@ -90,7 +90,10 @@ acknowledgement, so acknowledged entries are single-link readable files. A crash
 between the final link and that unlink leaves a second link; the next write for
 the same event removes a leftover temp that still shares the committed inode
 (after the normal retry window, so a live writer is not raced) and repairs the
-entry instead of failing on it forever. Readers reject links, multiple hard
+entry instead of failing on it forever. The repair is confined to entries named
+`.<event_id>.<pid>.<hex>.tmp` whose inode is the committed event, so a symlink, a
+foreign file under that name, or a legitimate extra hard link is left untouched
+and the entry stays rejected. Readers reject links, multiple hard
 links, oversized files, invalid UTF-8/JSON, duplicate JSON keys, unknown fields,
 non-finite numbers, excessive nesting, and IDs that do not match their immutable
 identity.
