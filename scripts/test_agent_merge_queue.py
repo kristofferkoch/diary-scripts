@@ -808,3 +808,33 @@ def test_repo_without_a_submodule_is_not_affected(paths: amq.QueuePaths):
     commit(paths.approved, "extra.txt", "x\n")
     head = run("git", "rev-parse", "HEAD", cwd=paths.approved)
     assert amq.guard_diary_submodule(paths, head) is False
+def test_queue_merge_pins_its_own_committer_identity(
+    paths: amq.QueuePaths, monkeypatch: pytest.MonkeyPatch
+):
+    """A merge commit must not depend on the account owner's git identity.
+
+    Regression: the queue repo is a plain clone and inherited no identity, and
+    `~/.gitconfig` has `user.name` but a commented-out `user.email`, so every
+    non-fast-forward queue merge died with "Committer identity unknown" and
+    surfaced as a bogus merge conflict.
+    """
+    amq.ensure_queue(paths)
+    queue_repo = paths.queue
+
+    # Both sides diverge, so the merge cannot be a fast-forward.
+    commit(queue_repo, "queued.txt", "queued\n")
+    run("git", "checkout", "-q", "-b", "topic", "master", cwd=queue_repo)
+    commit(queue_repo, "topic.txt", "topic\n")
+    run("git", "checkout", "-q", amq.QUEUE_BRANCH, cwd=queue_repo)
+
+    for key in ("user.name", "user.email"):
+        amq.git(queue_repo, "config", "--unset", key, check=False)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+    for key in ("EMAIL", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"):
+        monkeypatch.delenv(key, raising=False)
+
+    proc = amq.git(queue_repo, *amq.MERGE_IDENTITY, "merge", "--no-ff",
+                   "--no-edit", "-m", "queue test", "topic", check=False)
+    assert proc.returncode == 0, proc.stderr
+    assert amq.git(queue_repo, "log", "-1", "--format=%ae").stdout.strip() == "agent@localhost"

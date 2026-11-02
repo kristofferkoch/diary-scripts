@@ -37,6 +37,10 @@ else:
 
 QUEUE_BRANCH = "queue/automatic"
 QUEUE_REF = f"refs/heads/{QUEUE_BRANCH}"
+#: Identity for queue merge commits. Pinned here rather than inherited from the
+#: account owner's git config (which has no `user.email`); a merge commit needs
+#: one and `git merge --no-ff` otherwise dies with "Committer identity unknown".
+MERGE_IDENTITY = ("-c", "user.name=diary agent", "-c", "user.email=agent@localhost")
 BRANCH_RE = re.compile(r"^(dev|mem)/[a-z0-9][a-z0-9-]*$")
 OID_RE = re.compile(r"^[0-9a-f]{40}$")
 LOCK_PATH = Path("/var/lib/agent-merge/queue.lock")
@@ -405,10 +409,18 @@ def queue_change(branch: str, expected: str, paths: QueuePaths, *, repo: str = "
         if git(paths.queue, "merge-base", "--is-ancestor", QUEUE_BRANCH, fetched, check=False).returncode == 0:
             git(paths.queue, "merge", "--ff-only", fetched)
         else:
-            proc = git(paths.queue, "merge", "--no-ff", "--no-edit", "-m", f"queue {branch}", fetched, check=False)
+            # A non-ff merge writes a commit, which needs a committer identity.
+            # The queue repo is created by `ensure_queue` with a plain clone and
+            # inherits nothing, and the account owner's git config has no
+            # `user.email` — so the merge used to fail with "Committer identity
+            # unknown" while fast-forwards (no commit) worked. Pin the identity
+            # on the command line so the merge never depends on ambient config.
+            proc = git(paths.queue, *MERGE_IDENTITY, "merge", "--no-ff",
+                       "--no-edit", "-m", f"queue {branch}", fetched, check=False)
             if proc.returncode:
+                detail = (proc.stderr or proc.stdout).strip()
                 git(paths.queue, "merge", "--abort", check=False)
-                raise QueueError(f"queue merge conflict for {branch}")
+                raise QueueError(f"queue merge conflict for {branch}: {detail}")
         new = git(paths.queue, "rev-parse", "HEAD").stdout.strip()
         if repo == "scripts":
             request_advisory_review(paths, new)
