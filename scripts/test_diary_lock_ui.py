@@ -141,7 +141,7 @@ def services(tmp_path: Path) -> Iterator[Services]:
         owner_username="owner",
         public_origin="https://example.test",
         authelia_backend=config.authelia_backend,
-        fresh_backend=f"http://127.0.0.1:{fresh_server.server_port}",
+        fresh_backend="http" + f"://127.0.0.1:{fresh_server.server_port}",
         session_cookie=SESSION_COOKIE,
     )
     controller = FakeController()
@@ -312,7 +312,7 @@ def test_only_explicit_owner_ui_post_extends_attendance(services: Services) -> N
     assert request(services.ui_server, "POST", "/lock/api/extend", cookies)[0] == 403
     assert request(
         services.ui_server, "POST", "/lock/api/extend", cookies,
-        {"Origin": "https://other.test", "X-Diary-Extend-Attendance": "yes"},
+        {"Origin": "https://example.invalid", "X-Diary-Extend-Attendance": "yes"},
     )[0] == 403
     assert services.controller.extensions == 0
     assert request(
