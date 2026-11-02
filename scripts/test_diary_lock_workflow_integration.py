@@ -1,7 +1,12 @@
 """Combined CTL-09 browser-contract and CTL-07 workflow API tests."""
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
 from typing import Any
+
+import pytest
 
 from scripts import diary_lock_dashboard as dashboard
 from scripts import diary_lock_ui as ui
@@ -92,6 +97,75 @@ def test_dashboard_script_survives_a_missing_workflow_asset(web: Any) -> None:
     body = script.decode("utf-8")
     assert "!window.DiaryLockWorkflow || typeof window.DiaryLockWorkflow.mount !== 'function'" in body
     assert "Owner workflow is unavailable" in body
-    assert 'document.getElementById(\'workflow-error\')' in body
-    assert body.index("try {") < body.index("DiaryLockWorkflow.mount({") < body.index("} catch (error)")
-    assert "/lock/api/status" in body
+    assert "document.getElementById('workflow-error')" in body
+    # The snapshot fetch must precede the workflow guard, not live inside it.
+    assert body.index("refreshSnapshot()") < body.index("DiaryLockWorkflow")
+    assert body.index("refreshSnapshot()") < body.index("workflowError")
+
+
+NODE = shutil.which("node")
+
+HARNESS = """'use strict';
+const vm = require('vm');
+const script = __SCRIPT__;
+const mode = __MODE__;
+(async () => {
+  const elements = {};
+  const fetched = [];
+  let rendered = 0;
+  const sandbox = {
+    console,
+    document: { getElementById: (id) => (elements[id] ??= { textContent: '' }) },
+    fetch: async (url) => {
+      fetched.push(url);
+      return { ok: true, json: async () => ({ controller: { state: 'LOCKED' }, report: {} }) };
+    },
+    setTimeout,
+  };
+  sandbox.window = sandbox;
+  if (mode === 'ok') {
+    sandbox.DiaryLockWorkflow = { mount: () => ({ render: () => { rendered += 1; } }) };
+  }
+  if (mode === 'mount-throws') {
+    sandbox.DiaryLockWorkflow = { mount: () => { throw new Error('boom'); } };
+  }
+  vm.createContext(sandbox);
+  vm.runInContext(script, sandbox);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  process.stdout.write(JSON.stringify({
+    fetched,
+    rendered,
+    error: elements['workflow-error'] ? elements['workflow-error'].textContent : null,
+  }));
+})();
+"""
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_error"),
+    [
+        ("missing", "Owner workflow is unavailable"),
+        ("mount-throws", "boom"),
+        ("ok", ""),
+    ],
+)
+def test_dashboard_fetches_the_snapshot_before_mounting_the_workflow(
+    tmp_path: Any, mode: str, expected_error: str,
+) -> None:
+    """The read-only snapshot must load even when CTL-07 is absent or broken."""
+    if NODE is None:
+        pytest.skip("node is required to execute the served dashboard script")
+    harness = tmp_path / "harness.js"
+    harness.write_text(
+        HARNESS.replace("__SCRIPT__", json.dumps(dashboard.DASHBOARD_JS)).replace(
+            "__MODE__", json.dumps(mode),
+        ),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [NODE, str(harness)], capture_output=True, text=True, timeout=60, check=True,
+    )
+    outcome = json.loads(completed.stdout)
+    assert outcome["fetched"] == ["/lock/api/status"]
+    assert outcome["error"] is not None and expected_error in outcome["error"]
+    assert outcome["rendered"] == (1 if mode == "ok" else 0)

@@ -22,8 +22,10 @@ preserved in both baseline and required groups for owner context and
 expected-flow matching.
 
 The dashboard mounts `/lock/workflow.js` in `#lock-workflow` and loads
-`/lock/dashboard.js`, which calls `DiaryLockWorkflow.mount` with `getReport`,
-`getState`, and a GET-only snapshot `refresh`. CSP permits scripts and
+`/lock/dashboard.js`, which first fetches `/lock/api/status` and only then calls
+`DiaryLockWorkflow.mount` with `getReport`, `getState`, and a GET-only snapshot
+`refresh`. The fetch is deliberately independent of the workflow: a missing or
+throwing workflow can only blank its own panel, never the status call. CSP permits scripts and
 connections only to self; there is no inline workflow script, third-party asset,
 or WebSocket. Page refresh is still read-only GET every 30 seconds and never
 extends attendance. Controller or audit failures render as unavailable, never
@@ -78,12 +80,19 @@ so the installer additionally proves the positive Caddy path: as the `caddy`
 account, with the owner headers Caddy forwards after Authelia, it must read
 `/lock/api/status` and render `/lock/` with the dark enforcement label. The owner
 peer probe proves filesystem denial, because that account cannot traverse the
-runtime directory. The installer does not configure or enforce firewall policy.
+runtime directory. That positive probe is still a DAC/functionality check: the
+installer's `runuser` client runs in the installer's SELinux domain, not in
+`httpd_t`, so it cannot reproduce Caddy's confined transition. SELinux is
+asserted separately — the runtime directory must carry `httpd_var_run_t`, the
+persistent file-context rule must exist so a reboot recreates it, and the
+`diary_lock_dashboard_caddy` module must be loaded. The installer does not
+configure or enforce firewall policy.
 
 Before CTL-07 is deployed, `/lock/workflow.js` is not served. The page renders
-its read-only snapshot server-side and the served `dashboard.js` states
-explicitly that the owner workflow asset is unavailable; a missing workflow
-script never aborts the read-only page.
+its read-only snapshot server-side, `dashboard.js` still fetches
+`/lock/api/status` first, and the workflow panel then states explicitly that the
+owner workflow asset is unavailable. Neither a missing nor a throwing workflow
+script can abort the status path or the rest of the page.
 
 Complete these deployed checks before deleting CTL-09:
 
