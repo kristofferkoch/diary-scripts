@@ -37,8 +37,11 @@ Policy calls are synchronous and bounded; there is no proxy audit queue or
 conflicting `would_deny` event. Shutdown stops listeners, wakes persistent TCP
 clients, and waits a bounded period for active handlers. At most 128 concurrent
 client handlers are accepted; excess datagrams/connections retain ordinary DNS
-timeout behavior. The CTL-04 installer deploys the proxy plus its root-owned
-policy-client library and policy daemon together.
+timeout behavior. AUD-03 deploys the proxy together with its root-owned
+policy-client library and the unarmed `diary-dns-policyd`, because the proxy
+forwards only what that daemon permits and the daemon is the sole writer of
+query evidence. CTL-04 later arms the same daemon, adds the locked-DNS rules,
+and installs the proxy's failsafe drop-in.
 
 ## Direct and alternate paths
 
@@ -69,8 +72,8 @@ still observed by the inet-family filter rules.
 
 ## Approved installation
 
-After both repositories are approved and synchronized, install with the
-host's actual resolver, for example:
+After both repositories are approved and synchronized, install with the address
+the agent actually queries, for example:
 
 ```bash
 sudo-ask /home/kek/diary-approved/systemd/install-dns-audit-root --upstream 127.0.0.53
@@ -79,20 +82,30 @@ sudo-ask /home/kek/diary-approved/systemd/install-dns-audit-root --upstream 127.
 The example is not an auto-detected default. The installer requires an explicit
 numeric IPv4 argument, stages and byte-compiles approved executables, validates
 a uniquely named table with `nft --check`, and verifies rendered units before
-changing the running deployment. Activation failure stops and disables the new
-units and removes only the dedicated DNS table. It does not install drop/reject
-rules, run unapproved code, or send test traffic.
+changing the running deployment. It also creates the `diary-dns-proxy` group,
+installs the policy-client library and the unarmed `diary-dns-policyd`, and
+refuses to install while `/etc/diary/network-policy-enabled` exists. Activation
+failure stops and disables the new units and removes only the dedicated DNS
+table. It does not install CTL-04's lock rules or failsafe drop-in, install
+drop/reject rules, run unapproved code, or send test traffic.
+
+Pass the resolver the clients are configured with, not the uplink resolver. The
+NAT rule matches that exact address, so installing the uplink address leaves the
+stub path unredirected: there is no `dns.query` evidence and ordinary lookups
+are recorded as `direct`.
 
 ## Live verification
 
 These checks remain deployment work; isolated unit tests do not prove host
 rules, identity selection, or resolution availability.
 
-1. Confirm `diary-dns-auditd`, `diary-dns-audit-rules`, and the AUD-01/02
-   services are active. Inspect `nft list table inet diary_agent_dns_audit` and
+1. Confirm `diary-dns-policyd`, `diary-dns-auditd`, `diary-dns-audit-rules`, and
+   the AUD-01/02 services are active, and that
+   `/run/diary-dns-policy/socket` is `root:diary-dns-proxy` mode `0660`.
+   Inspect `nft list table inet diary_agent_dns_audit` and
    require the exact agent UID, upstream, proxy port, fixed prefixes, counters,
    `policy accept`, and no drop/reject statement. Confirm no lock-state or
-   enforcement unit changed.
+   enforcement unit changed and that the CTL-03 arm file is still absent.
 2. As `agent`, perform normal UDP and TCP lookups through the configured system
    resolver. Confirm correct answers and `dns.query` journal evidence with
    `DIARY_AUDIT_CALLER_USER=agent`, the expected normalized `dns_name`,
