@@ -420,13 +420,84 @@ def test_answered_prompt_rings_once_and_approves() -> None:
     assert written.count(b"\a") == 1, f"an answered prompt should ring once: {written!r}"
 
 
-def test_second_request_is_refused_while_one_is_pending() -> None:
-    sudo_broker._prompt_lock.acquire()
+def test_requests_take_their_turn_in_arrival_order() -> None:
+    queue = sudo_broker._TurnQueue(limit=4)
+    first, ahead_first = queue.enter()
+    second, ahead_second = queue.enter()
+    third, ahead_third = queue.enter()
+    assert (ahead_first, ahead_second, ahead_third) == (0, 1, 2)
+
+    seen: list[str] = []
+
+    def take(token: object, label: str) -> None:
+        queue.wait(token)
+        seen.append(label)
+        queue.leave(token)
+
+    waiter_second = threading.Thread(target=take, args=(second, "second"))
+    waiter_third = threading.Thread(target=take, args=(third, "third"))
+    waiter_second.start()
+    waiter_third.start()
+    time.sleep(0.1)
+    assert seen == [], "only the head may proceed"
+    queue.leave(first)
+    waiter_second.join(timeout=2)
+    waiter_third.join(timeout=2)
+    assert seen == ["second", "third"]
+
+
+def test_queue_refuses_past_its_limit() -> None:
+    queue = sudo_broker._TurnQueue(limit=2)
+    assert queue.enter()[0] is not None
+    assert queue.enter()[0] is not None
+    token, ahead = queue.enter()
+    assert token is None
+    assert ahead == 2
+
+
+def test_client_that_disappears_while_queued_is_skipped() -> None:
+    holder, ahead = sudo_broker._turn_queue.enter()
+    assert holder is not None and ahead == 0
+    positions: list[int] = []
+    results: list[tuple[bool, str]] = []
+
+    def run() -> None:
+        results.append(
+            sudo_broker.approve(
+                (1234, 0, 0, "tester"),
+                "true",
+                "/",
+                on_queue=positions.append,
+                is_alive=lambda: False,
+            )
+        )
+
+    worker = threading.Thread(target=run)
     try:
-        ok, why = sudo_broker.approve((1234, 0, 0, "tester"), "true", "/")
+        worker.start()
+        deadline = time.monotonic() + 2
+        while not positions and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert positions == [1], "the waiter is told how many are ahead"
+        assert results == [], "it must wait for the head rather than prompt"
+        sudo_broker._turn_queue.leave(holder)
+        worker.join(timeout=2)
     finally:
-        sudo_broker._prompt_lock.release()
-    assert (ok, why) == (False, "another request is already pending")
+        sudo_broker._turn_queue.leave(holder)
+    assert results == [(False, "client disconnected while queued")]
+
+
+def test_peer_alive_detects_a_hung_up_client() -> None:
+    client, peer = socket.socketpair()
+    try:
+        assert sudo_broker.peer_alive(client)
+        peer.close()
+        deadline = time.monotonic() + 2
+        while sudo_broker.peer_alive(client) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not sudo_broker.peer_alive(client)
+    finally:
+        client.close()
 
 
 def test_request_raises_a_desktop_notification_at_focus() -> None:

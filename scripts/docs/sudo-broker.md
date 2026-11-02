@@ -23,6 +23,26 @@ or 30 minutes with nothing connected) removes the capability entirely. Enter or
 other input typed between prompts is discarded and refreshes the idle timer;
 it cannot become an implicit answer to the next request.
 
+## Requests queue up
+
+A second agent asking while a prompt is on screen is **not refused**: it waits
+its turn in arrival order. The operator still sees one prompt at a time, with
+`│ queue: N more waiting` under the command, and the waiting client prints
+`(sudo-broker: queued — N ahead)` so it is clear the request is in line rather
+than stuck.
+
+- Each request is still approved **individually**; nothing is batched, and one
+  `y` never answers two commands.
+- The queue is **memory-only** and bounded (`MAX_QUEUED`, 16). Past that a
+  request is refused with "too many requests are already pending" — a local
+  user cannot park unbounded waiting threads.
+- A client that disconnects while queued is skipped when its turn comes
+  (`DROPPED (client gone while queued)` in the log), never prompted for.
+- Queued requests have no timeout, exactly like the head; the idle exit waits
+  while anything is queued.
+- Approving a command does not serialise its *execution*: as before, the next
+  prompt can be answered while an approved command is still running.
+
 ## Temporarily accepting ordinary requests
 
 For a larger system rework, start the daemon with:

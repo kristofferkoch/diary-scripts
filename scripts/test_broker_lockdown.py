@@ -395,7 +395,12 @@ def test_sudo_break_glass_requires_confirmation_and_calls_only_controller(
         {"t": "state", "s": "approved", "as": "root"},
         {"t": "exit", "code": 0},
     ]
-    assert approvals == [{"require_confirmation": True}]
+    assert len(approvals) == 1
+    assert approvals[0]["require_confirmation"] is True
+    # The queue hooks are per-connection closures; only their presence is
+    # meaningful here.
+    assert callable(approvals[0]["on_queue"])
+    assert callable(approvals[0]["is_alive"])
     assert controller.requests == [{"cmd": "status"}, {"cmd": "break_glass"}]
     assert events[-1]["operation"] == "break_glass"
     assert events[-1]["decision"] == "allow"

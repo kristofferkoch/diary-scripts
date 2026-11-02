@@ -134,7 +134,11 @@ def main(argv: list[str]) -> int:
                     stream.flush()
                 elif kind == "state":
                     state = msg.get("s")
-                    if state == "approved":
+                    if state == "queued":
+                        ahead = int(msg.get("ahead", 0))
+                        print(f"(sudo-broker: queued — {ahead} ahead)",
+                              file=sys.stderr, flush=True)
+                    elif state == "approved":
                         ran_as = msg.get("as", "root")
                         suffix = "" if ran_as == "root" else f" as {ran_as}"
                         print(f"(sudo-broker: approved{suffix})", file=sys.stderr, flush=True)

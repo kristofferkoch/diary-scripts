@@ -29,6 +29,12 @@ terminal (stdin is /dev/null), and the whole capability disappears when the
 daemon exits (Ctrl-C, terminal closed, or idle timeout). There is no way to
 pre-authorise an individual command.
 
+Requests that arrive while a prompt is on screen now wait in arrival order
+instead of being refused: the operator sees one prompt at a time (with the
+number still waiting), each request is still approved individually, and the
+queue lives only in memory — a queued command can never outlive the daemon.
+A client that disconnects while queued is skipped when its turn comes.
+
 Protocol: newline-delimited JSON over an AF_UNIX stream socket; see sudo_ask.py
 for the client half. Every request is logged to stderr (your terminal) — pipe
 stderr to a file if you want an audit trail across sessions.
@@ -47,6 +53,7 @@ import subprocess
 import sys
 import threading
 import time
+from typing import Callable
 
 if __package__:
     from scripts import broker_audit
@@ -73,6 +80,57 @@ CHILD_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 _send_lock = threading.Lock()
 _prompt_lock = threading.Lock()
+
+#: Requests allowed to be pending at once (the head plus those waiting).
+#: The queue is in-memory on purpose: a request must never outlive the daemon.
+MAX_QUEUED = 16
+
+
+class _TurnQueue:
+    """FIFO of requests waiting for the operator's attention.
+
+    A request that arrives while a prompt is on screen waits its turn instead
+    of being refused. Only the head is printed and answered; the rest wait
+    without a timeout, exactly like a single request does.
+    """
+
+    def __init__(self, limit: int = MAX_QUEUED) -> None:
+        self._limit = limit
+        self._cond = threading.Condition()
+        self._order: list[object] = []
+
+    def enter(self) -> tuple[object | None, int]:
+        """Take a place in line; returns (token, requests ahead).
+
+        ``None`` means the queue is full — the caller is refused rather than
+        letting one local user accumulate unbounded waiting threads.
+        """
+        with self._cond:
+            if len(self._order) >= self._limit:
+                return None, len(self._order)
+            token = object()
+            self._order.append(token)
+            return token, len(self._order) - 1
+
+    def wait(self, token: object) -> None:
+        with self._cond:
+            while self._order and self._order[0] is not token:
+                self._cond.wait()
+
+    def leave(self, token: object) -> None:
+        with self._cond:
+            try:
+                self._order.remove(token)
+            except ValueError:
+                pass
+            self._cond.notify_all()
+
+    def __len__(self) -> int:
+        with self._cond:
+            return len(self._order)
+
+
+_turn_queue = _TurnQueue()
 
 
 def log(msg: str) -> None:
@@ -201,6 +259,19 @@ def peer_info(conn: socket.socket) -> tuple[int, int, int, str]:
     return pid, uid, gid, name
 
 
+def peer_alive(conn: socket.socket) -> bool:
+    """False when the client hung up while its request waited in the queue.
+
+    Readable + EOF means closed; readable with data (the client is not
+    supposed to send more) still counts as alive and is left unread.
+    """
+    try:
+        ready, _, _ = select.select([conn], [], [], 0)
+        return not ready or conn.recv(1, socket.MSG_PEEK) != b""
+    except OSError:
+        return False
+
+
 def send(conn: socket.socket, obj: dict) -> None:
     data = json.dumps(obj).encode() + b"\n"
     with _send_lock:
@@ -253,56 +324,73 @@ def approve(
     as_user: str = "root",
     *,
     require_confirmation: bool = False,
+    on_queue: Callable[[int], None] | None = None,
+    is_alive: Callable[[], bool] | None = None,
 ) -> tuple[bool, str]:
-    """Show the request and wait for an explicit y unless auto-accept is enabled.
+    """Queue for the operator, then show the request and wait for `y`.
 
-    Deliberately no answer timeout: being hurried is how a human approves
-    something they did not read. The request waits until it is answered or the
-    daemon goes away, and the bell keeps repeating in the meantime. Break-glass
-    sets require_confirmation so auto-accept can never unlock a locked agent.
+    Requests that arrive while a prompt is on screen wait in arrival order
+    instead of being refused. Only the head is printed and answered — each
+    request is still approved individually, nothing is batched, and there is
+    still no answer timeout. A client that vanished while queued is skipped
+    when its turn comes, rather than prompting for a command nobody waits for.
     """
     pid, uid, _gid, name = info
-    if not _prompt_lock.acquire(blocking=False):
-        return False, "another request is already pending"
+    token, ahead = _turn_queue.enter()
+    if token is None:
+        log(f"REFUSED (queue full, {ahead} pending): {cmd!r} from uid {uid}")
+        return False, "too many requests are already pending"
     try:
-        print("", flush=True)
-        print("┌─ sudo-broker " + "─" * 58, flush=True)
-        print(f"│ from : {name} (uid {uid}, pid {pid})", flush=True)
-        print(f"│ cwd  : {sanitize(cwd, 512)}", flush=True)
-        print(f"│ as   : {as_user}", flush=True)
-        print(f"│ run  : {sanitize(cmd)}", flush=True)
-        if AUTO_ACCEPT_ALL and not require_confirmation:
-            print("└─ AUTO-ACCEPT-ALL — running without confirmation", flush=True)
-            log(f"AUTO-APPROVED (as {as_user}): {cmd!r} from uid {uid} (cwd {cwd})")
+        if ahead and on_queue is not None:
+            on_queue(ahead)
+        if ahead:
+            log(f"QUEUED ({ahead} ahead): {cmd!r} from uid {uid}")
+        _turn_queue.wait(token)
+        if is_alive is not None and not is_alive():
+            log(f"DROPPED (client gone while queued): {cmd!r} from uid {uid}")
+            return False, "client disconnected while queued"
+        with _prompt_lock:
+            print("", flush=True)
+            print("┌─ sudo-broker " + "─" * 58, flush=True)
+            print(f"│ from : {name} (uid {uid}, pid {pid})", flush=True)
+            print(f"│ cwd  : {sanitize(cwd, 512)}", flush=True)
+            print(f"│ as   : {as_user}", flush=True)
+            print(f"│ run  : {sanitize(cmd)}", flush=True)
+            waiting = len(_turn_queue) - 1
+            if waiting:
+                print(f"│ queue: {waiting} more waiting", flush=True)
+            if AUTO_ACCEPT_ALL and not require_confirmation:
+                print("└─ AUTO-ACCEPT-ALL — running without confirmation", flush=True)
+                log(f"AUTO-APPROVED (as {as_user}): {cmd!r} from uid {uid} (cwd {cwd})")
+                return True, ""
+            print("│ no timeout — answer when you have read it", flush=True)
+            print("└─ approve? [y/N] ", end="", flush=True)
+            notify(
+                f"sudo-broker: approval requested (as {as_user})",
+                f"{name} (uid {uid}) wants to run: {cmd}",
+            )
+            bell()
+            answer = None
+            while answer is None:
+                ready, _, _ = select.select([sys.stdin], [], [], BELL_INTERVAL)
+                if ready:
+                    answer = (
+                        os.read(sys.stdin.fileno(), 4096)
+                        .decode("utf-8", "replace")
+                        .strip()
+                        .lower()
+                    )
+                else:
+                    bell()  # still unanswered — nudge the terminal again
+            if answer not in ("y", "yes"):
+                print("(sudo-broker: denied)", flush=True)
+                log(f"DENIED (operator said no): {cmd!r} from uid {uid}")
+                return False, "denied by operator"
+            print("(sudo-broker: approved — running)", flush=True)
+            log(f"APPROVED (as {as_user}): {cmd!r} from uid {uid} (cwd {cwd})")
             return True, ""
-        print("│ no timeout — answer when you have read it", flush=True)
-        print("└─ approve? [y/N] ", end="", flush=True)
-        notify(
-            f"sudo-broker: approval requested (as {as_user})",
-            f"{name} (uid {uid}) wants to run: {cmd}",
-        )
-        bell()
-        answer = None
-        while answer is None:
-            ready, _, _ = select.select([sys.stdin], [], [], BELL_INTERVAL)
-            if ready:
-                answer = (
-                    os.read(sys.stdin.fileno(), 4096)
-                    .decode("utf-8", "replace")
-                    .strip()
-                    .lower()
-                )
-            else:
-                bell()  # still unanswered — nudge the terminal again
-        if answer not in ("y", "yes"):
-            print("(sudo-broker: denied)", flush=True)
-            log(f"DENIED (operator said no): {cmd!r} from uid {uid}")
-            return False, "denied by operator"
-        print("(sudo-broker: approved — running)", flush=True)
-        log(f"APPROVED (as {as_user}): {cmd!r} from uid {uid} (cwd {cwd})")
-        return True, ""
     finally:
-        _prompt_lock.release()
+        _turn_queue.leave(token)
 
 
 def execute(conn: socket.socket, cmd: str, cwd: str, target: pwd.struct_passwd) -> None:
@@ -376,6 +464,12 @@ def handle(
         info = peer_info(conn)
         caller = {"pid": info[0], "uid": info[1], "gid": info[2]}
 
+        def queued(ahead: int) -> None:
+            send(conn, {"t": "state", "s": "queued", "ahead": ahead})
+
+        def still_connected() -> bool:
+            return peer_alive(conn)
+
         def allowed(operation: str) -> bool:
             return broker_audit.authorize(
                 "sudo-broker",
@@ -416,6 +510,8 @@ def handle(
                 "/usr/local/bin/diary-lock break-glass",
                 cwd,
                 require_confirmation=True,
+                on_queue=queued,
+                is_alive=still_connected,
             )
             if not ok:
                 send(conn, {"t": "state", "s": "denied", "msg": why})
@@ -447,7 +543,8 @@ def handle(
             send(conn, {"t": "state", "s": "denied", "msg": problem})
             log(f"DENIED (identity): {as_user!r} requested for {cmd!r}")
             return
-        ok, why = approve(info, cmd, cwd, as_user=target.pw_name)
+        ok, why = approve(info, cmd, cwd, as_user=target.pw_name,
+                          on_queue=queued, is_alive=still_connected)
         if not ok:
             send(conn, {"t": "state", "s": "denied", "msg": why})
             return
@@ -525,7 +622,7 @@ def main() -> int:
             if not ready:
                 # A prompt waiting for the human keeps the daemon alive: the
                 # idle exit must not pull the socket out from under it.
-                if _prompt_lock.locked():
+                if _prompt_lock.locked() or len(_turn_queue):
                     continue
                 if time.monotonic() - last_activity > IDLE_EXIT:
                     log("idle timeout — exiting")
