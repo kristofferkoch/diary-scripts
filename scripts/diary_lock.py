@@ -635,15 +635,27 @@ class SystemdUser:
             raise SystemdUnavailable("could not recover the agent user manager") from exc
 
     def ensure_manager(self) -> None:
-        try:
-            self.all_scopes()
-            return
-        except SystemdUnavailable:
-            pass
-        uid = os.geteuid() if self.user is None else pwd.getpwnam(self.user).pw_uid
-        result = self._run_system(["start", f"user@{uid}.service"])
-        if result.returncode != 0:
-            raise SystemdUnavailable("could not recover the agent user manager")
+        manager_alive = False
+        pid = self.manager_pid()
+        if pid is not None:
+            try:
+                identity = process_identity(pid)
+            except LockError:
+                if Path(f"/proc/{pid}").exists():
+                    raise
+            else:
+                uid = os.geteuid() if self.user is None else pwd.getpwnam(self.user).pw_uid
+                if identity.uid != uid:
+                    raise LockError("agent user manager has an unexpected UID")
+                manager_alive = True
+        if not manager_alive:
+            uid = os.geteuid() if self.user is None else pwd.getpwnam(self.user).pw_uid
+            result = self._run_system(["start", f"user@{uid}.service"])
+            if result.returncode != 0:
+                raise SystemdUnavailable("could not recover the agent user manager")
+        if self.socket_unit is not None:
+            self.ensure_service(self.socket_unit)
+        self.ensure_service(self.broker_unit)
         for _attempt in range(100):
             try:
                 self.all_scopes()

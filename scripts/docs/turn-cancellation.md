@@ -79,23 +79,26 @@ durable `LOCKING`, never `LOCKED`. If the user manager itself is unavailable
 but PID containment proves no eligible workload remains, lock may complete in
 degraded mode.
 
-Before attended mode or its egress policy is activated, unlock explicitly
-checks and, if necessary, starts `user@<uid>.service` through the system
-manager; it never kills the manager to recover it. The controller immediately
-re-pins and verifies the replacement manager's identity. Manager startup may
-activate `default.target` and its enabled web services. The controller first
-quiesces all auto-started services and scopes and requires every workload to
-be inactive and every eligible process gone; it never attends the auto-started
-PIDs. It then explicitly restores `dbus.socket` followed by
-`dbus-broker.service`, verifying both before starting each DSH/Kimi service
-and verifying a fresh supervisor PID, fresh runtime PID, and valid pinned
-parentage. Only after all services pass does the controller activate attended
-mode. A fresh service that accepts a prompt while durable state is still
-`LOCKING` follows the failsafe path above; there is no replay. The controller
-never opens or edits runtime conversation files. DSH persists an interrupted
-turn and requires a new user message to continue; the controlled verification
-below must prove the same no-auto-resume behavior for the deployed DSH/Kimi
-versions.
+Before attended mode or its egress policy is activated, unlock distinguishes
+an alive manager with a stopped bus from an actual manager outage through the
+system-manager MainPID and `/proc` identity. It never starts a second manager.
+`systemctl --user` uses systemd's private manager channel, not the stopped
+public bus, to restore `dbus.socket` and then `dbus-broker.service` before any
+user-bus readiness operation. Only an actually missing manager is started once
+through `user@<uid>.service`, followed by the same socket/broker restoration.
+The controller immediately re-pins and verifies the replacement manager's
+identity. Manager startup may activate `default.target` and its enabled web
+services. The controller first quiesces all auto-started services and scopes
+and requires every workload to be inactive and every eligible process gone;
+it never attends the auto-started PIDs. Socket and broker are verified again
+before starting each DSH/Kimi service and verifying a fresh supervisor PID,
+fresh runtime PID, and valid pinned parentage. Only after all services pass
+does the controller activate attended mode. A fresh service that accepts a
+prompt while durable state is still `LOCKING` follows the failsafe path above;
+there is no replay. The controller never opens or edits runtime conversation
+files. DSH persists an interrupted turn and requires a new user message to
+continue; the controlled verification below must prove the same no-auto-resume
+behavior for the deployed DSH/Kimi versions.
 
 ## LATER-03 migration contract
 
@@ -159,7 +162,11 @@ attached-workload regressions require those PIDs to remain eligible.
 A second opt-in probe starts only a uniquely named synthetic broker with a Unix
 listener. Final quiescence kills its PID and removes the listener from
 `/proc/net/unix` without any subsequent user-bus call. It never touches the
-live D-Bus service or socket.
+live D-Bus service or socket. A third probe uses linked test-only socket and
+broker units with the live manager: ordinary unlock restores the stopped socket
+through systemd's private manager channel, starts the broker, preserves the
+manager PID, and proves the listener is active. The real outage path remains
+separate.
 
 The ordinary suite performs a real PID-level user-manager-outage test with an
 allow-list containing only its two synthetic PIDs. It verifies the `/proc` and
@@ -198,9 +205,11 @@ For each runtime:
    interrupted turn, not successful completion of the cancelled tool.
 5. Confirm ordinary lock preserved the manager while D-Bus and all workload
    services stopped. Verify no subsequent call reactivates broker or socket.
-   Before attended egress opens, confirm old services are inactive and no stale
-   scope/process survives. Confirm socket then broker are restored first,
-   followed by fresh supervisor/runtime PIDs and a working web UI. Wait for
+   With the manager still alive and its PID unchanged, restore socket through
+   systemd's private channel before any user-bus readiness call, then restore
+   the broker. Before attended egress opens, confirm old services are inactive
+   and no stale scope/process survives, followed by fresh supervisor/runtime
+   PIDs and a working web UI. Wait for
    background completion and verify no cancelled tool or model turn resumes
    and no blocked operation is replayed.
 6. Start a new explicit turn and verify it receives a new scope and finishes

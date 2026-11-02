@@ -67,6 +67,8 @@ class FakeSystemd:
                 self.pids[service] = self.pids.get(service, 3001) + 1
                 self.membership[service] = {self.pids[service]}
                 self.auto_started_pids.append((self.supervisor_pids[service], self.pids[service]))
+        self.ensure_service(self.socket_unit)
+        self.ensure_service(self.broker_unit)
 
     def identity(self, pid: int, ppid: int = 1) -> lock.ProcessIdentity:
         return lock.ProcessIdentity(pid, ppid, pid * 100, os.geteuid())
@@ -327,8 +329,9 @@ def test_attend_quiesces_stale_service_and_rejects_reused_fresh_pids() -> None:
 
     def reuse(service: str) -> None:
         original(service)
-        fake.supervisor_pids[service] -= 1
-        fake.pids[service] -= 1
+        if service in {"dsh-web.service", "kimi-web.service"}:
+            fake.supervisor_pids[service] -= 1
+            fake.pids[service] -= 1
 
     cast(Any, fake).start = reuse
     with pytest.raises(lock.LockError, match="reused a supervisor or runtime PID"):
@@ -915,5 +918,46 @@ time.sleep(300)
         assert str(socket_path) not in Path("/proc/net/unix").read_text()
     finally:
         subprocess.run(["/usr/bin/systemctl", "--user", "stop", service], check=False)
+        socket_path.unlink(missing_ok=True)
+        shutil.rmtree(state_dir, ignore_errors=True)
+
+
+@pytest.mark.skipif(os.environ.get("DIARY_TEST_SYSTEMD_USER") != "1", reason="opt-in synthetic user units")
+def test_real_ordinary_unlock_restores_socket_and_broker_with_live_manager() -> None:
+    tag = uuid.uuid4().hex
+    socket_unit = f"diary-bus-recovery-{tag}.socket"
+    broker_unit = f"diary-bus-recovery-{tag}.service"
+    socket_path = Path(f"/tmp/diary-recovery-{tag}.sock")
+    state_dir = Path.cwd() / ".pytest-systemd" / tag
+    state_dir.mkdir(parents=True)
+    unit_file = state_dir / socket_unit
+    unit_file.write_text(f"[Socket]\nListenStream={socket_path}\n")
+    broker_file = state_dir / broker_unit
+    broker_file.write_text("[Service]\nExecStart=/usr/bin/sleep 300\nRestart=no\n")
+    subprocess.run(["/usr/bin/systemctl", "--user", "link", str(unit_file), str(broker_file)], check=True)
+    subprocess.run(["/usr/bin/systemctl", "--user", "daemon-reload"], check=True)
+    subprocess.run(["/usr/bin/systemctl", "--user", "start", socket_unit], check=True)
+    subprocess.run([
+        "/usr/bin/systemctl", "--user", "stop", broker_unit, socket_unit,
+    ], check=True, capture_output=True, text=True, timeout=20)
+    systemd = lock.SystemdUser(
+        None, broker_unit=broker_unit, socket_unit=socket_unit,
+        socket_path=str(socket_path),
+    )
+    manager_before = systemd.manager_pid()
+    try:
+        assert not systemd.active(socket_unit)
+        assert not systemd.active(broker_unit)
+        systemd.ensure_manager()
+        assert systemd.manager_pid() == manager_before
+        assert systemd.active(socket_unit)
+        assert systemd.active(broker_unit)
+        assert str(socket_path) in Path("/proc/net/unix").read_text()
+    finally:
+        subprocess.run([
+            "/usr/bin/systemctl", "--user", "stop", broker_unit, socket_unit,
+        ], check=False, capture_output=True)
+        subprocess.run(["/usr/bin/systemctl", "--user", "disable", socket_unit, broker_unit], check=False)
+        subprocess.run(["/usr/bin/systemctl", "--user", "daemon-reload"], check=False)
         socket_path.unlink(missing_ok=True)
         shutil.rmtree(state_dir, ignore_errors=True)
