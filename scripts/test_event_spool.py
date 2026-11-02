@@ -289,3 +289,67 @@ def test_temp_is_unlinked_before_directory_fsync_crash(
     assert path.stat().st_nlink == 1
     assert spool.read(item["event_id"]) == item
     assert list(spool.root.glob("*.tmp")) == []
+
+
+def test_crash_between_link_and_unlink_is_repaired_on_the_next_write(spool: EventSpool):
+    """A crash after the final link but before the temp unlink must not wedge the entry."""
+    item = event()
+    assert spool.write(item) == "written"
+    path = spool.path_for(item["event_id"])
+    leftover = spool.root / f".{item['event_id']}.{os.getpid()}.0123456789abcdef.tmp"
+    os.link(path, leftover)
+    with pytest.raises(EventValidationError, match="single-link"):
+        spool.read(item["event_id"])
+    assert spool.write(item) == "duplicate"
+    assert not leftover.exists()
+    assert path.stat().st_nlink == 1
+    assert spool.read(item["event_id"]) == item
+
+
+def test_repair_leaves_foreign_or_legitimate_links_alone(spool: EventSpool):
+    """The repair may only remove a temp-named link to the committed event."""
+    item = event()
+    assert spool.write(item) == "written"
+    path = spool.path_for(item["event_id"])
+    legitimate = spool.root / "copy.keep"
+    os.link(path, legitimate)
+    foreign = spool.root / f".{item['event_id']}.{os.getpid()}.0123456789abcdef.tmp"
+    foreign.write_bytes(b"not the committed event")
+    with pytest.raises(EventValidationError, match="single-link"):
+        spool.write(item)
+    assert foreign.read_bytes() == b"not the committed event"
+    assert legitimate.exists()
+    assert path.stat().st_nlink == 2
+
+
+def test_repair_does_not_unlink_a_symlinked_temp(spool: EventSpool):
+    item = event()
+    assert spool.write(item) == "written"
+    path = spool.path_for(item["event_id"])
+    legitimate = spool.root / "copy.keep"
+    os.link(path, legitimate)
+    trap = spool.root / f".{item['event_id']}.{os.getpid()}.0123456789abcdef.tmp"
+    os.symlink(path, trap)
+    with pytest.raises(EventValidationError, match="single-link"):
+        spool.write(item)
+    assert trap.is_symlink()
+    assert os.readlink(trap) == str(path)
+    assert legitimate.exists()
+    with pytest.raises(EventValidationError, match="single-link"):
+        spool.read(item["event_id"])
+
+
+def test_repair_removes_every_leftover_temp_link(spool: EventSpool):
+    item = event()
+    assert spool.write(item) == "written"
+    path = spool.path_for(item["event_id"])
+    leftovers = [
+        spool.root / f".{item['event_id']}.{os.getpid()}.{'0' * 15}{index}.tmp"
+        for index in (1, 2)
+    ]
+    for leftover in leftovers:
+        os.link(path, leftover)
+    assert spool.write(item) == "duplicate"
+    assert not any(leftover.exists() for leftover in leftovers)
+    assert path.stat().st_nlink == 1
+    assert spool.read(item["event_id"]) == item

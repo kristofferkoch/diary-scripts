@@ -228,24 +228,47 @@ def export_mail(
     state_dir.chmod(0o700)
     journal = MailJournal(state_dir / "mail-event-journal.json")
     spool = EventSpool(spool_path)
-    counts = {"written": 0, "duplicate": 0, "failed": 0, "quarantined": 0, "retry": 0}
+    counts = {
+        "written": 0, "duplicate": 0, "failed": 0, "quarantined": 0, "retry": 0,
+        "dropped": 0,
+    }
     discovered = set(search_messages("tag:inbox"))
 
+    # Resolve every candidate first, then persist the pending IDs once before
+    # any spool write. Rewriting the whole journal per message would turn a
+    # steady-state schedule into thousands of fsynced rewrites per run.
+    work: list[tuple[str, list[str]]] = []
+    journal_dirty = False
     for message_id in sorted(discovered | set(journal.pending)):
         try:
             current_files = message_files(message_id)
         except (OSError, subprocess.SubprocessError, ValueError):
-            journal.pending.setdefault(message_id, "")
-            journal.save()
+            if message_id not in journal.pending:
+                journal.pending[message_id] = ""
+                journal_dirty = True
             counts["retry"] += 1
+            continue
+        if not current_files:
+            # The message is gone from the store; nothing remains to export.
+            # Keeping it pending would re-query it on every schedule forever.
+            if journal.pending.pop(message_id, None) is not None:
+                journal_dirty = True
+                counts["dropped"] += 1
             continue
         paths = canonical_inbox_files(current_files) if message_id in discovered else current_files
         if not paths:
             if message_id in journal.pending:
                 counts["retry"] += 1
             continue
-        journal.pending.setdefault(message_id, "")
+        if message_id not in journal.pending:
+            journal.pending[message_id] = ""
+            journal_dirty = True
+        work.append((message_id, paths))
+    if journal_dirty:
         journal.save()
+
+    finished: list[str] = []
+    for message_id, paths in work:
         transient = False
         for mail_path in paths:
             failed_key = quarantine_key(message_id, mail_path)
@@ -269,11 +292,14 @@ def export_mail(
             if event["event_id"] not in completed:
                 completed.append(event["event_id"])
                 completed.sort()
-            journal.save()
+                journal.save()
             counts[status] += 1
         if not transient:
+            finished.append(message_id)
+    if finished:
+        for message_id in finished:
             journal.pending.pop(message_id, None)
-            journal.save()
+        journal.save()
     return counts
 
 
@@ -286,7 +312,8 @@ def main(argv: list[str] | None = None) -> int:
     counts = export_mail(args.spool, args.state_dir)
     print(
         f"mail events: written={counts['written']} duplicate={counts['duplicate']} "
-        f"failed={counts['failed']} quarantined={counts['quarantined']} retry={counts['retry']}"
+        f"failed={counts['failed']} quarantined={counts['quarantined']} "
+        f"retry={counts['retry']} dropped={counts['dropped']}"
     )
     return 0
 

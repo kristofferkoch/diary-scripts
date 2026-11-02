@@ -25,6 +25,7 @@ SOURCES = frozenset({"mail", "spond", "vigilo", "skolemelding"})
 MAX_EVENT_BYTES = 2 * 1024 * 1024
 MAX_TEXT = MAX_EVENT_BYTES
 EVENT_ID_RE = re.compile(r"evt_[0-9a-f]{64}\Z")
+TEMP_NAME_RE = re.compile(r"\.(evt_[0-9a-f]{64})\.\d+\.[0-9a-f]+\.tmp\Z")
 KIND_RE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 REVISION_RE = re.compile(r"(?:notmuch-v1|sha256:[0-9a-f]{64})\Z")
 EVENT_FIELDS = frozenset({
@@ -237,15 +238,56 @@ class EventSpool:
         finally:
             os.close(dir_fd)
 
+    def _discard_stale_temp_links(self, dir_fd: int, event_id: str) -> bool:
+        """Remove crash leftovers that keep a committed event above one link.
+
+        A crash between the final ``os.link`` and the temp unlink leaves the
+        immutable event with two links, which the reader rejects. Only a temp
+        for this event whose inode is the committed event is removed, and only
+        after the normal retry window has passed, so a live writer is not
+        racing with the repair.
+        """
+        try:
+            info = os.stat(self._filename(event_id), dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink < 2:
+            return False
+        removed = False
+        for candidate in os.listdir(dir_fd):
+            match = TEMP_NAME_RE.fullmatch(candidate)
+            if match is None or match.group(1) != event_id:
+                continue
+            try:
+                temp_info = os.stat(candidate, dir_fd=dir_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if (temp_info.st_dev, temp_info.st_ino) != (info.st_dev, info.st_ino):
+                continue
+            try:
+                os.unlink(candidate, dir_fd=dir_fd)
+            except FileNotFoundError:
+                continue
+            removed = True
+        if removed:
+            os.fsync(dir_fd)
+        return removed
+
     def _read_for_write(self, dir_fd: int, event_id: str) -> dict[str, Any]:
         deadline = time.monotonic() + 1.0
+        repaired = False
         while True:
             try:
                 return self._read_at(dir_fd, event_id)
             except EventValidationError as exc:
-                if "single-link" not in str(exc) or time.monotonic() >= deadline:
+                if "single-link" not in str(exc):
                     raise
-                time.sleep(0.001)
+                if time.monotonic() < deadline:
+                    time.sleep(0.001)
+                    continue
+                if repaired or not self._discard_stale_temp_links(dir_fd, event_id):
+                    raise
+                repaired = True
 
     def write(self, event: dict[str, Any]) -> str:
         validate_event(event)
@@ -291,7 +333,11 @@ class EventSpool:
                 if existing != event:
                     raise EventConflictError(f"immutable event conflict: {event_id}")
                 return "duplicate"
-            os.unlink(temp_name, dir_fd=dir_fd)
+            try:
+                os.unlink(temp_name, dir_fd=dir_fd)
+            except FileNotFoundError:
+                # A stalled writer's temp may already have been repaired away.
+                pass
             temp_name = None
             os.fsync(dir_fd)
             return "written"

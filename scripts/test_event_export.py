@@ -218,6 +218,84 @@ def test_deterministic_bad_message_is_quarantined_without_blocking_or_repeating(
     ]
 
 
+
+
+@pytest.mark.parametrize("message_count", [8, 64])
+def test_steady_state_export_does_not_rewrite_the_journal_per_message(
+    spool_path: Path, state_dir: Path, monkeypatch: pytest.MonkeyPatch, message_count: int,
+):
+    """A no-change schedule must not fsync the whole journal once per message.
+
+    The old loop saved three times per message (pending, every completed write,
+    and the pending pop); the run-wide count must stay flat as the mailbox grows.
+    """
+    messages = {
+        f"m{i}@example.test": [f"/mail/INBOX/{i}"] for i in range(message_count)
+    }
+    raws = {
+        f"/mail/INBOX/{i}": raw_mail(message_id=f"m{i}@example.test")
+        for i in range(message_count)
+    }
+    export_with(spool_path, state_dir, messages, raws)
+    saves = []
+    original = MailJournal.save
+    monkeypatch.setattr(
+        MailJournal, "save", lambda self: (saves.append(1), original(self))[1],
+    )
+    counts = export_with(spool_path, state_dir, messages, raws)
+    assert counts["duplicate"] == message_count
+    assert len(saves) <= 2
+
+
+def test_pending_is_on_disk_before_the_first_spool_write(
+    spool_path: Path, state_dir: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """A crash may lose an event to re-export, never journal a write that did not happen."""
+    messages = {"a@example.test": ["/mail/INBOX/a"]}
+    raws = {"/mail/INBOX/a": raw_mail(message_id="a@example.test")}
+    journal_path = state_dir / "mail-event-journal.json"
+
+    def crash_before_write(self, event):
+        on_disk = MailJournal(journal_path)
+        assert "a@example.test" in on_disk.pending
+        assert "a@example.test" not in on_disk.completed
+        raise OSError("simulated crash before spool write")
+
+    monkeypatch.setattr(EventSpool, "write", crash_before_write)
+    with pytest.raises(OSError, match="simulated crash"):
+        export_with(spool_path, state_dir, messages, raws)
+    assert list(EventSpool(spool_path)) == []
+    assert list(MailJournal(journal_path).pending) == ["a@example.test"]
+
+    monkeypatch.undo()
+    counts = export_with(spool_path, state_dir, messages, raws)
+    assert counts["written"] == 1
+    assert not MailJournal(journal_path).pending
+
+
+def test_pending_message_that_no_longer_exists_is_dropped_not_retried(
+    spool_path: Path, state_dir: Path,
+):
+    """A deleted message must not stay in `pending` and be re-queried forever."""
+    messages = {"gone@example.test": ["/mail/INBOX/gone"]}
+
+    def temporary(path: str) -> bytes:
+        raise TimeoutError("temporary database timeout")
+
+    first = export_with(spool_path, state_dir, messages, {}, raw_fetcher=temporary)
+    assert first["retry"] == 1
+    journal_path = state_dir / "mail-event-journal.json"
+    assert list(MailJournal(journal_path).pending) == ["gone@example.test"]
+
+    messages["gone@example.test"] = []
+    second = export_with(spool_path, state_dir, messages, {}, discovered=[])
+    assert second["dropped"] == 1 and second["retry"] == 0
+
+    journal = MailJournal(journal_path)
+    assert not journal.pending and not journal.failed
+    assert list(EventSpool(spool_path)) == []
+
+
 def test_direct_raw_reader_handles_spaces_and_enforces_limit(tmp_path: Path, monkeypatch):
     path = tmp_path / "mail with spaces.eml"
     path.write_bytes(raw_mail())
