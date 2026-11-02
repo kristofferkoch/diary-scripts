@@ -176,6 +176,72 @@ def clean(repo: Path, *, safe: bool = False) -> bool:
     ).stdout.strip()
 
 
+GITLINK_MODE = "160000"
+
+
+def gitlink(repo: Path, rev: str, name: str = "diary-scripts") -> str | None:
+    """Return the submodule commit recorded at ``rev``, or None when absent."""
+    out = git(repo, "ls-tree", rev, "--", name).stdout.strip()
+    if not out:
+        return None
+    fields = out.split()
+    if len(fields) < 3 or fields[0] != GITLINK_MODE:
+        raise QueueError(f"{rev} has a non-submodule entry for {name}")
+    return fields[2]
+
+
+def guard_diary_submodule(
+    paths: QueuePaths, reviewed: str, *, scripts_approved: Path | None = None
+) -> bool:
+    """Keep the diary ``diary-scripts`` pointer forward-only.
+
+    Returns True when the approval must be forced to ``--no-ff`` so that a
+    stale branch which never touched the submodule does not carry its old
+    pointer over master's newer one. Raises when the branch explicitly moves
+    the pointer to an unapproved commit, or backwards.
+
+    A fast-forward copies the reviewed tree verbatim, so a branch forked
+    before a pointer bump silently reverts it. (2026-11-02: a branch recorded
+    its fork-point pointer and dropped the sjekk-cursor change from ``master``
+    even though the approved scripts repo still had it.) A 3-way merge keeps
+    master's value when the branch left the entry alone, which ``--no-ff``
+    gives us; an explicit change must be a descendant of the current pointer
+    in the approved scripts repo.
+    """
+    current = gitlink(paths.approved, "master")
+    if current is None:  # not the diary repository
+        return False
+    proposed = gitlink(paths.approved, reviewed)
+    if proposed is None:
+        raise QueueError("reviewed diary commit has no diary-scripts entry")
+    if proposed == current:
+        return False
+
+    base = git(paths.approved, "merge-base", "master", reviewed).stdout.strip()
+    base_pointer = gitlink(paths.approved, base)
+    if proposed == base_pointer:
+        print(
+            "agent-merge: branch predates a diary-scripts bump "
+            f"({proposed[:8]}); keeping master's {current[:8]}"
+        )
+        return True
+
+    scripts = scripts_approved or paths_for("scripts").approved
+    if git(scripts, "cat-file", "-e", f"{proposed}^{{commit}}", check=False).returncode:
+        raise QueueError(
+            f"diary-scripts {proposed[:8]} is not an approved commit; "
+            "approve the scripts change first"
+        )
+    if git(scripts, "merge-base", "--is-ancestor", current, proposed,
+           check=False).returncode:
+        raise QueueError(
+            "diary-scripts pointer would move backwards "
+            f"({current[:8]} -> {proposed[:8]}); rebase on current master and "
+            "re-apply the bump"
+        )
+    return False
+
+
 def worktree_branch(repo: Path, branch: str) -> Path | None:
     out = git(repo, "worktree", "list", "--porcelain", safe=True).stdout
     path: Path | None = None
@@ -440,7 +506,10 @@ def publish_fetched(
     print(f"agent-merge: publishing {reviewed} into master (was {base})")
     print(git(paths.approved, "diff", "--stat", f"master...{reviewed}").stdout, end="")
     enforce_expected_base(paths, expected_base)
-    if git(paths.approved, "merge-base", "--is-ancestor", "master", reviewed, check=False).returncode == 0:
+    keep_pointer = guard_diary_submodule(paths, reviewed)
+    if (not keep_pointer
+            and git(paths.approved, "merge-base", "--is-ancestor", "master",
+                    reviewed, check=False).returncode == 0):
         git(paths.approved, "merge", "--ff-only", reviewed)
     else:
         proc = git(paths.approved, "merge", "--no-ff", "--no-edit", "-m", "approve queued changes", reviewed, check=False)

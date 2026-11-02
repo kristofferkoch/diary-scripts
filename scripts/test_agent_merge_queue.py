@@ -673,3 +673,138 @@ def test_sync_venv_still_fails_when_the_approved_checkout_fails(
     )
     with pytest.raises(amq.QueueError):
         REAL_SYNC_VENV(paths)
+
+
+# ---------- diary-scripts pointer: forward-only on approval ----------
+
+
+def _gitlink(repo: Path) -> str | None:
+    out = run("git", "ls-tree", "master", "--", "diary-scripts", cwd=repo)
+    return out.split()[2] if out else None
+
+
+def _set_gitlink(repo: Path, sha: str, message: str) -> str:
+    run("git", "update-index", "--add", "--cacheinfo",
+        f"160000,{sha},diary-scripts", cwd=repo)
+    run("git", "commit", "-m", message, cwd=repo)
+    return run("git", "rev-parse", "HEAD", cwd=repo)
+
+
+@pytest.fixture
+def diary_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    scripts = tmp_path / "scripts-approved"
+    scripts.mkdir()
+    run("git", "init", "-b", "master", cwd=scripts)
+    run("git", "config", "user.name", "Queue Test", cwd=scripts)
+    run("git", "config", "user.email", "queue@example.invalid", cwd=scripts)
+    commit(scripts, "s.txt", "s1\n")
+    s1 = run("git", "rev-parse", "HEAD", cwd=scripts)
+    commit(scripts, "s.txt", "s2\n")
+    s2 = run("git", "rev-parse", "HEAD", cwd=scripts)
+    commit(scripts, "s.txt", "s3\n")
+    s3 = run("git", "rev-parse", "HEAD", cwd=scripts)
+
+    approved = tmp_path / "diary-approved"
+    approved.mkdir()
+    run("git", "init", "-b", "master", cwd=approved)
+    run("git", "config", "user.name", "Queue Test", cwd=approved)
+    run("git", "config", "user.email", "queue@example.invalid", cwd=approved)
+    commit(approved, "README.md", "diary\n")
+    d1 = _set_gitlink(approved, s1, "pointer s1")
+    d2 = _set_gitlink(approved, s2, "pointer s2")
+
+    integration = tmp_path / "diary"
+    source = tmp_path / "source"
+    for repo in (integration, source):
+        run("git", "clone", "--no-hardlinks", str(approved), str(repo))
+        run("git", "config", "user.name", "Queue Test", cwd=repo)
+        run("git", "config", "user.email", "queue@example.invalid", cwd=repo)
+
+    review_config = tmp_path / "review.toml"
+    review_config.write_text('[review]\nmodel = "local-test"\n')
+    paths = amq.QueuePaths(
+        integration=integration,
+        approved=approved,
+        queue=tmp_path / "diary-automatic",
+        worktrees=tmp_path / "diary-worktrees",
+        lock=tmp_path / "queue.lock",
+        review_config=review_config,
+    )
+    monkeypatch.setattr(amq, "paths_for", lambda repo: amq.QueuePaths(
+        integration=integration,
+        approved=scripts if repo == "scripts" else approved,
+        queue=paths.queue,
+        worktrees=paths.worktrees,
+        lock=paths.lock,
+        review_config=review_config,
+    ))
+    return SimpleNamespace(paths=paths, scripts=scripts, source=source,
+                           approved=approved, integration=integration,
+                           s1=s1, s2=s2, s3=s3, d1=d1, d2=d2)
+
+
+def _fetch(env: SimpleNamespace, branch: str) -> str:
+    run("git", "fetch", str(env.source), branch, cwd=env.approved)
+    return run("git", "rev-parse", "FETCH_HEAD", cwd=env.approved)
+
+
+def test_stale_branch_never_reverts_the_pointer(diary_env: SimpleNamespace):
+    """A branch forked before a bump and left alone must not ff the old pointer."""
+    env = diary_env
+    run("git", "checkout", "-b", "dev/stale", env.d1, cwd=env.source)
+    commit(env.source, "note.txt", "keep\n")
+    reviewed = _fetch(env, "dev/stale")
+
+    assert amq.guard_diary_submodule(
+        env.paths, reviewed, scripts_approved=env.scripts) is True
+    assert amq.publish_fetched(
+        reviewed, env.paths, push=False, sync_environment=False,
+        synchronize_queue=False) is True
+    assert _gitlink(env.approved) == env.s2
+    assert (env.approved / "note.txt").read_text() == "keep\n"
+
+
+def test_explicit_backwards_pointer_is_rejected(diary_env: SimpleNamespace):
+    env = diary_env
+    run("git", "checkout", "-b", "dev/backwards", "master", cwd=env.source)
+    _set_gitlink(env.source, env.s1, "regress pointer")
+    reviewed = _fetch(env, "dev/backwards")
+
+    with pytest.raises(amq.QueueError, match="backwards"):
+        amq.guard_diary_submodule(env.paths, reviewed, scripts_approved=env.scripts)
+    with pytest.raises(amq.QueueError, match="backwards"):
+        amq.publish_fetched(reviewed, env.paths, push=False,
+                            sync_environment=False, synchronize_queue=False)
+    assert _gitlink(env.approved) == env.s2
+
+
+def test_explicit_forward_pointer_is_allowed(diary_env: SimpleNamespace):
+    env = diary_env
+    run("git", "checkout", "-b", "dev/forward", "master", cwd=env.source)
+    _set_gitlink(env.source, env.s3, "advance pointer")
+    reviewed = _fetch(env, "dev/forward")
+
+    assert amq.guard_diary_submodule(
+        env.paths, reviewed, scripts_approved=env.scripts) is False
+    assert amq.publish_fetched(
+        reviewed, env.paths, push=False, sync_environment=False,
+        synchronize_queue=False) is True
+    assert _gitlink(env.approved) == env.s3
+
+
+def test_pointer_to_unapproved_scripts_commit_is_rejected(diary_env: SimpleNamespace):
+    env = diary_env
+    fake = "0" * 39 + "1"
+    run("git", "checkout", "-b", "dev/unknown", "master", cwd=env.source)
+    _set_gitlink(env.source, fake, "unknown pointer")
+    reviewed = _fetch(env, "dev/unknown")
+
+    with pytest.raises(amq.QueueError, match="not an approved commit"):
+        amq.guard_diary_submodule(env.paths, reviewed, scripts_approved=env.scripts)
+
+
+def test_repo_without_a_submodule_is_not_affected(paths: amq.QueuePaths):
+    """The scripts repository has no diary-scripts entry: the guard is a no-op."""
+    commit(paths.approved, "extra.txt", "x\n")
+    head = run("git", "rev-parse", "HEAD", cwd=paths.approved)
+    assert amq.guard_diary_submodule(paths, head) is False

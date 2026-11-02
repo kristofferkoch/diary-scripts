@@ -106,6 +106,25 @@ agent-merge-approve scripts <full-OID-from-rev-parse>
 For diary, use `/path/to/diary-automatic` and `agent-merge-approve diary <OID>`.
 The legacy `agent-merge-approve <OID>` form still means scripts.
 
+### Diary `diary-scripts` pointer is forward-only
+
+Approving a diary branch never moves the recorded submodule pointer backwards:
+
+- a branch that left `diary-scripts` alone but was forked before a bump is
+  merged with `--no-ff`, so master's current pointer wins — a fast-forward
+  would copy the branch's stale entry and silently drop the approved scripts
+  change;
+- an explicit pointer change must name a commit that exists in the approved
+  `diary-scripts` repository and is a descendant of the current pointer.
+  Anything older is refused with "pointer would move backwards"; an unknown
+  commit with "not an approved commit — approve the scripts change first".
+
+The check runs during approval, on the reviewed OID and before the merge into
+approved master (2026-11-02: a branch recorded its fork-point pointer and
+reverted the sjekk-cursor change in `master` even though the approved scripts
+repository still had it). It applies to the unattended memory path as well, so
+a routine memory publication cannot roll the pointer back either.
+
 For scripts, an allowlist pre-scan rejects simple unapproved identities before
 queue acceptance. The request returns sanitized categories and paths to the
 producing agent, whose worktree remains available for fix-and-retry; matched
