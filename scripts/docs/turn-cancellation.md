@@ -21,8 +21,9 @@ When attended lifecycle hooks report a new turn, the root controller:
 2. Calls the agent user manager's `StartTransientUnit` with that child in
    `PIDs`, `KillMode=control-group`, `SendSIGKILL=true`, and a 10-second stop
    timeout. The scope name is `diary-<runtime>-turn-<random>.scope`.
-3. Verifies through `GetUnit` and `GetUnitByPID` that the runtime is actually in
-   the new scope, then rechecks the pinned identity to reject PID reuse. Tool
+3. Reads the scope's `ControlGroup` through the private manager channel and
+   verifies that the runtime's `/proc/<pid>/cgroup` is that group or its
+   descendant, then rechecks the pinned identity to reject PID reuse. Tool
    children inherit the scope, including children that call `setsid` or create
    a new process group.
 
@@ -82,10 +83,15 @@ degraded mode.
 Before attended mode or its egress policy is activated, unlock distinguishes
 an alive manager with a stopped bus from an actual manager outage through the
 system-manager MainPID and `/proc` identity. It never starts a second manager.
-`systemctl --user` uses systemd's private manager channel, not the stopped
-public bus, to restore `dbus.socket` and then `dbus-broker.service` before any
-user-bus readiness operation. Only an actually missing manager is started once
-through `user@<uid>.service`, followed by the same socket/broker restoration.
+Every root-to-agent user-manager operation connects directly to
+`/run/user/<uid>/systemd/private`: `systemctl --user` receives that exact
+address, while transient-scope creation and reattachment use peer-to-peer
+D-Bus on the same socket. No operation uses `--machine`, systemd-stdio-bridge,
+or `/run/user/<uid>/bus`. Unlock therefore uses private `StartUnit` and status
+operations to restore `dbus.socket` and then `dbus-broker.service` even while
+the public bus remains stopped. Only an actually missing manager is started
+once through `user@<uid>.service`, followed by the same socket/broker
+restoration.
 The controller immediately re-pins and verifies the replacement manager's
 identity. Manager startup may activate `default.target` and its enabled web
 services. The controller first quiesces all auto-started services and scopes
@@ -164,11 +170,17 @@ listener. Final quiescence kills its PID and removes the listener from
 `/proc/net/unix` without any subsequent user-bus call. It never touches the
 live D-Bus service or socket. A third probe uses linked test-only socket and
 broker units with the live manager: ordinary unlock restores the stopped socket
-through systemd's private manager channel, starts the broker, preserves the
-manager PID, and proves the listener is active. The real outage path remains
-separate.
+with a private-socket `StartUnit`, starts the broker, preserves the manager PID,
+and proves private status checks and the listener are active. The real outage
+path remains separate. None of the probes stops the real public bus.
 
-The ordinary suite performs a real PID-level user-manager-outage test with an
+The ordinary suite includes a production-shaped `SystemdUser("agent")`
+transport regression with the public socket and broker stopped. It rejects any
+`--machine` argument or public-bus address, requires the target UID's private
+manager address on every user operation, and proves socket-then-broker start
+and status succeed without starting a second manager. Scope/attachment tests
+also require peer-to-peer private-manager calls and private `ControlGroup`
+lookups. The suite performs a real PID-level user-manager-outage test with an
 allow-list containing only its two synthetic PIDs. It verifies the `/proc` and
 pidfd fallback kills the process tree without touching other processes.
 Fake-`/proc` regressions prove every same-UID process except the current manager
@@ -206,11 +218,11 @@ For each runtime:
 5. Confirm ordinary lock preserved the manager while D-Bus and all workload
    services stopped. Verify no subsequent call reactivates broker or socket.
    With the manager still alive and its PID unchanged, restore socket through
-   systemd's private channel before any user-bus readiness call, then restore
-   the broker. Before attended egress opens, confirm old services are inactive
-   and no stale scope/process survives, followed by fresh supervisor/runtime
-   PIDs and a working web UI. Wait for
-   background completion and verify no cancelled tool or model turn resumes
+   `/run/user/<uid>/systemd/private` before any public-bus readiness call, then
+   restore the broker. Before attended egress opens, confirm old services are
+   inactive and no stale scope/process survives, followed by fresh
+   supervisor/runtime PIDs and a working web UI. Wait for background completion
+   and verify no cancelled tool or model turn resumes
    and no blocked operation is replayed.
 6. Start a new explicit turn and verify it receives a new scope and finishes
    normally. Repeat for the other runtime while the first has a turn to prove

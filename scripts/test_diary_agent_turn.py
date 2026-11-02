@@ -6,6 +6,7 @@ import os
 import shutil
 import signal
 import subprocess
+import struct
 import sys
 import threading
 import time
@@ -489,35 +490,88 @@ def test_cancellation_failure_does_not_record_locked_or_start_attended_services(
     assert svc.status()["state"] == "LOCKING"
 
 
-def test_systemd_user_scope_and_attach_use_fixed_dbus_control_group_operations() -> None:
+class FakePrivateManager:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, bytes, str]] = []
+
+    def call(self, member: str, signature: str, body: bytes, reply: str) -> str | None:
+        self.calls.append((member, signature, body, reply))
+        return "/unit/scope" if reply == "o" else None
+
+
+def test_systemd_user_scope_and_attach_use_private_control_group_operations() -> None:
     calls: list[list[str]] = []
+    manager = FakePrivateManager()
 
     def run(argv, **kwargs):
         calls.append(argv)
         assert kwargs["env"]["PATH"] == "/usr/bin:/bin"
+        assert kwargs["env"]["DBUS_SESSION_BUS_ADDRESS"] == (
+            "unix:path=/run/user/1234/systemd/private"
+        )
+        assert not any(arg.startswith("--machine=") for arg in argv)
         assert "shell" not in kwargs
-        if "GetUnit" in argv or "GetUnitByPID" in argv:
-            return SimpleNamespace(returncode=0, stdout="o /unit/scope\n")
-        if "is-active" in argv:
-            return SimpleNamespace(returncode=0, stdout="")
-        return SimpleNamespace(returncode=0, stdout="")
+        stdout = "/unit/scope\n" if "--property=ControlGroup" in argv else ""
+        return SimpleNamespace(returncode=0, stdout=stdout)
 
-    systemd = lock.SystemdUser("agent", runner=run)
-    systemd.start_scope("diary-kimi-turn-" + "a" * 32 + ".scope", 1234)
-    created = calls[0]
-    assert created[:3] == ["/usr/bin/busctl", "--user", "--machine=agent@"]
-    assert "StartTransientUnit" in created
-    properties = created[created.index("4") + 1:-1]
-    assert properties == [
-        "PIDs", "au", "1", "1234",
-        "KillMode", "s", "control-group",
-        "SendSIGKILL", "b", "1",
-        "TimeoutStopUSec", "t", "10000000",
+    scope = "diary-kimi-turn-" + "a" * 32 + ".scope"
+    with (
+        patch.object(lock.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=1234)),
+        patch.object(lock, "process_cgroup", return_value="/unit/scope/child"),
+    ):
+        systemd = lock.SystemdUser("agent", runner=run, manager=manager)
+        assert systemd._private_manager_path() == "/run/user/1234/systemd/private"
+        systemd.start_scope(scope, 1234)
+        systemd.attach("kimi-web.service", 1234)
+
+    assert [call[0] for call in manager.calls] == ["StartTransientUnit", "AttachProcessesToUnit"]
+    created = manager.calls[0]
+    assert created[1] == "ssa(sv)a(sa(sv))"
+    for expected in (b"PIDs", b"KillMode", b"control-group", b"SendSIGKILL", b"TimeoutStopUSec"):
+        assert expected in created[2]
+    assert struct.pack("<I", 1234) in created[2]
+    assert struct.pack("<Q", 10000000) in created[2]
+    assert manager.calls[1][1] == "ssau"
+    assert calls == [
+        ["/usr/bin/systemctl", "--user", "is-active", "--quiet", scope],
+        ["/usr/bin/systemctl", "--user", "show", scope, "--property=ControlGroup", "--value"],
+        ["/usr/bin/systemctl", "--user", "show", "kimi-web.service", "--property=ControlGroup", "--value"],
     ]
 
-    systemd.attach("kimi-web.service", 1234)
-    attached = next(call for call in calls if "AttachProcessesToUnit" in call)
-    assert attached[-5:] == ["ssau", "kimi-web.service", "", "1", "1234"]
+
+def test_production_recovery_uses_private_start_and_status_after_bus_quiescence() -> None:
+    active = {"dbus.socket": False, "dbus-broker.service": False}
+    calls: list[list[str]] = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        if argv[1:2] == ["--user"]:
+            assert not any(arg.startswith("--machine=") for arg in argv)
+            assert kwargs["env"]["XDG_RUNTIME_DIR"] == "/run/user/1234"
+            assert kwargs["env"]["DBUS_SESSION_BUS_ADDRESS"] == (
+                "unix:path=/run/user/1234/systemd/private"
+            )
+            assert "/run/user/1234/bus" not in kwargs["env"].values()
+            if "is-active" in argv:
+                return SimpleNamespace(returncode=0 if active[argv[-1]] else 3, stdout="")
+            if "start" in argv:
+                active[argv[-1]] = True
+                return SimpleNamespace(returncode=0, stdout="")
+            if "list-units" in argv:
+                return SimpleNamespace(returncode=0, stdout="init.scope loaded active running Manager\n")
+            raise AssertionError(f"unexpected user operation: {argv}")
+        return SimpleNamespace(returncode=0, stdout="4321\n")
+
+    identity = lock.ProcessIdentity(4321, 1, 999, 1234)
+    with (
+        patch.object(lock.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=1234)),
+        patch.object(lock, "process_identity", return_value=identity),
+    ):
+        lock.SystemdUser("agent", runner=run, manager=FakePrivateManager()).ensure_manager()
+
+    starts = [call[-1] for call in calls if call[1:2] == ["--user"] and "start" in call]
+    assert starts == ["dbus.socket", "dbus-broker.service"]
+    assert not any("user@1234.service" in call and "start" in call for call in calls)
 
 
 def test_systemd_scope_cancellation_excludes_manager_init_scope() -> None:
@@ -940,8 +994,15 @@ def test_real_ordinary_unlock_restores_socket_and_broker_with_live_manager() -> 
     subprocess.run([
         "/usr/bin/systemctl", "--user", "stop", broker_unit, socket_unit,
     ], check=True, capture_output=True, text=True, timeout=20)
+    def private_run(argv, **kwargs):
+        if argv[1:2] == ["--user"]:
+            assert kwargs["env"]["DBUS_SESSION_BUS_ADDRESS"] == (
+                f"unix:path=/run/user/{os.geteuid()}/systemd/private"
+            )
+        return subprocess.run(argv, **kwargs)
+
     systemd = lock.SystemdUser(
-        None, broker_unit=broker_unit, socket_unit=socket_unit,
+        None, runner=private_run, broker_unit=broker_unit, socket_unit=socket_unit,
         socket_path=str(socket_path),
     )
     manager_before = systemd.manager_pid()

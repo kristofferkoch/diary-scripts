@@ -582,6 +582,152 @@ class AgentProcesses:
         raise LockError("agent processes could not be quiesced")
 
 
+class _DBusWriter:
+    def __init__(self) -> None:
+        self.data = bytearray()
+
+    def align(self, alignment: int) -> None:
+        self.data.extend(b"\0" * (-len(self.data) % alignment))
+
+    def uint32(self, value: int) -> None:
+        self.align(4)
+        self.data.extend(struct.pack("<I", value))
+
+    def uint64(self, value: int) -> None:
+        self.align(8)
+        self.data.extend(struct.pack("<Q", value))
+
+    def string(self, value: str) -> None:
+        encoded = value.encode("utf-8")
+        self.uint32(len(encoded))
+        self.data.extend(encoded + b"\0")
+
+    def signature(self, value: str) -> None:
+        encoded = value.encode("ascii")
+        if len(encoded) > 255:
+            raise LockError("D-Bus signature is too long")
+        self.data.append(len(encoded))
+        self.data.extend(encoded + b"\0")
+
+    def begin_array(self, element_alignment: int) -> tuple[int, int]:
+        self.align(4)
+        length_offset = len(self.data)
+        self.data.extend(b"\0" * 4)
+        self.align(element_alignment)
+        return length_offset, len(self.data)
+
+    def end_array(self, position: tuple[int, int]) -> None:
+        length_offset, content_offset = position
+        struct.pack_into("<I", self.data, length_offset, len(self.data) - content_offset)
+
+
+def _dbus_header_field(fields: _DBusWriter, code: int, signature: str, value: str) -> None:
+    fields.align(8)
+    fields.data.append(code)
+    fields.signature(signature)
+    if signature == "g":
+        fields.signature(value)
+    else:
+        fields.string(value)
+
+
+def _dbus_method_call(member: str, signature: str, body: bytes) -> bytes:
+    fields = _DBusWriter()
+    _dbus_header_field(fields, 1, "o", "/org/freedesktop/systemd1")
+    _dbus_header_field(fields, 2, "s", "org.freedesktop.systemd1.Manager")
+    _dbus_header_field(fields, 3, "s", member)
+    _dbus_header_field(fields, 6, "s", "org.freedesktop.systemd1")
+    if signature:
+        _dbus_header_field(fields, 8, "g", signature)
+    fields_length = len(fields.data)
+    fields.align(8)
+    header = struct.pack("<BBBBIII", ord("l"), 1, 0, 1, len(body), 1, fields_length)
+    return header + fields.data + body
+
+
+def _recv_exact(sock: socket.socket, length: int) -> bytes:
+    data = bytearray()
+    while len(data) < length:
+        chunk = sock.recv(length - len(data))
+        if not chunk:
+            raise SystemdUnavailable("systemd private manager closed the connection")
+        data.extend(chunk)
+    return bytes(data)
+
+
+def _read_auth_line(sock: socket.socket) -> bytes:
+    data = bytearray()
+    while not data.endswith(b"\r\n"):
+        data.extend(_recv_exact(sock, 1))
+        if len(data) > 4096:
+            raise SystemdUnavailable("systemd private manager authentication failed")
+    return bytes(data)
+
+
+class PrivateSystemdManager:
+    def __init__(self, socket_path: str, timeout: float = 20.0) -> None:
+        self.socket_path = socket_path
+        self.timeout = timeout
+
+    def _authenticate(self, sock: socket.socket) -> None:
+        identity = str(os.geteuid()).encode("ascii").hex().encode("ascii")
+        sock.sendall(b"\0AUTH EXTERNAL " + identity + b"\r\n")
+        if not _read_auth_line(sock).startswith(b"OK "):
+            raise SystemdUnavailable("systemd private manager authentication failed")
+        sock.sendall(b"BEGIN\r\n")
+
+    def call(
+        self, member: str, signature: str = "", body: bytes = b"", reply: str = "",
+    ) -> str | None:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.settimeout(self.timeout)
+            sock.connect(self.socket_path)
+            self._authenticate(sock)
+            sock.sendall(_dbus_method_call(member, signature, body))
+            for _message in range(100):
+                fixed = _recv_exact(sock, 16)
+                if fixed[0] == ord("l"):
+                    byte_order = "<"
+                elif fixed[0] == ord("B"):
+                    byte_order = ">"
+                else:
+                    raise SystemdUnavailable("systemd private manager returned an invalid reply")
+                _endian, message_type, _flags, version, body_length, _serial, fields_length = struct.unpack(
+                    f"{byte_order}BBBBIII", fixed,
+                )
+                padded_fields = (fields_length + 7) // 8 * 8
+                if version != 1 or body_length + padded_fields > 1024 * 1024:
+                    raise SystemdUnavailable("systemd private manager returned an invalid reply")
+                remainder = _recv_exact(sock, padded_fields + body_length)
+                if message_type not in {2, 3}:
+                    continue
+                response_body = remainder[padded_fields:]
+                if message_type == 3:
+                    detail = "request rejected"
+                    if len(response_body) >= 4:
+                        length = struct.unpack_from(f"{byte_order}I", response_body)[0]
+                        if 4 + length < len(response_body):
+                            detail = response_body[4:4 + length].decode("utf-8", errors="replace")
+                    raise SystemdUnavailable(f"systemd private manager {member}: {detail}")
+                if not reply:
+                    return None
+                if reply != "o" or len(response_body) < 4:
+                    raise SystemdUnavailable("systemd private manager returned an invalid result")
+                length = struct.unpack_from(f"{byte_order}I", response_body)[0]
+                if 4 + length >= len(response_body) or response_body[4 + length] != 0:
+                    raise SystemdUnavailable("systemd private manager returned an invalid object path")
+                value = response_body[4:4 + length].decode("ascii")
+                if not value.startswith("/"):
+                    raise SystemdUnavailable("systemd private manager returned an invalid object path")
+                return value
+            raise SystemdUnavailable("systemd private manager returned too many asynchronous messages")
+        except (OSError, UnicodeError, struct.error) as exc:
+            raise SystemdUnavailable("systemd private manager operation failed") from exc
+        finally:
+            sock.close()
+
+
 class SystemdUser:
     def __init__(
         self,
@@ -590,6 +736,7 @@ class SystemdUser:
         broker_unit: str = "dbus-broker.service",
         socket_unit: str | None = "dbus.socket",
         socket_path: str | None = None,
+        manager: Any = None,
     ) -> None:
         if user is not None and re.fullmatch(r"[a-z_][a-z0-9_-]*", user) is None:
             raise LockError("invalid agent user")
@@ -598,17 +745,25 @@ class SystemdUser:
         self.broker_unit = broker_unit
         self.socket_unit = socket_unit
         self.socket_path = socket_path
+        self.manager = manager
+
+    def _uid(self) -> int:
+        return os.geteuid() if self.user is None else pwd.getpwnam(self.user).pw_uid
+
+    def _private_manager_path(self) -> str:
+        return f"/run/user/{self._uid()}/systemd/private"
 
     def _run(self, tool: str, args: list[str]) -> Any:
-        if tool not in {"systemctl", "busctl"}:
+        if tool != "systemctl":
             raise LockError("unsupported systemd tool")
-        argv = [f"/usr/bin/{tool}", "--user"]
-        if self.user is not None:
-            argv.append(f"--machine={self.user}@")
-        argv.extend(args)
-        env = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
-        if self.user is None:
-            env["XDG_RUNTIME_DIR"] = f"/run/user/{os.geteuid()}"
+        argv = ["/usr/bin/systemctl", "--user", *args]
+        runtime_dir = f"/run/user/{self._uid()}"
+        env = {
+            "PATH": "/usr/bin:/bin",
+            "LC_ALL": "C",
+            "XDG_RUNTIME_DIR": runtime_dir,
+            "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime_dir}/systemd/private",
+        }
         try:
             return self.runner(
                 argv,
@@ -620,6 +775,12 @@ class SystemdUser:
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise SystemdUnavailable("systemd user operation failed") from exc
+
+    def _manager_call(
+        self, member: str, signature: str = "", body: bytes = b"", reply: str = "",
+    ) -> str | None:
+        manager = self.manager or PrivateSystemdManager(self._private_manager_path())
+        return manager.call(member, signature, body, reply)
 
     def _run_system(self, args: list[str]) -> Any:
         try:
@@ -765,42 +926,46 @@ class SystemdUser:
         if process_identity(identity.pid) != identity:
             raise LockError(f"PID {identity.pid} was replaced during turn handling")
 
-    def unit_path(self, unit: str) -> str:
-        result = self._run("busctl", [
-            "call", "org.freedesktop.systemd1", "/org/freedesktop/systemd1",
-            "org.freedesktop.systemd1.Manager", "GetUnit", "s", unit,
-        ])
-        if result.returncode != 0:
-            raise SystemdUnavailable(f"cannot resolve {unit}")
-        return result.stdout.strip()
-
-    def pid_unit_path(self, pid: int) -> str:
-        result = self._run("busctl", [
-            "call", "org.freedesktop.systemd1", "/org/freedesktop/systemd1",
-            "org.freedesktop.systemd1.Manager", "GetUnitByPID", "u", str(pid),
-        ])
-        if result.returncode != 0:
-            raise SystemdUnavailable(f"cannot resolve PID {pid}")
-        return result.stdout.strip()
-
     def verify_membership(self, unit: str, pid: int) -> None:
-        expected = self.unit_path(unit)
-        if self.pid_unit_path(pid) != expected:
+        result = self._run("systemctl", [
+            "show", unit, "--property=ControlGroup", "--value",
+        ])
+        expected = result.stdout.strip()
+        if result.returncode != 0 or not expected.startswith("/"):
+            raise SystemdUnavailable(f"cannot resolve {unit} control group")
+        actual = process_cgroup(pid)
+        if actual != expected and not actual.startswith(expected.rstrip("/") + "/"):
             raise LockError(f"PID {pid} is not in {unit}")
 
     def start_scope(self, scope: str, pid: int) -> None:
-        result = self._run("busctl", [
-            "call", "org.freedesktop.systemd1", "/org/freedesktop/systemd1",
-            "org.freedesktop.systemd1.Manager", "StartTransientUnit",
-            "ssa(sv)a(sa(sv))", scope, "fail", "4",
-            "PIDs", "au", "1", str(pid),
-            "KillMode", "s", "control-group",
-            "SendSIGKILL", "b", "1",
-            "TimeoutStopUSec", "t", "10000000",
-            "0",
-        ])
-        if result.returncode != 0:
-            raise SystemdUnavailable(f"could not create {scope}")
+        body = _DBusWriter()
+        body.string(scope)
+        body.string("fail")
+        properties = body.begin_array(8)
+        body.align(8)
+        body.string("PIDs")
+        body.signature("au")
+        pids = body.begin_array(4)
+        body.uint32(pid)
+        body.end_array(pids)
+        body.align(8)
+        body.string("KillMode")
+        body.signature("s")
+        body.string("control-group")
+        body.align(8)
+        body.string("SendSIGKILL")
+        body.signature("b")
+        body.uint32(1)
+        body.align(8)
+        body.string("TimeoutStopUSec")
+        body.signature("t")
+        body.uint64(10000000)
+        body.end_array(properties)
+        auxiliary = body.begin_array(8)
+        body.end_array(auxiliary)
+        self._manager_call(
+            "StartTransientUnit", "ssa(sv)a(sa(sv))", bytes(body.data), "o",
+        )
         for _attempt in range(100):
             if self.active(scope):
                 self.verify_membership(scope, pid)
@@ -809,13 +974,13 @@ class SystemdUser:
         raise LockError(f"{scope} did not become active")
 
     def attach(self, service: str, pid: int) -> None:
-        result = self._run("busctl", [
-            "call", "org.freedesktop.systemd1", "/org/freedesktop/systemd1",
-            "org.freedesktop.systemd1.Manager", "AttachProcessesToUnit",
-            "ssau", service, "", "1", str(pid),
-        ])
-        if result.returncode != 0:
-            raise SystemdUnavailable(f"could not reattach PID {pid} to {service}")
+        body = _DBusWriter()
+        body.string(service)
+        body.string("")
+        pids = body.begin_array(4)
+        body.uint32(pid)
+        body.end_array(pids)
+        self._manager_call("AttachProcessesToUnit", "ssau", bytes(body.data))
         self.verify_membership(service, pid)
 
     def workload_services(self) -> list[str]:
