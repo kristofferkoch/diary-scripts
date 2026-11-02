@@ -202,6 +202,17 @@ def test_authoritative_states_and_attendance_are_preserved(state: str) -> None:
     assert (snapshot["controller"]["expires_at"] is not None) == (state == "ATTENDED")
 
 
+@pytest.mark.parametrize("state", ["LOCKING", "LOCKED", "ATTENDED"])
+def test_page_shows_attendance_expiry_only_while_attended(state: str) -> None:
+    page = dashboard.render(reader(FakeSources(controller=controller_reply(state))).snapshot())
+    assert "Attendance expiry:" in page
+    if state == "ATTENDED":
+        assert "2026-11-01T17:20:00+00:00" in page
+        assert "900 seconds remaining" in page
+    else:
+        assert "Not applicable" in page
+
+
 @pytest.mark.parametrize("source", ["controller", "report"])
 def test_unavailable_source_is_visible_and_does_not_erase_the_other(source: str) -> None:
     sources = FakeSources(**{source: dashboard.DashboardError("injected")})

@@ -49,14 +49,24 @@ async function refreshSnapshot() {
   if (!response.ok) throw new Error(`Snapshot refresh failed (HTTP ${response.status}).`);
   snapshot = await response.json();
 }
-const workflow = window.DiaryLockWorkflow.mount({
-  element: document.getElementById('lock-workflow'),
-  getReport: () => snapshot.report,
-  getState: () => snapshot.controller,
-  refresh: refreshSnapshot,
-});
-refreshSnapshot().then(workflow.render).catch(error => {
-  document.getElementById('workflow-error').textContent = error.message;
+const workflowError = document.getElementById('workflow-error');
+// The read-only snapshot is the dashboard's own contract: fetch it first, so a
+// missing or broken CTL-07 workflow asset can never suppress the status call.
+// The workflow mounts only after the snapshot is in, and its failure is shown
+// in the workflow panel without touching the rest of the page.
+refreshSnapshot().then(() => {
+  if (!window.DiaryLockWorkflow || typeof window.DiaryLockWorkflow.mount !== 'function') {
+    throw new Error('Owner workflow is unavailable: the CTL-07 workflow asset did not load.');
+  }
+  const workflow = window.DiaryLockWorkflow.mount({
+    element: document.getElementById('lock-workflow'),
+    getReport: () => snapshot.report,
+    getState: () => snapshot.controller,
+    refresh: refreshSnapshot,
+  });
+  workflow.render();
+}).catch(error => {
+  workflowError.textContent = error.message;
 });
 """
 
