@@ -401,6 +401,9 @@ class FakeModes:
     def activate(self, mode: str) -> None:
         self.calls.append(mode)
 
+    def verify_network_audit(self) -> None:
+        pass
+
 
 class FakeAudit:
     def emit(
