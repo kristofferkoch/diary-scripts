@@ -62,6 +62,17 @@ during cancellation is found by a later pass. Services are stopped
 asynchronously before their scopes so `Restart=on-failure` cannot resurrect a
 model turn.
 
+Timer and path units are stopped in every pass as well, before services and
+scopes, and none may remain active before `LOCKED`. They hold no process
+themselves, so PID quiescence cannot see them, but the user manager is preserved
+during lock: an agent-created timer or path unit would otherwise fire after the
+lock completed and start a fresh service. They are deliberately **not** restarted
+on unlock, because restoring them would replay activation the agent scheduled
+for the locked period. A stock timer such as the user `systemd-tmpfiles-clean`
+timer therefore stays stopped until the user manager is next started; socket
+units other than the D-Bus pair are not stopped, so a socket-activated service
+triggered by an external peer while locked is outside this pass.
+
 After the first PID quiescence, the controller performs the service/scope
 verification loop again, then stops `dbus-broker.service` and `dbus.socket` in
 one final user-bus operation. It does not call `is-active`, `busctl`, or any
@@ -242,9 +253,12 @@ For each runtime:
    grandchild. Record all PIDs and the conversation-file checksum.
 2. Confirm the runtime child is in its `diary-<runtime>-turn-*.scope` and the
    scope has `KillMode=control-group`. Confirm the web UI remains available.
-3. Enter `LOCKING`. Confirm the turn ends without its final tool/model result,
-   every recorded PID is gone, no new agent-user scope survives, and both
-   services remain stopped. Check the transition audit and durable state.
+3. Before locking, create an agent-owned `systemd-run --user --on-active=...`
+   timer and a path unit; none of them may be active after `LOCKED`, and no
+   service they would have started may appear. Enter `LOCKING`. Confirm the
+   turn ends without its final tool/model result, every recorded PID is gone, no
+   new agent-user scope survives, and both services remain stopped. Check the
+   transition audit and durable state.
 4. Verify the conversation checksum/history remains and records at most an
    interrupted turn, not successful completion of the cancelled tool.
 5. Confirm ordinary lock preserved the manager while D-Bus and all workload
