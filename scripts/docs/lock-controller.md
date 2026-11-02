@@ -18,8 +18,9 @@ identity. It requires active `agent.slice`, `dsh-web.service`, and
 `kimi-web.service`; stats the slice's real cgroup inode; and requires that
 inode in every `--cgroup-set FAMILY:TABLE:SET` nftables `cgroupv2` set. Both web
 services must be active descendants with canonical paths and real cgroup
-directories. `verify_scope()` applies the same check to CTL-02
-`dsh-turn-*.scope` and `kimi-turn-*.scope` units. Every maintenance pass repeats
+directories. `verify_scope()` applies the same check to `dsh-turn-*.scope` and
+`kimi-turn-*.scope`, plus CTL-02's actual `diary-dsh-turn-*.scope` and
+`diary-kimi-turn-*.scope` names. Every maintenance pass repeats
 slice/web verification and discovers active turn scopes, so post-transition
 membership removal or scope escape enters the existing fatal supervision and
 watchdog failsafe rather than leaving a healthy-looking controller. A scope

@@ -75,6 +75,20 @@ def test_slice_and_services_use_verified_nftables_cgroup_identity(tmp_path: Path
     assert all(call[0] in {"/usr/bin/systemctl", "/usr/bin/nft"} for call in commands.calls)
 
 
+def test_ctl02_scope_prefix_is_discovered_and_verified(tmp_path: Path) -> None:
+    checker, commands = identity(tmp_path)
+    unit = "diary-dsh-turn-test.scope"
+    commands.cgroups[unit] = f"/agent.slice/{unit}"
+    commands.active[unit] = "active"
+    commands.scopes.append(f"{unit} LOAD ACTIVE SUB running")
+    (tmp_path / "agent.slice" / unit).mkdir()
+    checker.verify()
+    checker.verify_scope(unit)
+    commands.cgroups[unit] = f"/system.slice/{unit}"
+    with pytest.raises(lock.LockError, match="escaped agent.slice"):
+        checker.verify()
+
+
 def test_every_required_policy_set_must_contain_the_slice(tmp_path: Path) -> None:
     policy = ("inet", "diary_agent_policy", "agent_egress")
     checker, commands = identity(tmp_path, lock.DEFAULT_CGROUP_SETS + (policy,))

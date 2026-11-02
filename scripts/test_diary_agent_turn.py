@@ -476,6 +476,23 @@ def test_fresh_turn_preparation_precedes_attended_mode_activation(tmp_path: Path
     assert order == ["locked", "fresh_processes_verified", "attended"]
 
 
+def test_ui_unlock_prepares_turns_once_and_extension_does_not_restart(tmp_path: Path) -> None:
+    lifecycle = FakeTurns()
+    svc, order = controller(tmp_path, lifecycle)
+    peer = {"pid": 1, "uid": 1100, "gid": 1100}
+    svc.startup()
+    result = svc.handle({"cmd": "unlock"}, peer, owner_uid=1000, ui_uid=1100)
+    assert result["state"] == "ATTENDED"
+    assert lifecycle.calls == ["cancel", "attend"]
+    assert order == ["locked", "attended"]
+
+    lifecycle.calls.clear()
+    extended = svc.handle({"cmd": "extend"}, peer, owner_uid=1000, ui_uid=1100)
+    assert extended["state"] == "ATTENDED"
+    assert lifecycle.calls == []
+    assert order == ["locked", "attended", "attended"]
+
+
 def test_cancellation_failure_does_not_record_locked_or_start_attended_services(tmp_path: Path) -> None:
     lifecycle = FakeTurns()
     lifecycle.fail = True
@@ -571,7 +588,7 @@ def test_production_recovery_uses_private_start_and_status_after_bus_quiescence(
 
     starts = [call[-1] for call in calls if call[1:2] == ["--user"] and "start" in call]
     assert starts == ["dbus.socket", "dbus-broker.service"]
-    assert not any("user@1234.service" in call and "start" in call for call in calls)
+    assert not any("user@" + "1234.service" in call and "start" in call for call in calls)
 
 
 def test_systemd_scope_cancellation_excludes_manager_init_scope() -> None:
