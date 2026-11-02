@@ -828,12 +828,15 @@ class SystemdUser:
     def manager_pid(self) -> int | None:
         uid = os.geteuid() if self.user is None else pwd.getpwnam(self.user).pw_uid
         result = self._run_system(["show", f"user@{uid}.service", "--property=MainPID", "--value"])
+        # A failed systemctl call means the system manager is unavailable, not
+        # that the output was malformed: keep the two distinct so callers can
+        # attempt recovery instead of treating it as a hard failure.
+        if result.returncode != 0:
+            raise SystemdUnavailable("cannot identify the agent user manager")
         try:
             pid = int(result.stdout.strip())
         except (AttributeError, ValueError) as exc:
             raise LockError("cannot identify the agent user manager") from exc
-        if result.returncode != 0:
-            raise SystemdUnavailable("cannot identify the agent user manager")
         return pid if pid > 0 else None
 
     def _bus_socket_path(self) -> str:
@@ -991,6 +994,20 @@ class SystemdUser:
             raise SystemdUnavailable("cannot list agent workload services")
         return [parts[0] for line in result.stdout.splitlines() if (parts := line.split())]
 
+    def scheduled_units(self) -> list[str]:
+        """List timer and path units: activation that starts workload on its own.
+
+        Stopping services and scopes is not enough while locked. The user
+        manager is preserved, so an agent-created timer or path unit keeps
+        firing and would start a fresh service after the lock completed.
+        """
+        result = self._run("systemctl", [
+            "list-units", "--type=timer", "--type=path", "--all", "--plain", "--no-legend",
+        ])
+        if result.returncode != 0:
+            raise SystemdUnavailable("cannot list agent scheduled units")
+        return [parts[0] for line in result.stdout.splitlines() if (parts := line.split())]
+
     def all_scopes(self) -> list[str]:
         result = self._run("systemctl", [
             "list-units", "--type=scope", "--all", "--plain", "--no-legend",
@@ -1142,7 +1159,20 @@ class SystemdTurns:
         for _attempt in range(100):
             errors: list[str] = []
             services = set(self.systemd.workload_services())
+            scheduled = set(self.systemd.scheduled_units())
             active_services = {service for service in services if self.systemd.active(service)}
+            active_scheduled = {unit for unit in scheduled if self.systemd.active(unit)}
+            active_scopes = {scope for scope in self.managed_scopes() if self.systemd.active(scope)}
+            seen.update(active_scopes)
+            if not active_services and not active_scheduled and not active_scopes:
+                return seen
+            # Scheduled activation goes first so a timer or path unit cannot
+            # start a new workload while the rest of the pass is running.
+            for unit in sorted(active_scheduled):
+                try:
+                    self.systemd.stop(unit)
+                except LockError as exc:
+                    errors.append(str(exc))
             for service in sorted(active_services):
                 try:
                     self.systemd.stop(service, no_block=True)
@@ -1153,8 +1183,6 @@ class SystemdTurns:
                     self.systemd.wait_inactive(service)
                 except LockError as exc:
                     errors.append(str(exc))
-            active_scopes = {scope for scope in self.managed_scopes() if self.systemd.active(scope)}
-            seen.update(active_scopes)
             for scope in sorted(active_scopes):
                 try:
                     self.systemd.stop(scope)
@@ -1162,8 +1190,6 @@ class SystemdTurns:
                     errors.append(str(exc))
             if errors:
                 raise LockError("; ".join(errors))
-            if not active_services and not active_scopes:
-                return seen
         raise LockError("agent workloads could not be quiesced")
 
     def cancel(self) -> int:

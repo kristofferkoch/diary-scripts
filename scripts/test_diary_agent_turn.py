@@ -42,6 +42,7 @@ class FakeSystemd:
         self.bus_quiesced = False
         self.reactivated_after_quiesce = False
         self.ensure_calls: list[str] = []
+        self.scheduled: dict[str, bool] = {}
 
     def _require_manager(self) -> None:
         if not self.manager_available:
@@ -113,6 +114,10 @@ class FakeSystemd:
         self._require_manager()
         return sorted(self.services)
 
+    def scheduled_units(self) -> list[str]:
+        self._require_manager()
+        return sorted(self.scheduled)
+
     def all_scopes(self) -> list[str]:
         self._require_manager()
         return sorted(self.scopes_by_name)
@@ -127,6 +132,8 @@ class FakeSystemd:
             return self.socket_active
         if unit.endswith(".scope"):
             return unit in self.scopes_by_name and unit not in self.inactive_scopes
+        if unit.endswith(".timer") or unit.endswith(".path"):
+            return self.scheduled.get(unit, False)
         return self.services.get(unit, False)
 
     def stop(self, unit: str, no_block: bool = False) -> None:
@@ -137,6 +144,8 @@ class FakeSystemd:
         elif unit.endswith(".scope"):
             self.inactive_scopes.add(unit)
             self.membership[unit] = set()
+        elif unit.endswith(".timer") or unit.endswith(".path"):
+            self.scheduled[unit] = False
         else:
             self.services[unit] = False
             self.membership[unit] = set()
@@ -270,6 +279,57 @@ def test_arbitrary_service_token_and_dbus_are_all_contained() -> None:
     assert not fake.services["kimi-web-token.service"]
     assert not fake.services["escape.service"]
     assert not fake.services["dbus-broker.service"]
+
+
+def test_timer_and_path_activation_cannot_start_workload_after_lock() -> None:
+    fake = FakeSystemd()
+    fake.scheduled.update({"agent-escape.timer": True, "agent-escape.path": True})
+    svc = turns(fake)
+    svc.cancel()
+    assert not any(fake.scheduled.values())
+    stops = [unit for action, unit in fake.calls if action == "stop"]
+    assert stops.index("agent-escape.timer") < stops.index("dsh-web.service")
+
+
+def test_timer_that_fires_during_cancellation_is_caught_by_the_next_pass() -> None:
+    fake = FakeSystemd()
+    fake.scheduled["agent-arm.timer"] = True
+    svc = turns(fake)
+    original = fake.stop
+    fired = False
+
+    def stop(unit: str, no_block: bool = False) -> None:
+        nonlocal fired
+        original(unit, no_block=no_block)
+        if unit == "agent-arm.timer" and not fired:
+            fired = True
+            fake.services["escape.service"] = True
+            fake.membership["escape.service"] = {4242}
+
+    cast(Any, fake).stop = stop
+    svc.cancel()
+    assert fired
+    assert not fake.services["escape.service"]
+
+
+def test_scheduled_unit_created_during_cancellation_is_found_by_next_rescan() -> None:
+    fake = FakeSystemd()
+    fake.scheduled["agent-first.timer"] = True
+    svc = turns(fake)
+    original = fake.stop
+    injected = False
+
+    def stop(unit: str, no_block: bool = False) -> None:
+        nonlocal injected
+        original(unit, no_block=no_block)
+        if unit == "agent-first.timer" and not injected:
+            injected = True
+            fake.scheduled["agent-late.path"] = True
+
+    cast(Any, fake).stop = stop
+    svc.cancel()
+    assert injected
+    assert not any(fake.scheduled.values())
 
 
 def test_cancellation_attempts_every_scope_before_failing_closed() -> None:
@@ -620,6 +680,32 @@ def test_systemd_workload_listing_includes_dbus_and_arbitrary_services() -> None
     assert systemd.workload_services() == [
         "dbus-broker.service", "dsh-web-token.service", "escape.service",
     ]
+
+
+def test_manager_pid_reports_systemctl_failure_as_unavailable() -> None:
+    def run(argv, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="")
+
+    systemd = lock.SystemdUser("agent", runner=run)
+    with pytest.raises(lock.SystemdUnavailable):
+        systemd.manager_pid()
+
+
+def test_manager_pid_rejects_malformed_output() -> None:
+    def run(argv, **kwargs):
+        return SimpleNamespace(returncode=0, stdout="not-a-pid\n")
+
+    systemd = lock.SystemdUser("agent", runner=run)
+    with pytest.raises(lock.LockError):
+        systemd.manager_pid()
+
+
+def test_manager_pid_reports_inactive_manager_as_none() -> None:
+    def run(argv, **kwargs):
+        return SimpleNamespace(returncode=0, stdout="0\n")
+
+    systemd = lock.SystemdUser("agent", runner=run)
+    assert systemd.manager_pid() is None
 
 
 def test_turn_socket_uses_kernel_agent_uid_and_preserves_protocol(tmp_path: Path) -> None:
