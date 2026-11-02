@@ -37,14 +37,24 @@ else:
 
 QUEUE_BRANCH = "queue/automatic"
 QUEUE_REF = f"refs/heads/{QUEUE_BRANCH}"
-#: Identity for queue merge commits. Pinned here rather than inherited from the
-#: account owner's git config (which has no `user.email`); a merge commit needs
-#: one and `git merge --no-ff` otherwise dies with "Committer identity unknown".
-#: The address must be one verified on the owner's GitHub account: this service
-#: writes these commits onto the default branch, and `agent@localhost` belongs to
-#: no account, so they were attributed to nobody and shown as unverified.
-MERGE_IDENTITY = ("-c", "user.name=diary agent",
-                  "-c", "user.email=koch+agent@kristofferkoch.com")
+MERGE_IDENTITY_NAME = "diary agent"
+MERGE_IDENTITY_FALLBACK = "user@example.com"
+
+
+def merge_identity() -> tuple[str, ...]:
+    """Identity for queue merge commits, pinned instead of inherited.
+
+    A merge commit needs one and `git merge --no-ff` otherwise dies with
+    "Committer identity unknown"; the account owner's git config has no
+    `user.email`, and the queue repo inherits nothing. The address comes from
+    the service unit (`AGENT_MERGE_IDENTITY_EMAIL`) because it has to be one
+    verified on the owner's GitHub account — these merge commits land on the
+    default branch, so an address no account owns is attributed to nobody and
+    shown as unverified. The fallback is deliberately fake so a missing unit
+    variable still writes a valid commit.
+    """
+    email = os.environ.get("AGENT_MERGE_IDENTITY_EMAIL", "").strip() or MERGE_IDENTITY_FALLBACK
+    return ("-c", f"user.name={MERGE_IDENTITY_NAME}", "-c", f"user.email={email}")
 BRANCH_RE = re.compile(r"^(dev|mem)/[a-z0-9][a-z0-9-]*$")
 OID_RE = re.compile(r"^[0-9a-f]{40}$")
 LOCK_PATH = Path("/var/lib/agent-merge/queue.lock")
@@ -419,7 +429,7 @@ def queue_change(branch: str, expected: str, paths: QueuePaths, *, repo: str = "
             # `user.email` — so the merge used to fail with "Committer identity
             # unknown" while fast-forwards (no commit) worked. Pin the identity
             # on the command line so the merge never depends on ambient config.
-            proc = git(paths.queue, *MERGE_IDENTITY, "merge", "--no-ff",
+            proc = git(paths.queue, *merge_identity(), "merge", "--no-ff",
                        "--no-edit", "-m", f"queue {branch}", fetched, check=False)
             if proc.returncode:
                 detail = (proc.stderr or proc.stdout).strip()

@@ -831,11 +831,18 @@ def test_queue_merge_pins_its_own_committer_identity(
         amq.git(queue_repo, "config", "--unset", key, check=False)
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
-    for key in ("EMAIL", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"):
+    for key in ("EMAIL", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL",
+                "AGENT_MERGE_IDENTITY_EMAIL"):
         monkeypatch.delenv(key, raising=False)
 
-    proc = amq.git(queue_repo, *amq.MERGE_IDENTITY, "merge", "--no-ff",
+    proc = amq.git(queue_repo, *amq.merge_identity(), "merge", "--no-ff",
                    "--no-edit", "-m", "queue test", "topic", check=False)
     assert proc.returncode == 0, proc.stderr
     assert amq.git(queue_repo, "log", "-1", "--format=%ae").stdout.strip() \
-        == "koch+agent@kristofferkoch.com"
+        == amq.MERGE_IDENTITY_FALLBACK
+    # The unit supplies the address that is actually used; it has to be the one
+    # verified on the owner's account, so it never lives in this repository.
+    monkeypatch.setenv("AGENT_MERGE_IDENTITY_EMAIL", "user@example.com")
+    assert "user.email=user@example.com" in amq.merge_identity()
+    monkeypatch.setenv("AGENT_MERGE_IDENTITY_EMAIL", "  ")
+    assert "user.email=user@example.com" in amq.merge_identity()
