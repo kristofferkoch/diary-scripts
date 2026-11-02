@@ -1,5 +1,14 @@
 # Independent owner review, unlock, and attendance UI
 
+> **Split notice.** The deployed CTL-07 host is now the merge/deny console
+> (`diary_lock_console_ui.py`, documented in `agent-merge-console.md`). It
+> registers no unlock, acknowledgement, or attendance route. The workflow
+> described below is retained as the source for CTL-11, which owns unlock and
+> attendance, and requires the controller's root-only
+> `/etc/diary/lock-ui-actions-enabled` file; the controller refuses UI
+> unlock/extend while that file is absent. This module is no longer installed by
+> `install-owner-ui-root`.
+
 `diary-lock-ui` is the CTL-07 state-changing extension behind Caddy and Authelia.
 It consumes the existing trusted audit reports and CTL-08 fresh authorization;
 it does not implement a separate read-only dashboard or controller. General-agent

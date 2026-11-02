@@ -493,7 +493,13 @@ def controller(tmp_path: Path, turns: FakeTurns) -> tuple[lock.Controller, list[
         original(mode)
 
     cast(Any, modes).activate = activate
-    svc = lock.Controller(lock.StateStore(str(tmp_path / "state.json"), "boot-test"), modes, FakeAudit())
+    enablement = tmp_path / "ui-actions-enabled"
+    enablement.write_text("enabled\n", encoding="utf-8")
+    enablement.chmod(0o600)
+    svc = lock.Controller(
+        lock.StateStore(str(tmp_path / "state.json"), "boot-test"), modes, FakeAudit(),
+        ui_actions_file=str(enablement),
+    )
     svc.turns = turns
     return svc, order
 

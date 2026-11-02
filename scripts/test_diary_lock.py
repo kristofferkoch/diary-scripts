@@ -76,12 +76,16 @@ def peer(**changes) -> dict[str, int]:
     return value
 
 
-def controller(tmp_path: Path, now=None, monotonic=None):
+def controller(tmp_path: Path, now=None, monotonic=None, enabled: bool = True):
     now = now if now is not None else [1_000_000.0]
     monotonic = monotonic if monotonic is not None else [0.0]
     store = lock.StateStore(str(tmp_path / "state.json"), "boot-test")
     modes = FakeModes()
     events = FakeAudit()
+    enablement = tmp_path / "ui-actions-enabled"
+    if enabled:
+        enablement.write_text("enabled\n", encoding="utf-8")
+        enablement.chmod(0o600)
     svc = lock.Controller(
         store,
         modes,
@@ -89,8 +93,31 @@ def controller(tmp_path: Path, now=None, monotonic=None):
         attended_seconds=900,
         clock=lambda: now[0],
         monotonic=lambda: monotonic[0],
+        ui_actions_file=str(enablement),
     )
     return svc, modes, events, now, monotonic
+
+
+def test_ui_unlock_and_extend_require_the_root_enablement_file(tmp_path: Path) -> None:
+    svc, modes, events, _, _ = controller(tmp_path, enabled=False)
+    svc.startup()
+    ui = peer(uid=1100)
+    with pytest.raises(lock.RequestRejected):
+        svc.handle({"cmd": "unlock"}, ui, owner_uid=1000, ui_uid=1100)
+
+    # The owner's local break-glass path is not gated by the UI enablement file.
+    assert svc.handle({"cmd": "break_glass"}, peer(uid=1000), owner_uid=1000, ui_uid=1100)["state"] == "ATTENDED"
+    with pytest.raises(lock.RequestRejected):
+        svc.handle({"cmd": "extend"}, ui, owner_uid=1000, ui_uid=1100)
+
+    enablement = tmp_path / "ui-actions-enabled"
+    enablement.write_text("enabled\n", encoding="utf-8")
+    enablement.chmod(0o666)
+    with pytest.raises(lock.RequestRejected):
+        svc.handle({"cmd": "extend"}, ui, owner_uid=1000, ui_uid=1100)
+
+    enablement.chmod(0o644)
+    assert svc.handle({"cmd": "extend"}, ui, owner_uid=1000, ui_uid=1100)["state"] == "ATTENDED"
 
 
 def test_boot_and_controller_restart_always_enter_durable_locked_state(tmp_path: Path) -> None:

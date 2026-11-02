@@ -2,9 +2,11 @@
 
 > Index: [scripts/](../README.md)
 
-`agent_merge_console` is the prepared, UI-neutral extension for the independent
-CTL-07 owner page. It is not a second agent-merge broker and does not replace
-`agent-merge-approve`. It has not been deployed or connected to the live UI.
+`agent_merge_console` is the UI-neutral decision boundary for the independent
+owner console. It is not a second agent-merge broker and does not replace
+`agent-merge-approve`. The CTL-07 host and its fixed-argv executor are
+implemented in `diary_lock_console_ui.py` and `diary_merge_console_service.py`;
+they are not deployed.
 
 ## Review snapshot
 
@@ -113,3 +115,68 @@ a scratch queue:
 
 No deployment, host configuration change, real-queue merge/push, or live owner
 verification is claimed by this preparation.
+
+## Implemented authority model (CTL-07 host and executor)
+
+The console is split across two identities so that web compromise is not
+publication authority:
+
+1. **Web host** (`diary_lock_console_ui.py`, unprivileged `diary-lock-ui`,
+   loopback 9093 behind Caddy). It registers only `GET /lock/merge/`,
+   `POST /lock/merge/decide`, and `GET /lock/health`. It has no unlock,
+   acknowledgement, attendance, or dashboard route, no repository or audit
+   access, no controller membership, and no firewall authority. Its only
+   privileged peer is the executor socket.
+2. **Executor** (`diary_merge_console_service.py`, `kek`, systemd
+   socket-activated, peer UID must be `diary-lock-ui`). It has exactly two
+   verbs: `snapshot` (read the reviewed queue pair through
+   `MergeConsole.snapshot()`) and `decide` (run `MergeConsole.decide()`). There
+   is no shell, no caller-supplied path or Git argument, and no verb that skips
+   the console.
+3. **Fresh grant** (root-owned `diary-fresh-unlock`, CTL-08 pattern). A merge or
+   deny transaction is created with `purpose=merge` and bound to the action plus
+   the exact queue and approved-base OIDs. The owner must complete a forced
+   password + user-verified WebAuthn ceremony (`/lock/merge/begin` →
+   Authelia → `/lock/merge/return`). At decision time the host consumes it
+   (`/lock/merge/consume`), which is single-use and session-bound, and the
+   executor independently asks the root-owned verifier socket whether that exact
+   grant was consumed. An unlock transaction cannot be consumed as a merge
+   grant, and a merge grant cannot be consumed at the unlock endpoint.
+   `begin` requires a live owner two-factor session, so an anonymous caller
+   cannot fill the bounded live-transaction table and starve the owner's only
+   merge path; it accepts either the JSON API call or the console's plain
+   same-origin form. `return` renders a page from the root-owned service that
+   names the bound action and both OIDs. That page is the owner's check on what
+   the ceremony authorized: the console is untrusted, so a compromised console
+   can ask the owner to authenticate a pair it did not display, but it cannot
+   hide the pair from the authorization service's own confirmation page.
+
+**What a fully compromised web process can do:** consume a grant the owner
+just authorized and submit that exact action and OID pair, and start a ceremony
+for any pair it likes — so the owner must compare the action and OIDs on the
+authorization service's confirmation page, not only the console. It cannot mint
+a grant, change a pair after the ceremony began, merge anything else, push, run
+Git, write audit, unlock, or extend attendance. **What the executor can do:** merge or deny exactly the
+reviewed pair, and only with a consumed grant; its code path is fixed.
+
+`deny` still requires a grant and writes `owner_denied`, then performs no
+repository or environment operation. Replay is bounded twice: grants are
+single-use, and the queue/base pair is rechecked under the queue lock (a second
+merge of the same pair finds itself already approved). A stale queue or base
+produces `queue_changed`/`base_changed` before publication; an unavailable
+pre-merge audit prevents the repository operation; a post-publication audit
+failure is reported as an unknown outcome, never as a clean denial.
+
+Why not run the web service as `kek`, and why not a general broker: the web
+process parses attacker-influenceable queue text and model output. Running it as
+`kek`, or giving it an open-ended "run this Git command" channel, would make any
+web bug a full publication compromise. The executor's fixed verb set keeps the
+blast radius at "the decision the owner just approved".
+
+```bash
+uv run pytest -q scripts/test_agent_merge_console.py scripts/test_diary_lock_console.py
+```
+
+Live gates still open: install `diary-lock-ui.service`,
+`diary-merge-console.socket`/`@.service` and the verifier socket via the CTL-08
+installer, then pass the owner-approved live checks in the LATER-01 card.
