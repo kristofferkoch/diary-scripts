@@ -11,7 +11,6 @@ from mail_reader import config as config_module
 from scripts import spondshow
 from scripts.spondshow import (
     iter_records,
-    load_cursor,
     render_full,
     render_header,
     rsvp_status,
@@ -151,11 +150,10 @@ def test_render_header_event_no_rsvp_when_member_id_unset(monkeypatch):
         assert mark not in out
 
 
-def test_main_reads_rsvp_member_from_trusted_config(tmp_path, monkeypatch, capsys):
-    ordinary = tmp_path / "local.toml"
-    ordinary.write_text('[spond]\nmember_ids = { "OTHER" = "X" }\n')
-    trusted = tmp_path / "trusted.toml"
-    trusted.write_text('[spond]\nrsvp_member_id = "TRUSTED-MEMBER"\n')
+def test_main_needs_no_trusted_config(tmp_path, monkeypatch, capsys):
+    """2026-11-02: the whole Spond track read /etc/diary/trusted.toml for the
+    RSVP member id and came out `!! FAILED`. RSVP markers are optional; the
+    reader must render the track with no privileged config at all."""
     jdir = tmp_path / "spond"
     jdir.mkdir()
     record = {
@@ -165,24 +163,21 @@ def test_main_reads_rsvp_member_from_trusted_config(tmp_path, monkeypatch, capsy
             "id": "E1",
             "heading": "Training",
             "startTimestamp": "2026-05-26T15:30:00Z",
-            "responses": {"acceptedIds": ["TRUSTED-MEMBER"]},
+            "responses": {"acceptedIds": ["MEMBER"]},
         },
     }
     (jdir / "2026-05-26.jsonl").write_text(json.dumps(record) + "\n")
+    monkeypatch.setattr(spondshow, "JSONL_DIR", jdir)
+    monkeypatch.delenv(spondshow.RSVP_ENV, raising=False)
+    monkeypatch.setattr(spondshow, "_RSVP_MEMBER_ID", None)
 
-    try:
-        with monkeypatch.context() as m:
-            m.setenv("DIARY_CONFIG", str(ordinary))
-            m.delenv(spondshow.RSVP_ENV, raising=False)
-            m.setattr(config_module, "TRUSTED_CONFIG_PATH", trusted)
-            m.setattr(spondshow, "JSONL_DIR", jdir)
-            m.setattr(spondshow, "_RSVP_MEMBER_ID", None)
-            config_module.reload()
+    assert spondshow.main(["--headers-only"]) == 0
+    out = capsys.readouterr().out
+    assert "[event]" in out and "✓" not in out
 
-            assert spondshow.main(["--headers-only"]) == 0
-            assert "[event ✓]" in capsys.readouterr().out
-    finally:
-        config_module.reload()
+    # An explicit member id still gives the marker when someone wants it.
+    assert spondshow.main(["--headers-only", "--rsvp-as", "MEMBER"]) == 0
+    assert "[event ✓]" in capsys.readouterr().out
 
 
 # ---------- rsvp_status ----------
@@ -214,9 +209,9 @@ def test_iter_records_round_trip(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setattr(spondshow, "JSONL_DIR", jdir)
-    assert [r["data"]["id"] for r in iter_records(None, None)] == ["C1", "E1", "P1"]
-    assert [r["data"]["id"] for r in iter_records(None, {"event"})] == ["E1"]
-    assert [r["data"]["id"] for r in iter_records(None, {"chat", "post"})] == ["C1", "P1"]
+    assert [r["data"]["id"] for r in iter_records(None, None, None)] == ["C1", "E1", "P1"]
+    assert [r["data"]["id"] for r in iter_records(None, None, {"event"})] == ["E1"]
+    assert [r["data"]["id"] for r in iter_records(None, None, {"chat", "post"})] == ["C1", "P1"]
 
 
 def test_iter_records_since_filter_drops_older(tmp_path, monkeypatch):
@@ -232,37 +227,39 @@ def test_iter_records_since_filter_drops_older(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(spondshow, "JSONL_DIR", jdir)
     since = datetime(2026, 5, 25, tzinfo=timezone.utc)
-    ids = [r["data"]["id"] for r in iter_records(since, None)]
+    ids = [r["data"]["id"] for r in iter_records(since, None, None)]
     assert ids == ["NEW"]
 
 
 def test_iter_records_returns_nothing_when_dir_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(spondshow, "JSONL_DIR", tmp_path / "does-not-exist")
-    assert list(iter_records(None, None)) == []
+    assert list(iter_records(None, None, None)) == []
 
 
-# ---------- load_cursor ----------
+# ---------- explicit window ----------
 
 
-def test_load_cursor_reads_state_file(tmp_path, monkeypatch):
-    state = tmp_path / "spond-state.json"
-    state.write_text(json.dumps({"last_successful_run": "2026-05-26T11:30:00Z"}))
-    monkeypatch.setattr(spondshow, "STATE_PATH", state)
-    cursor = load_cursor()
-    assert cursor is not None
-    assert cursor == datetime(2026, 5, 26, 11, 30, tzinfo=timezone.utc)
+def test_iter_records_until_is_inclusive_and_since_is_strict(tmp_path, monkeypatch):
+    jdir = tmp_path / "spond"
+    jdir.mkdir()
+    recs = [
+        {"kind": "chat", "fetched_at": "2026-05-26T09:59:59Z", "data": {"id": "A"}},
+        {"kind": "chat", "fetched_at": "2026-05-26T10:00:00Z", "data": {"id": "B"}},
+        {"kind": "chat", "fetched_at": "2026-05-26T10:00:01Z", "data": {"id": "C"}},
+    ]
+    (jdir / "2026-05-26.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in recs), encoding="utf-8")
+    monkeypatch.setattr(spondshow, "JSONL_DIR", jdir)
+    lo = datetime(2026, 5, 26, 10, 0, 0, tzinfo=timezone.utc)
+    hi = datetime(2026, 5, 26, 10, 0, 1, tzinfo=timezone.utc)
+    assert [r["data"]["id"] for r in iter_records(lo, hi, None)] == ["C"]
 
 
-def test_load_cursor_returns_none_when_missing(tmp_path, monkeypatch):
-    monkeypatch.setattr(spondshow, "STATE_PATH", tmp_path / "missing.json")
-    assert load_cursor() is None
-
-
-def test_load_cursor_returns_none_when_run_field_null(tmp_path, monkeypatch):
-    state = tmp_path / "spond-state.json"
-    state.write_text(json.dumps({"last_successful_run": None}))
-    monkeypatch.setattr(spondshow, "STATE_PATH", state)
-    assert load_cursor() is None
+def test_the_reader_needs_no_trusted_state():
+    """RSVP markers are cosmetic; a missing/denied trusted config must not
+    take the track down (the 2026-11-02 bundle failed exactly that way)."""
+    rc = spondshow.main(["--until", "2026-05-26T10:00:00Z"])
+    assert rc == 1  # empty fixture dir -> quiet track, not a crash
 
 
 # ---------- render_full truncation ----------

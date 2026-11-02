@@ -8,19 +8,16 @@ beside the repo like the maildir. This is the sjekk-flow reader: it
 replaces grepping `journalctl -u signal-mirror`, which is the daemon's
 human stdout and loses messages to line-splitting and journald retention.
 
-Cursor: memory/signal-state.json's `cursor` (an ISO timestamp). Unlike
-spond's auto-bumped cursor, this is hand-advanced (like the mail cursor):
-read with --since-cursor, triage, then `signalshow --bump` to set the
-high-water mark to the newest message shown. Single writer (this tool);
-signal-capture never touches the state file.
+This reader is **stateless**: it takes an explicit half-open window
+`(since, until]` over the message timestamp and writes nothing. The sjekk
+cursor lives in `memory/sjekk/cursor.json` and is advanced separately by
+`sjekk-advance` after triage — see scripts/sjekk_cursor.py.
 
 Examples:
-    uv run signalshow --since-cursor                 # everything new since cursor
-    uv run signalshow --since-cursor --headers-only  # one line per message
-    uv run signalshow --since 2026-06-07             # from a date
+    uv run signalshow --since 2026-06-07 --until 2026-06-08
+    uv run signalshow --since 2026-06-07T12:00:00Z --headers-only
     uv run signalshow --from alice                    # filter by sender name/number
     uv run signalshow --group                        # only group messages
-    uv run signalshow --bump                         # advance cursor to newest shown
 """
 from __future__ import annotations
 
@@ -34,7 +31,6 @@ from typing import Any, Iterator
 from mail_reader.config import workspace_root
 
 PROJECT_ROOT = workspace_root()
-STATE_PATH = PROJECT_ROOT / "memory" / "signal-state.json"
 JSONL_DIR = PROJECT_ROOT / "memory" / "signal"
 
 
@@ -54,21 +50,8 @@ def parse_iso(s: str) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
-def load_cursor() -> datetime | None:
-    if not STATE_PATH.exists():
-        return None
-    raw = json.loads(STATE_PATH.read_text()).get("cursor")
-    return parse_iso(raw) if raw else None
-
-
-def save_cursor(iso: str) -> None:
-    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(
-        json.dumps({"cursor": iso}, indent=2, ensure_ascii=False) + "\n"
-    )
-
-
-def iter_records(since: datetime | None) -> Iterator[dict[str, Any]]:
+def iter_records(since: datetime | None,
+                 until: datetime | None = None) -> Iterator[dict[str, Any]]:
     if not JSONL_DIR.exists():
         return
     for fp in sorted(JSONL_DIR.glob("*.jsonl")):
@@ -89,12 +72,16 @@ def iter_records(since: datetime | None) -> Iterator[dict[str, Any]]:
                 rec = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if since is not None and rec.get("iso"):
+            if rec.get("iso"):
                 try:
-                    if parse_iso(rec["iso"]) <= since:
-                        continue
+                    ts = parse_iso(rec["iso"])
                 except ValueError:
-                    pass
+                    ts = None
+                if ts is not None:
+                    if since is not None and ts <= since:
+                        continue
+                    if until is not None and ts > until:
+                        continue
             yield rec
 
 
@@ -166,10 +153,10 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--since-cursor", action="store_true",
-                    help="Only messages after memory/signal-state.json's cursor.")
     ap.add_argument("--since", type=str, default=None,
                     help="ISO date/datetime; only messages strictly after this point.")
+    ap.add_argument("--until", type=str, default=None,
+                    help="ISO date/datetime; only messages at or before this point.")
     ap.add_argument("--from", dest="from_", default=None, metavar="NEEDLE",
                     help="Only messages from a sender whose name or number contains this "
                          "(case-insensitive).")
@@ -180,27 +167,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-group", action="store_true", help="Only 1:1 (non-group) messages.")
     ap.add_argument("--headers-only", action="store_true",
                     help="One line per message (default rendering is already one line).")
-    ap.add_argument("--bump", action="store_true",
-                    help="After printing, set the cursor to the newest message shown.")
     args = ap.parse_args(argv)
 
-    since: datetime | None
-    if args.since_cursor:
-        since = load_cursor()
-        if since is not None:
-            print(f"(cursor: {since.isoformat()})", file=sys.stderr)
-        else:
-            print("(no cursor yet — showing everything)", file=sys.stderr)
-    elif args.since:
-        since = parse_iso(args.since)
-    else:
-        since = None
+    since = parse_iso(args.since) if args.since else None
+    until = parse_iso(args.until) if args.until else None
 
     from_n = args.from_.lower() if args.from_ else None
     with_n = args.with_.lower() if args.with_ else None
 
     rows: list[dict[str, Any]] = []
-    for rec in iter_records(since):
+    for rec in iter_records(since, until):
         if args.group and not rec.get("group"):
             continue
         if args.no_group and rec.get("group"):
@@ -220,12 +196,6 @@ def main(argv: list[str] | None = None) -> int:
 
     if not rows:
         print("(no matching messages)", file=sys.stderr)
-
-    if args.bump and rows:
-        newest = max(rows, key=lambda r: r.get("ts", 0)).get("iso")
-        if newest:
-            save_cursor(newest)
-            print(f"(cursor bumped to {newest})", file=sys.stderr)
 
     return 0 if rows else 1
 

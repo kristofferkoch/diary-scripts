@@ -175,11 +175,9 @@ def test_attachment_text_is_truncated(workspace: dict[str, Path]):
 # --- Cursor semantics -------------------------------------------------------
 
 
-def test_cursor_is_strict_and_excludes_the_last_tripped_position(workspace: dict[str, Path]):
-    """The bug the split cursor exists to avoid: a record exactly at the
-    cursor is already triaged, and a `>=` would show it again forever."""
+def test_since_is_strict_and_excludes_the_last_triaged_position(workspace: dict[str, Path]):
+    """A record exactly at the lower bound was in the previous window."""
     write_records(workspace, message_record(fetched="2026-10-13T06:00:00Z"))
-    workspace["state"].write_text(json.dumps({"cursor": "2026-10-13T06:00:00Z"}))
     assert list(sw.iter_records(sw.parse_iso("2026-10-13T06:00:00Z"), None, None, None)) == []
     assert len(list(sw.iter_records(sw.parse_iso("2026-10-13T05:00:00Z"),
                                     None, None, None))) == 1
@@ -229,58 +227,22 @@ def test_no_records_exits_one_silently(workspace: dict[str, Path], capsys):
     assert "no matching records" in err
 
 
-def test_bump_advances_the_cursor_and_the_next_read_is_empty(workspace: dict[str, Path],
-                                                             capsys):
+def test_the_reader_writes_no_state(workspace: dict[str, Path]):
     write_records(workspace, message_record(fetched="2026-10-13T06:00:00Z"))
-    assert sw.main(["--headers-only"]) == 0
-    assert sw.main(["--headers-only", "--bump"]) == 0
-    state = json.loads(workspace["state"].read_text())
-    assert state["cursor"] == "2026-10-13T06:00:00Z"
-    capsys.readouterr()
-    assert sw.main(["--since-cursor", "--headers-only"]) == 1
-    assert "no matching records" in capsys.readouterr().err
+    before = sorted(p.name for p in workspace["jsonl"].iterdir())
+    sw.main(["--headers-only"])
+    assert sorted(p.name for p in workspace["jsonl"].iterdir()) == before
 
 
-def test_missing_state_file_is_not_an_error(workspace: dict[str, Path], capsys):
+def test_no_cursor_line_is_printed(workspace: dict[str, Path], capsys):
     write_records(workspace, message_record())
-    assert sw.main(["--since-cursor", "--headers-only"]) == 0
-    assert "cursor: none yet" in capsys.readouterr().err
+    assert sw.main(["--since", "2026-10-01", "--headers-only"]) == 0
+    assert "cursor" not in capsys.readouterr().err
 
 
-def test_empty_and_no_cursor_is_a_forgiven_quiet_track(workspace: dict[str, Path], capsys):
-    """Before the first login (or first --bump) there is no state and nothing
-    to show — sjekk_collect must read that as a quiet track, not FAILED."""
+def test_empty_window_is_a_forgiven_quiet_track(workspace: dict[str, Path], capsys):
     from scripts.sjekk_collect import _is_nothing_new
 
-    assert sw.main(["--since-cursor", "--headers-only"]) == 1
+    assert sw.main(["--since", "2026-10-01", "--headers-only"]) == 1
     quiet = capsys.readouterr()
-    assert _is_nothing_new(quiet.out + quiet.err), (
-        "every line must match sjekk_collect's (cursor: …)/(no matching …) shape"
-    )
-
-
-def test_auth_required_with_no_records_stays_loud(workspace: dict[str, Path], capsys):
-    """The opposite case: a dead login must surface as FAILED in the bundle."""
-    from scripts.sjekk_collect import _is_nothing_new
-
-    workspace["state"].write_text(json.dumps({"auth_required": True}))
-    assert sw.main(["--since-cursor", "--headers-only"]) == 1
-    loud = capsys.readouterr()
-    assert "SKOLEMELDING AUTH REQUIRED" in loud.err
-    assert not _is_nothing_new(loud.out + loud.err)
-
-
-def test_expired_auth_shouts_before_anything_else(workspace: dict[str, Path], capsys):
-    workspace["state"].write_text(json.dumps({"auth_required": True}))
-    write_records(workspace, message_record())
-    sw.main(["--headers-only", "--bump"])
-    err = capsys.readouterr().err
-    assert "SKOLEMELDING AUTH REQUIRED" in err
-    assert "skolemelding-login" in err
-
-
-def test_all_ignores_the_cursor(workspace: dict[str, Path], capsys):
-    workspace["state"].write_text(json.dumps({"cursor": "2026-10-13T06:00:00Z"}))
-    write_records(workspace, message_record())
-    assert sw.main(["--all", "--headers-only"]) == 0
-    assert "ignoring the cursor" in capsys.readouterr().err
+    assert _is_nothing_new(quiet.out + quiet.err)

@@ -27,18 +27,18 @@ lost a whole conversation on 2026-06-07).
     survive only in the journal. To backfill a gap, read the journal for
     that window.
   - **Privacy:** `memory/signal/` is git-ignored — conversation content
-    stays local beside the repo, like the maildir. Only the cursor
-    (`memory/signal-state.json`, a timestamp) is committed.
+    stays local beside the repo, like the maildir. No cursor file is
+    committed any more; triage progress is runtime state in
+    `memory/sjekk/cursor.json`.
 
-- **`signalshow`** — the reader. Cursor is `memory/signal-state.json`'s
-  `cursor`, **hand-advanced like the mail cursor** (not auto-bumped like
-  spond): `signalshow` is the only writer of the state file; `signal-capture`
-  never touches it.
+- **`signalshow`** — the reader. **Stateless**: an explicit half-open window
+  `(since, until]` over the message timestamp, no cursor reads or writes.
+  The triage cursor is advanced separately by `sjekk-advance signal`.
 
 **SOP (per sjekk):**
 
-1. `uv run signalshow --since-cursor --headers-only` — one line per new
-   message (`ISO  ←/→  peer  sender: text`). Filter with `--from <name>`,
+1. `uv run signalshow --since <cursor> --until <until> --headers-only` — one
+   line per new message (`ISO  ←/→  peer  sender: text`). Filter with `--from <name>`,
    `--with <peer>` (whole thread incl. your replies), `--group`/`--no-group`.
    (In a sjekk, `sjekk-collect` already produced this listing at
    `memory/sjekk/latest/signal.txt` — read that file.)
@@ -77,9 +77,9 @@ lost a whole conversation on 2026-06-07).
    the sjekk summary *and* the daily note entirely. Read them only to
    confirm there's nothing actionable, then move on. Surface a Signal
    message only when it carries a fact worth keeping or an action to take.
-3. `uv run signalshow --since-cursor --bump` (or just `--bump`) to advance
-   the cursor to the newest message shown. Commit `memory/signal-state.json`
-   under `MEM:` — the JSONL itself is git-ignored.
+3. `uv run sjekk-advance signal` once triaged. It sets the cursor to the
+   bundle window's `until` and writes no tracked file — the cursor is
+   git-ignored runtime state, and the JSONL itself is git-ignored too.
 
 Tests: `uv run pytest scripts/test_signal_capture.py scripts/test_signalshow.py`
 plus doctests (`uv run python -m doctest scripts/signal_capture.py

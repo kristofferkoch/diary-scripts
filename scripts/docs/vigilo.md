@@ -15,9 +15,9 @@ attachment URLs are kept out of git) to `/var/lib/diary/legacy-state/vigilo/YYYY
 and downloads message attachments to `/var/lib/diary/legacy-state/vigilo/attachments/`
 (git-ignored in the diary repo). State lives in
 `/var/lib/diary/legacy-state/vigilo-state.json`: the sync owns `last_successful_run` and the
-seen-maps; the **triage cursor is a separate `cursor` key, advanced only
-by `vigiloshown --bump`** — unlike Spond, a sync run never moves what the
-next triage sees.
+seen-maps; the **triage cursor is `memory/sjekk/cursor.json`**, advanced
+only by `sjekk-advance vigilo` after triage. The sync never moves what the
+next triage sees, and the reader is stateless (`--since/--until`).
 
 Endpoint quirks learned live (2026-10-11, checked again 2026-10-14):
 
@@ -106,14 +106,13 @@ kind exists purely because nothing else surfaces it.
    re-new it in the app and update the hentemelding fact in `SCHOOL.md`.
    Replies to AKS are written **in the app by the user** — the pipeline
    never writes back.
-3. **Detail when needed** — `uv run vigiloshown --since-cursor` for
+3. **Detail when needed** — `uv run vigiloshown --since <cursor> --until <T>` for
    bodies + attachment paths, `--full` to also extract PDF/docx/text
    attachment content (news attachments are fetched over the API at
    show-time). Filters: `--kind
    message|message_update|news|consent|check_out_note`,
    `--child <label>`, `--all` for the weekly sweep.
-4. **Advance the cursor** — `uv run vigiloshown --since-cursor --bump`
-   once triaged.
+4. **Advance the cursor** — `uv run sjekk-advance vigilo` once triaged.
 5. **Daily note + commit** — actionable items go under `## Vigilo` in
-   today's `memory/YYYY-MM-DD.md` (`MEM:`). Runtime cursors and JSONL are
-   generated, never committed, and remain in `/var/lib/diary/legacy-state`.
+   today's `memory/YYYY-MM-DD.md` (`MEM:`). The sjekk cursor is git-ignored
+   runtime state; JSONL remains in `/var/lib/diary/legacy-state`.

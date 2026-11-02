@@ -12,13 +12,20 @@ import json
 import pytest
 
 from scripts import sjekk_collect
+from scripts import sjekk_cursor
 from scripts.sjekk_collect import (
-    TRACKS,
+    BASE_TRACKS,
+    CURSOR_TRACK_FILES,
     TrackResult,
+    build_tracks,
     render_index,
     run_tracks,
     write_run,
 )
+
+
+def _until() -> dt.datetime:
+    return dt.datetime(2026, 11, 2, 9, 0, 0, tzinfo=dt.UTC)
 
 
 def _sh(script: str) -> list[str]:
@@ -107,9 +114,8 @@ def test_render_index_empty_vs_content_vs_failed() -> None:
 def test_write_run_layout_and_latest_symlink(tmp_path) -> None:
     results = [TrackResult(filename="mail.txt", output="hi\n"),
                TrackResult(filename="spond.txt", output="")]
-    run1 = write_run(tmp_path, results,
-                     now=dt.datetime(2026, 10, 11, 12, 0, 0, tzinfo=dt.UTC))
-    assert run1.name == "2026-10-11T12-00-00Z"
+    run1 = tmp_path / "2026-10-11T12-00-00Z"
+    write_run(run1, results, stamp="2026-10-11T12-00-00Z")
     assert (run1 / "mail.txt").read_text() == "hi\n"
     assert (run1 / "INDEX.md").exists()
     latest = tmp_path / "latest"
@@ -117,23 +123,77 @@ def test_write_run_layout_and_latest_symlink(tmp_path) -> None:
     assert latest.resolve() == run1
 
     # A second run repoints `latest`.
-    run2 = write_run(tmp_path, results,
-                     now=dt.datetime(2026, 10, 11, 13, 0, 0, tzinfo=dt.UTC))
+    run2 = tmp_path / "2026-10-11T13-00-00Z"
+    write_run(run2, results, stamp="2026-10-11T13-00-00Z")
     assert latest.resolve() == run2
+
+
+def test_write_run_writes_the_manifest(tmp_path) -> None:
+    run = tmp_path / "run"
+    manifest = {"version": 1, "tracks": {"mail": {"until": "2026-11-02T09:00:00Z"}}}
+    write_run(run, [TrackResult(filename="mail.txt", output="")],
+              stamp="run", window={"since": None, "until": "2026-11-02T09:00:00Z"},
+              manifest=manifest)
+    assert json.loads((run / "manifest.json").read_text()) == manifest
+    assert "window:" in (run / "INDEX.md").read_text()
 
 
 def test_embed_health_track_is_per_source() -> None:
     """The runbook calls a source green on its own gap, so the collector must
     group by source — one aggregate would let a stale source hide behind a
     fresh one."""
-    [argv] = TRACKS["embed-health.txt"]
+    [argv] = BASE_TRACKS["embed-health.txt"]
     assert "GROUP BY source" in argv[-1]
 
 
-def test_skolemelding_track_reads_the_triage_cursor() -> None:
-    """Like vigilo.txt: headers of records since the hand-advanced cursor."""
-    [argv] = TRACKS["skolemelding.txt"]
-    assert argv == ["skolemeldingshow", "--since-cursor", "--headers-only"]
+def test_cursor_tracks_get_the_window_explicitly(tmp_path) -> None:
+    """Every cursor-backed reader gets --since/--until from the sjekk cursor;
+    none of them may read a cursor file of its own."""
+    cursor = {"mail": {"to": "2026-11-01T06:52:57Z"},
+              "signal": {"to": "2026-11-01T19:41:56Z"},
+              "spond": {"to": "2026-11-02T07:34:35Z"},
+              "vigilo": {"to": "2026-11-01T05:51:50Z"},
+              "skolemelding": {"to": "2026-11-01T06:52:26Z"}}
+    tracks, windows = build_tracks(cursor, _until(), tmp_path)
+
+    assert set(CURSOR_TRACK_FILES.values()) <= set(tracks)
+    for track, filename in CURSOR_TRACK_FILES.items():
+        [argv] = tracks[filename]
+        assert "--until" in argv and windows[track]["until"] == "2026-11-02T09:00:00Z"
+        assert "--since" in argv, f"{track} has a cursor and must get a lower bound"
+        assert "--since-cursor" not in argv and "--bump" not in argv
+
+    # Mail is the one track whose lower bound is widened (Date vs arrival).
+    [mail_argv] = tracks["mail.txt"]
+    assert mail_argv[mail_argv.index("--since") + 1] == "2026-10-31T06:52:57Z"
+    assert "--ids-out" in mail_argv
+    [signal_argv] = tracks["signal.txt"]
+    assert signal_argv[signal_argv.index("--since") + 1] == "2026-11-01T19:41:56Z"
+
+
+def test_first_run_has_no_lower_bound(tmp_path) -> None:
+    tracks, windows = build_tracks({}, _until(), tmp_path)
+    for track, filename in CURSOR_TRACK_FILES.items():
+        [argv] = tracks[filename]
+        assert "--since" not in argv
+        assert windows[track]["since"] is None
+
+
+def test_mail_overlap_ids_are_passed_to_the_reader(tmp_path) -> None:
+    cursor = {"mail": {"to": "2026-11-01T06:52:57Z", "ids": ["id-a", "id-b"]}}
+    tracks, _ = build_tracks(cursor, _until(), tmp_path)
+    [argv] = tracks["mail.txt"]
+    exclude = tmp_path / "mail.exclude"
+    assert exclude.read_text().split() == ["id-a", "id-b"]
+    assert argv[argv.index("--exclude-ids") + 1] == str(exclude)
+
+
+def test_manifest_marks_failed_tracks_not_ok(tmp_path) -> None:
+    results = [TrackResult(filename="mail.txt", output="!! FAILED (exit 1)\n",
+                           exit_code=1)]
+    windows = {"mail": {"since": None, "until": "2026-11-02T09:00:00Z"}}
+    manifest = sjekk_collect._build_manifest(_until(), _until(), windows, results)
+    assert manifest["tracks"]["mail"]["ok"] is False
 
 
 # --- Phase-A gating: vigilo / skolemelding sync only on notification mail --

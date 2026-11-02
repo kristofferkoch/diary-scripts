@@ -18,7 +18,7 @@ are stored under `~/.local/share/signal-cli/attachments/<id>.csv`.
 
 ```bash
 # 1. Spot the CSV in the Signal triage pass:
-uv run signalshow --since-cursor --headers-only     # look for text/comma-separated-values
+uv run signalshow --since <cursor> --until <T> --headers-only   # look for text/comma-separated-values
 
 # 2. Find the attachment id (the JSONL carries metadata only, not bytes):
 grep 'comma-separated-values' memory/signal/$(date -u +%Y-%m-%d).jsonl
@@ -33,7 +33,7 @@ uv run finance-ingest memory/signal/<id> --enrich
 The Signal route has been the actual default since mid-2026 (see `FINANCE.md`
 ingestion log: 2026-06-11, 2026-07-03, 2026-08-04 all arrived this way).
 `finance-ingest` has no `--from-signal` flag — pass the path positionally.
-`signalshow --bump` after triage as usual.
+`sjekk-advance signal` after triage as usual.
 
 ### Route B — mail
 

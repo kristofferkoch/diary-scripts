@@ -110,32 +110,44 @@ def test_save_attachments_rejects_symlinked_output_directory(tmp_path: Path):
     assert not (outside / "dup.txt").exists()
 
 
-def test_load_cursor_parses_zulu(tmp_path: Path):
-    state = tmp_path / "mail-state.json"
-    state.write_text('{"last_successful_run": "2026-05-17T17:00:00Z"}')
-    dt = mailshow.load_cursor(state)
-    assert dt.isoformat() == "2026-05-17T17:00:00+00:00"
+def test_window_query_without_bounds_is_just_inbox():
+    assert mailshow.window_query(None, None, None) == "tag:inbox"
 
 
-def test_load_cursor_parses_offset(tmp_path: Path):
-    state = tmp_path / "mail-state.json"
-    state.write_text('{"last_successful_run": "2026-05-17T19:00:00+02:00"}')
-    dt = mailshow.load_cursor(state)
-    # Normalized to UTC.
-    assert dt.isoformat() == "2026-05-17T17:00:00+00:00"
-
-
-def test_cursor_query_without_extra():
+def test_window_query_is_half_open():
     from datetime import datetime, timezone
-    cursor = datetime(2026, 5, 17, 17, 0, tzinfo=timezone.utc)
-    q = mailshow.cursor_query(cursor, None)
-    # +1 to skip the cursor mail itself (notmuch date:@N.. is inclusive).
-    assert q == f"tag:inbox and date:@{int(cursor.timestamp()) + 1}.."
+    since = datetime(2026, 5, 17, 17, 0, tzinfo=timezone.utc)
+    until = datetime(2026, 5, 18, 9, 0, tzinfo=timezone.utc)
+    q = mailshow.window_query(since, until, None)
+    # +1 to skip the message at the lower bound (notmuch date:@N.. is inclusive).
+    assert q == (f"tag:inbox and date:@{int(since.timestamp()) + 1}"
+                 f"..@{int(until.timestamp())}")
 
 
-def test_cursor_query_with_extra():
+def test_window_query_ands_the_extra_query():
     from datetime import datetime, timezone
-    cursor = datetime(2026, 5, 17, 17, 0, tzinfo=timezone.utc)
-    q = mailshow.cursor_query(cursor, "from:astrid")
-    ts = int(cursor.timestamp()) + 1
-    assert q == f"(tag:inbox and date:@{ts}..) and (from:astrid)"
+    since = datetime(2026, 5, 17, 17, 0, tzinfo=timezone.utc)
+    q = mailshow.window_query(since, None, "from:astrid")
+    assert q == f"(tag:inbox and date:@{int(since.timestamp()) + 1}..) and (from:astrid)"
+
+
+def test_exclude_ids_and_ids_out(tmp_path, monkeypatch, capsys):
+    import json as _json
+    (tmp_path / "mail.ids").write_text("A\n")
+    (tmp_path / "exclude.ids").write_text("id:B\n")
+
+    monkeypatch.setattr(mailshow, "notmuch_search_ids", lambda q, limit: ["A", "B", "C"])
+    monkeypatch.setattr(
+        mailshow, "render_message",
+        lambda mid, *a, **k: _json.dumps({"id": mid}))
+
+    rc = mailshow.main([
+        "--since", "2026-05-17T17:00:00Z",
+        "--ids-out", str(tmp_path / "mail.ids"),
+        "--exclude-ids", str(tmp_path / "exclude.ids"),
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert '"id": "A"' in out and '"id": "C"' in out
+    assert '"id": "B"' not in out, "excluded overlap id must not be re-shown"
+    assert (tmp_path / "mail.ids").read_text().split() == ["A", "C"]

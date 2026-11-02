@@ -7,10 +7,12 @@ collection and mail event export keep their schedules.
 
 ## Fixed roots
 
-- `/var/lib/diary/legacy-state` — legacy cursors, daily JSONL, and attachments.
+- `/var/lib/diary/legacy-state` — collector state, daily JSONL, and attachments.
   The root is `kek:diary` `3775`; source/attachment directories are `2775` and
-  files are `0664` for existing triage readers. These files are never committed
-  and never belong in tracked `memory/`.
+  files are `0664`. These files are never committed and never belong in tracked
+  `memory/`. The **sjekk triage cursor is not here**: it is git-ignored
+  `memory/sjekk/cursor.json`, written only by `sjekk-advance` (readers are
+  stateless and take `--since/--until`).
 - `/var/lib/diary/collector-state` — trusted selection state, owner-only `0700`.
 - `/var/lib/diary/events` — immutable trusted event spool.
 

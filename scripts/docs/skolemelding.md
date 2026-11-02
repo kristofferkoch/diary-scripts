@@ -45,29 +45,29 @@ download in the same run to
 3-attempt retry budget tracked in state — a message with a missing file is
 re-emitted next run instead of being marked seen and losing the file.
 
-State: `/var/lib/diary/legacy-state/skolemelding-state.json` (runtime-only). The sync owns `messages`,
-`attachment_retries`, `last_successful_run` and `auth_required`; the
-**triage cursor `cursor` is written only by `skolemeldingshow --bump`** —
-the sync never moves what the next triage sees. Auth loss sets
+State: `/var/lib/diary/legacy-state/skolemelding-state.json` (runtime-only).
+The sync owns `messages`, `attachment_retries`, `last_successful_run` and
+`auth_required`. The triage cursor is `memory/sjekk/cursor.json`, written
+only by `sjekk-advance skolemelding`; the sync never moves what the next
+triage sees. Auth loss sets
 `auth_required`, prints `!! skolemelding auth expired — run
 skolemelding-login` and **exits 0**, so a dead login never breaks a sjekk.
 
 ## Reader — `skolemeldingshow`
 
 ```bash
-uv run skolemeldingshow --since-cursor --headers-only   # what the bundle shows
-uv run skolemeldingshow --since-cursor                  # bodies + attachment paths
-uv run skolemeldingshow --since-cursor --full           # + extracted PDF/docx/text
+uv run skolemeldingshow --since 2026-10-30 --until 2026-11-02 --headers-only
+uv run skolemeldingshow --since 2026-10-30 --until 2026-11-02
+uv run skolemeldingshow --since 2026-10-30 --until 2026-11-02 --full
 uv run skolemeldingshow --id 12345678 --full            # one message, whole
-uv run skolemeldingshow --all                           # weekly sweep, no cursor
-uv run skolemeldingshow --since-cursor --bump           # triaged, advance cursor
+uv run skolemeldingshow --all                           # weekly sweep, no window
 ```
 
 Header line: timestamp · kind (`U` new / `↩` update) · sender · subject,
 `📎n` per attachment, `❓` when the message is a feedback question that
 wants an answer. `--full` extracts attachment text from the **local** files
 (pypdf / python-docx — no network, works with a dead token). Exit 1 with
-only `(cursor: …)` / `(no matching records)` lines is the quiet-track
+only `(no matching records)` is the quiet-track
 signal sjekk-collect forgives; `auth_required` in state prints a loud
 banner that deliberately breaks that pattern so a dead login surfaces as
 FAILED in the bundle.
@@ -80,14 +80,14 @@ FAILED in the bundle.
    read-confirmations are the actionable kind: answer them **in the
    app/portal** (the pipeline never writes back); deadlines go to
    `CALENDAR.md`, durable facts to `SCHOOL.md`.
-3. **Detail when needed** — `uv run skolemeldingshow --since-cursor` for
+3. **Detail when needed** — `uv run skolemeldingshow --since <cursor> --until <T>` for
    bodies + attachment paths, `--full` to also extract attachment content,
    `--id <Id>` for a single message.
-4. **Advance the cursor** — `uv run skolemeldingshow --since-cursor --bump`
+4. **Advance the cursor** — `uv run sjekk-advance skolemelding`
    once triaged.
 5. **Daily note + commit** — actionable items go under `## Skolemelding` in
-   today's `memory/YYYY-MM-DD.md` (`MEM:`). Runtime cursors and JSONL are
-   generated, never committed, and remain in `/var/lib/diary/legacy-state`.
+   today's `memory/YYYY-MM-DD.md` (`MEM:`). The sjekk cursor is git-ignored
+   runtime state; JSONL remains in `/var/lib/diary/legacy-state`.
 
 ## Auth — `skolemelding-login`
 

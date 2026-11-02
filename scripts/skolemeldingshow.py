@@ -3,29 +3,26 @@
 
 The sjekk-track reader for ``skolemelding-sync`` data, in the
 ``vigiloshown`` / ``spondshow`` shape: header line per record,
-``--since-cursor`` / ``--headers-only`` for the collect bundle, ``--full``
+``--since/--until`` / ``--headers-only`` for the collect bundle, ``--full``
 when triaging.
 
-Cursor: ``/var/lib/diary/legacy-state/skolemelding-state.json``'s ``cursor`` — **hand-advanced**,
-like the mail, Signal and Vigilo cursors, not the auto-bumped
-``last_successful_run`` that ``skolemelding-sync`` writes. (``spondshow
---since-cursor`` reads that auto-bumped one, which the sync stamps *after*
-fetching — so records from the run that just ran fall just behind it and
-vanish from the bundle. Reading a poll cursor as a triage cursor is the bug;
-this is why the sync owns ``last_successful_run`` and the human owns
-``cursor``.)
+The reader is **stateless**: it takes an explicit half-open window
+``(since, until]`` over ``fetched_at`` and writes nothing. The sync owns
+``last_successful_run`` and the seen maps; the sjekk cursor lives in
+``memory/sjekk/cursor.json`` and is advanced by ``sjekk-advance`` after
+triage — not by the reader. (The old ``--since-cursor``/``--bump`` pair
+read a collector-owned mirror and wrote the triage mark back into it,
+which the next sync overwrote.)
 
-Read the SOP in ``scripts/docs/skolemelding.md``: collect → triage →
-``skolemeldingshow --since-cursor --bump``.
+Read the SOP in ``scripts/docs/skolemelding.md``: collect → triage → ``sjekk-advance``.
 
 Examples::
 
-    uv run skolemeldingshow --since-cursor --headers-only   # what the bundle shows
-    uv run skolemeldingshow --since-cursor                  # bodies + attachment paths
-    uv run skolemeldingshow --since-cursor --full           # + extracted attachment text
+    uv run skolemeldingshow --since 2026-10-30 --until 2026-11-02 --headers-only
+    uv run skolemeldingshow --since 2026-10-30 --until 2026-11-02
+    uv run skolemeldingshow --since 2026-10-30 --until 2026-11-02 --full
     uv run skolemeldingshow --id 12345678 --full            # one message, whole
-    uv run skolemeldingshow --all                           # weekly sweep, no cursor
-    uv run skolemeldingshow --since-cursor --bump           # triaged, advance cursor
+    uv run skolemeldingshow --all                           # weekly sweep, no window
 """
 from __future__ import annotations
 
@@ -72,13 +69,6 @@ def load_state() -> dict[str, Any]:
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
-
-
-def save_state(state: dict[str, Any]) -> None:
-    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(
-        json.dumps(state, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
-    )
 
 
 def iter_records(since: datetime | None, until: datetime | None, kinds: set[str] | None,
@@ -285,8 +275,6 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--since-cursor", action="store_true",
-                    help="Only records fetched after /var/lib/diary/legacy-state/skolemelding-state.json's cursor.")
     ap.add_argument("--since", default=None, help="ISO date/datetime (strictly after).")
     ap.add_argument("--until", default=None,
                     help="ISO date/datetime (at or before) — pair with --since for a window.")
@@ -295,14 +283,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--id", default=None, metavar="ID",
                     help="Only the message with this Id (detail view).")
     ap.add_argument("--all", action="store_true",
-                    help="Ignore the cursor entirely — the weekly sweep.")
+                    help="Ignore the window entirely — the weekly sweep.")
     ap.add_argument("--headers-only", action="store_true",
                     help="One line per record; no bodies, no attachments.")
     ap.add_argument("--full", action="store_true",
                     help="Also extract text from PDF/docx/text attachments (local "
                          "files — no network).")
-    ap.add_argument("--bump", action="store_true",
-                    help="After printing, advance the cursor to the newest record shown.")
     args = ap.parse_args(argv)
 
     state = load_state()
@@ -315,20 +301,7 @@ def main(argv: list[str] | None = None) -> int:
 
     since: datetime | None = None
     if args.all:
-        print("(--all: ignoring the cursor)", file=sys.stderr)
-    elif args.since_cursor:
-        raw = state.get("cursor")
-        if raw:
-            since = parse_iso(str(raw))
-            print(f"(cursor: {since.isoformat()})", file=sys.stderr)
-        else:
-            # Line shape is load-bearing: sjekk_collect forgives exit 1 only
-            # when every output line matches its "(cursor: …)" /
-            # "(no matching …)" quiet-track pattern — a first run before any
-            # --bump (or before the first login) must read as a quiet track,
-            # not a FAILED one.
-            print("(cursor: none yet — showing everything; --bump to set it)",
-                  file=sys.stderr)
+        print("(--all: ignoring the window)", file=sys.stderr)
     elif args.since:
         since = parse_iso(args.since)
 
@@ -346,13 +319,6 @@ def main(argv: list[str] | None = None) -> int:
 
     if not rows:
         print("(no matching records)", file=sys.stderr)
-
-    if args.bump and rows:
-        newest = max(str(r.get("fetched_at") or "") for r in rows)
-        if newest:
-            state["cursor"] = newest
-            save_state(state)
-            print(f"(cursor bumped to {newest})", file=sys.stderr)
 
     return 0 if rows else 1
 

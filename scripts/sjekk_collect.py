@@ -24,6 +24,13 @@ sjekk SOP. It runs in two phases:
     skolemelding.txt, calendar-retire.txt, backup-health.txt,
     embed-health.txt, services.txt
 
+Phase B runs over an **explicit window** `(since, until]` fixed after Phase A:
+`until` is the moment the bundle closes, `since` is the sjekk cursor's last
+triaged bound (`memory/sjekk/cursor.json`, mail widened by 24 h). The readers
+take `--since/--until` and write nothing; this tool writes the run's
+`manifest.json` with the window it used. After triage the agent advances the
+cursor with `sjekk-advance`, per track — never from inside a reader.
+
 Sibling tools are invoked by name (`mailshow`, `spondshow`, …) — they are on
 PATH when this runs under `uv run --project diary-scripts`.
 
@@ -38,9 +45,8 @@ failures) so the agent reads INDEX first and only opens files with content.
 `memory/sjekk/` is git-ignored in the diary repo — mail/signal content
 stays local, like `memory/signal/`.
 
-Cursor bumps (`memory/mail-state.json`, `signalshow --bump`), calendar
-enrichment, and filing into daily notes / topic files stay agent-side —
-this tool only collects.
+Cursor advances (`sjekk-advance`), calendar enrichment, and filing into daily
+notes / topic files stay agent-side — this tool only collects.
 
 Usage::
 
@@ -63,6 +69,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from mail_reader.config import legacy_state_root, workspace_root
+
+from scripts import sjekk_cursor
 
 DEFAULT_TIMEOUT = 120
 SYNC_TIMEOUT = 300
@@ -90,15 +98,29 @@ def _is_nothing_new(output: str) -> bool:
     return bool(lines) and all(_NOTHING_NEW_RE.match(l) for l in lines)
 
 # Phase B: one entry per output file. A track may run several commands; their
-# outputs are concatenated in order.
-TRACKS: dict[str, list[list[str]]] = {
-    "mail.txt": [["mailshow", "--since-cursor", "--headers-only"]],
-    "spond.txt": [["spondshow", "--since-cursor", "--headers-only"]],
+# outputs are concatenated in order. The cursor-backed tracks are built per run
+# by `build_tracks()` so the window is explicit and recorded.
+CURSOR_TRACK_FILES = {
+    "mail": "mail.txt",
+    "signal": "signal.txt",
+    "spond": "spond.txt",
+    "vigilo": "vigilo.txt",
+    "skolemelding": "skolemelding.txt",
+}
+
+# The console entry points are not uniformly "<track>show" (vigiloshown,
+# skolemeldingshow), so name them explicitly instead of string-building.
+TRACK_TOOL = {
+    "mail": "mailshow",
+    "signal": "signalshow",
+    "spond": "spondshow",
+    "vigilo": "vigiloshown",
+    "skolemelding": "skolemeldingshow",
+}
+
+BASE_TRACKS: dict[str, list[list[str]]] = {
     "spond-events.txt": [["spondshow", "--kind", "event", "--future",
                           "--headers-only"]],
-    "signal.txt": [["signalshow", "--since-cursor", "--headers-only"]],
-    "vigilo.txt": [["vigiloshown", "--since-cursor", "--headers-only"]],
-    "skolemelding.txt": [["skolemeldingshow", "--since-cursor", "--headers-only"]],
     "calendar-retire.txt": [["retire-calendar"]],
     "backup-health.txt": [["systemctl", "show", "restic-backup.service",
                            "-p", "Result", "-p", "ExecMainExitTimestamp",
@@ -113,6 +135,45 @@ TRACKS: dict[str, list[list[str]]] = {
     # broker outage). See scripts/docs/diary-sync.md.
     "services.txt": [["diary-sync", "status", "--fallback"]],
 }
+
+
+def _window_args(since: dt.datetime | None, until: dt.datetime) -> list[str]:
+    args: list[str] = []
+    if since is not None:
+        args += ["--since", sjekk_cursor.format_iso(since)]
+    args += ["--until", sjekk_cursor.format_iso(until)]
+    return args
+
+
+def build_tracks(cursor: dict, until: dt.datetime,
+                 run_dir: Path) -> tuple[dict[str, list[list[str]]],
+                                         dict[str, dict]]:
+    """One command per output file, each reader scoped to the run's window.
+
+    Mail is the only reader compared on the ``Date:`` header, so its window is
+    widened; the ids shown in that overlap are written to ``mail.ids`` and
+    carried in the cursor by `sjekk-advance`, so the next run can skip them.
+    """
+    tracks: dict[str, list[list[str]]] = {}
+    windows: dict[str, dict] = {}
+    for track, filename in CURSOR_TRACK_FILES.items():
+        since, to = sjekk_cursor.window(cursor, track, now=until)
+        windows[track] = {
+            "since": sjekk_cursor.format_iso(since) if since else None,
+            "until": sjekk_cursor.format_iso(to),
+        }
+        argv = [TRACK_TOOL[track], *_window_args(since, until), "--headers-only"]
+        if track == "mail":
+            argv += ["--ids-out", str(run_dir / "mail.ids")]
+            ids = sjekk_cursor.shown_ids(cursor, "mail")
+            if ids:
+                ids_path = run_dir / "mail.exclude"
+                ids_path.write_text("".join(f"{i}\n" for i in ids),
+                                    encoding="utf-8")
+                argv += ["--exclude-ids", str(ids_path)]
+        tracks[filename] = [argv]
+    tracks.update(BASE_TRACKS)
+    return tracks, windows
 
 
 @dataclass
@@ -203,7 +264,8 @@ def run_tracks(tracks: dict[str, list[list[str]]],
     return results
 
 
-def render_index(stamp: str, results: list[TrackResult]) -> str:
+def render_index(stamp: str, results: list[TrackResult],
+                 window: dict | None = None) -> str:
     """One line per track: file, size, EMPTY / failure markers."""
     lines = [
         f"# sjekk-collect {stamp}",
@@ -212,6 +274,20 @@ def render_index(stamp: str, results: list[TrackResult]) -> str:
         "`!!` tracks need a manual look.",
         "",
     ]
+    if window:
+        by_track = window.get("tracks") or {}
+        until = window.get("until")
+        lines.append(f"window: until {until}")
+        for track in CURSOR_TRACK_FILES:
+            entry = by_track.get(track) or {}
+            since = entry.get("since")
+            note = ""
+            if track == "mail" and since:
+                note = " (24 h overlap)"
+            lines.append(f"  {track}: since {since or 'no cursor — full replay'}{note}")
+        lines.append(
+            "after triage: `sjekk-advance <track> …` — only the tracks you finished")
+        lines.append("")
     for res in results:
         size = len(res.output.encode("utf-8"))
         n_lines = res.output.count("\n")
@@ -232,19 +308,43 @@ def render_index(stamp: str, results: list[TrackResult]) -> str:
     return "\n".join(lines)
 
 
-def write_run(out_root: Path, results: list[TrackResult],
-              now: dt.datetime | None = None) -> Path:
-    """Write <out_root>/<UTC-stamp>/ with one file per track + INDEX.md,
-    then repoint the `latest` symlink. Returns the run directory."""
-    now = now or dt.datetime.now(dt.UTC)
-    stamp = now.strftime("%Y-%m-%dT%H-%M-%SZ")
-    run_dir = out_root / stamp
-    run_dir.mkdir(parents=True, exist_ok=False)
+def _build_manifest(started: dt.datetime, until: dt.datetime,
+                    windows: dict[str, dict], results: list[TrackResult]) -> dict:
+    by_file = {res.filename: res for res in results}
+    tracks: dict[str, dict] = {}
+    for track, filename in CURSOR_TRACK_FILES.items():
+        res = by_file.get(filename)
+        win = windows.get(track) or {}
+        tracks[track] = {
+            "file": filename,
+            "since": win.get("since"),
+            "until": win.get("until") or sjekk_cursor.format_iso(until),
+            "ok": bool(res is not None and not res.failed),
+            "lines": res.output.count("\n") if res is not None else 0,
+        }
+        if track == "mail" and res is not None and not res.failed:
+            tracks[track]["ids_file"] = "mail.ids"
+    return {
+        "version": 1,
+        "started": sjekk_cursor.format_iso(started),
+        "until": sjekk_cursor.format_iso(until),
+        "tracks": tracks,
+    }
+
+
+def write_run(run_dir: Path, results: list[TrackResult], *, stamp: str,
+              window: dict | None = None, manifest: dict | None = None) -> Path:
+    """Write one file per track, INDEX.md, manifest.json and repoint `latest`."""
+    run_dir.mkdir(parents=True, exist_ok=True)
     for res in results:
         (run_dir / res.filename).write_text(res.output)
-    (run_dir / "INDEX.md").write_text(render_index(stamp, results))
-    latest = out_root / "latest"
-    tmp = out_root / ".latest.tmp"
+    (run_dir / "INDEX.md").write_text(render_index(stamp, results, window))
+    if manifest is not None:
+        (run_dir / "manifest.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8")
+    latest = run_dir.parent / "latest"
+    tmp = run_dir.parent / ".latest.tmp"
     tmp.unlink(missing_ok=True)
     tmp.symlink_to(run_dir.name)
     tmp.replace(latest)
@@ -449,13 +549,30 @@ def main() -> None:
     args = parser.parse_args()
 
     out_root = args.out or workspace_root() / "memory" / "sjekk"
+    out_root.mkdir(parents=True, exist_ok=True)
+    started = dt.datetime.now(dt.UTC)
+    cursor = sjekk_cursor.load(out_root / "cursor.json")
 
     for line in phase_a(force_sync=args.force_sync, no_sync=args.no_sync):
         print(line)
 
-    results = run_tracks(TRACKS, timeout=args.timeout)
-    run_dir = write_run(out_root, results)
+    # Close the window *after* Phase A: everything this run fetched is inside
+    # it, and the next run's lower bound is this exact instant.
+    until = dt.datetime.now(dt.UTC)
+    stamp = until.strftime("%Y-%m-%dT%H-%M-%SZ")
+    run_dir = out_root / stamp
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    tracks, windows = build_tracks(cursor, until, run_dir)
+    results = run_tracks(tracks, timeout=args.timeout)
+    manifest = _build_manifest(started, until, windows, results)
+    window = {"until": sjekk_cursor.format_iso(until),
+              "tracks": windows}
+    write_run(run_dir, results, stamp=stamp, window=window, manifest=manifest)
     print(f"wrote {run_dir} (latest -> {run_dir.name})")
+    print(f"window: until {sjekk_cursor.format_iso(until)}")
+    for track, win in windows.items():
+        print(f"  {track}: since {win['since'] or '(full replay)'}")
     n_failed = sum(1 for r in results if r.failed)
     if n_failed:
         print(f"!! {n_failed} track(s) failed — see INDEX.md",

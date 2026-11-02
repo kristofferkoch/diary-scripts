@@ -14,7 +14,7 @@ uv run --project diary-scripts <entry-point> …
 
 Entry-point names: `mailshow`, `search-mail`, `embed-mail`, `embed-messages`,
 `archive-inbox`, `notmuch-sync-tags`, `spond-sync`, `spondshow`, `finance-ingest`,
-`retire-calendar`, `sjekk-collect`, `kindle-dashboard`, `immich-recent`,
+`retire-calendar`, `sjekk-collect`, `sjekk-advance`, `kindle-dashboard`, `immich-recent`,
 `dsh-web-notify`, `vigilo-api`, `vigilo-login`, `vigilo-sync`, `vigiloshown`,
 `skolemelding-api`, `skolemelding-login`, `skolemelding-sync`,
 `skolemeldingshow`, `diary-sync`, `diary-sync-broker`, `diary-pipeline-triage`,
@@ -38,9 +38,11 @@ Non-secret host endpoints live in root-owned world-readable
 `/etc/diary/hosts.toml`; privileged collector settings stay in `root:kek` `0640`
 `/etc/diary/trusted.toml`. Fixed pipeline model settings use separate root-owned
 `/etc/diary/pipeline.toml`. None has an env or local-config override. Legacy
-Spond/Vigilo/Skolemelding cursors, JSONL, and attachments live only in
+Spond/Vigilo/Skolemelding collector state, JSONL, and attachments live only in
 `/var/lib/diary/legacy-state`; trusted collector state and immutable events stay
-in their separate `/var/lib/diary` roots. The submodule ships only placeholder
+in their separate `/var/lib/diary` roots. The **sjekk triage cursor** is
+neither: `memory/sjekk/cursor.json` (git-ignored), written only by
+`sjekk-advance`. The submodule ships only placeholder
 examples. New code must resolve the workspace data root (where `CALENDAR.md`,
 `memory/`, topic files live) via `mail_reader.config.workspace_root()` (from
 config `paths.project`) — not by walking `__file__`.

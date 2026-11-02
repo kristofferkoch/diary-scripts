@@ -21,26 +21,30 @@ own cursor). Then `vigilo-sync --once` / `skolemelding-sync --once` run —
 **gated on the notification mail**: both services always mail when there is
 new content, so the sync only runs when notmuch has a notification mail
 (`subject:"Ny melding i Vigilo"` / `subject:"Ny Skolemelding"`) newer than
-the sync's own `last_successful_run` in `memory/<track>-state.json`. A sync
-older than 7 days runs anyway (safety net if notifications stop), as does
-any lookup failure, and `--force-sync` overrides the gate. The syncs are
-idempotent; the triage cursor stays with the reader's `--bump`; auth loss
-exits 0 with `auth_required` set. Phase B still runs `vigiloshown` /
-`skolemeldingshow` every time — they read local state only, so a skipped
-sync still surfaces untriaged backlog.
+the sync's own `last_successful_run` in
+`/var/lib/diary/legacy-state/<track>-state.json` (or trusted collector state,
+for broker runs). A sync older than 7 days runs anyway (safety net if
+notifications stop), as does any lookup failure, and `--force-sync` overrides
+the gate. The syncs are idempotent; auth loss exits 0 with `auth_required`
+set. Phase B still runs `vigiloshown` / `skolemeldingshow` every time — they
+read local data only, so a skipped sync still surfaces untriaged backlog.
 
 **Phase B — collect (parallel):** one output file per track, written to
 `memory/sjekk/<UTC-timestamp>/` with a `latest` symlink repointed at the
-new run:
+new run. Every cursor-backed reader is given an **explicit window**
+`(since, until]`: `until` is the moment Phase A finished, `since` is the
+triaged cursor for that track from `memory/sjekk/cursor.json` (mail widened
+by 24 h). Readers write nothing; the collector writes the run's
+`manifest.json` with the window and each track's `ok` flag.
 
 | file | command |
 |---|---|
-| `mail.txt` | `mailshow --since-cursor --headers-only` |
-| `spond.txt` | `spondshow --since-cursor --headers-only` |
-| `spond-events.txt` | `spondshow --kind event --future --headers-only` |
-| `signal.txt` | `signalshow --since-cursor --headers-only` (cursor bump stays agent-side) |
-| `vigilo.txt` | `vigiloshown --since-cursor --headers-only` |
-| `skolemelding.txt` | `skolemeldingshow --since-cursor --headers-only` |
+| `mail.txt` | `mailshow --since <cursor−24h> --until <T> --headers-only` (+ `--ids-out`, `--exclude-ids`) |
+| `spond.txt` | `spondshow --since <cursor> --until <T> --headers-only` |
+| `spond-events.txt` | `spondshow --kind event --future --headers-only` (no window — repeats every run) |
+| `signal.txt` | `signalshow --since <cursor> --until <T> --headers-only` |
+| `vigilo.txt` | `vigiloshown --since <cursor> --until <T> --headers-only` |
+| `skolemelding.txt` | `skolemeldingshow --since <cursor> --until <T> --headers-only` |
 | `calendar-retire.txt` | `retire-calendar` (real run — idempotent; moved lines captured for enrichment) |
 | `backup-health.txt` | `systemctl show restic-backup.service -p Result -p ExecMainExitTimestamp --value` |
 | `embed-health.txt` | `psql -d mailvec -t -c "SELECT source, now() - max(embedded_at) FROM messages GROUP BY source ORDER BY source;"` (per-source, so one stale source can't hide behind the others) |
@@ -56,6 +60,27 @@ open only files with content.**
 same treatment as `memory/signal/`).
 
 Stays agent-side (the collector deliberately does none of this): cursor
-bumps (`memory/mail-state.json`, `signalshow --bump`), calendar
-enrichment, daily-note / topic-file filing, receipt digesting into
-`RECEIPTS.md`.
+**advance** (`sjekk-advance <track>` after triage), calendar enrichment,
+daily-note / topic-file filing, receipt digesting into `RECEIPTS.md`.
+
+## Cursor and window
+
+The triage cursor is `memory/sjekk/cursor.json` (git-ignored), written only
+by `sjekk-advance` and read only here. It records the **upper bound of the
+last triaged window**, not the newest record shown.
+
+```bash
+uv run sjekk-advance mail signal          # after triaging those tracks
+uv run sjekk-advance --manifest memory/sjekk/<stamp> vigilo
+```
+
+Advance only the tracks you finished: a failed bundle (`ok: false` in the
+manifest) and an unknown track are refused, and the write is monotonic so a
+repeated or concurrent advance cannot move the cursor backwards. Readers
+never read or write it — `--since-cursor` and `--bump` are gone.
+
+Why the window is fixed *after* Phase A: everything this run fetched has a
+collection time ≤ `until`, so the next window `(until, …]` cannot miss or
+duplicate it. Mail is the exception — it is filtered on the `Date:` header,
+which can predate arrival — so mail windows overlap by 24 h and the ids
+shown in the overlap travel in the cursor (`ids`) to be excluded next time.

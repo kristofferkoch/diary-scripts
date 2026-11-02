@@ -1,4 +1,4 @@
-"""Tests for signalshow: cursor filtering, peer/sender filters, --bump."""
+"""Tests for signalshow: explicit window filtering, peer/sender filters."""
 from __future__ import annotations
 
 import json
@@ -25,20 +25,28 @@ def _rec(ts, iso, direction="in", name="Alice", text="hi", group=None):
     return base
 
 
-def test_since_cursor_excludes_at_or_before(tmp_path, monkeypatch, capsys):
+def test_since_is_strict_and_until_is_inclusive(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(show, "JSONL_DIR", tmp_path)
-    monkeypatch.setattr(show, "STATE_PATH", tmp_path / "signal-state.json")
-    (tmp_path / "signal-state.json").write_text(json.dumps({"cursor": "2026-06-07T12:00:00Z"}))
     _write(tmp_path, "2026-06-07.jsonl", [
         _rec(1, "2026-06-07T11:59:00Z", text="old"),
-        _rec(2, "2026-06-07T12:00:00Z", text="boundary"),  # == cursor → excluded
+        _rec(2, "2026-06-07T12:00:00Z", text="boundary"),  # == since → excluded
         _rec(3, "2026-06-07T12:30:00Z", text="new"),
+        _rec(4, "2026-06-07T13:00:00Z", text="after-until"),
     ])
-    rc = show.main(["--since-cursor"])
+    rc = show.main(["--since", "2026-06-07T12:00:00Z",
+                    "--until", "2026-06-07T12:30:00Z"])
     out = capsys.readouterr().out
     assert rc == 0
     assert "new" in out
-    assert "old" not in out and "boundary" not in out
+    assert "old" not in out and "boundary" not in out and "after-until" not in out
+
+
+def test_the_reader_writes_no_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(show, "JSONL_DIR", tmp_path)
+    _write(tmp_path, "2026-06-07.jsonl", [_rec(1, "2026-06-07T10:00:00Z")])
+    before = sorted(p.name for p in tmp_path.iterdir())
+    show.main(["--since", "2026-06-07T09:00:00Z"])
+    assert sorted(p.name for p in tmp_path.iterdir()) == before
 
 
 def test_from_filter_matches_name_substring(tmp_path, monkeypatch, capsys):
@@ -62,16 +70,3 @@ def test_with_filter_includes_own_replies(tmp_path, monkeypatch, capsys):
     show.main(["--with", "alice"])
     out = capsys.readouterr().out
     assert "q" in out and "my-reply" in out and "other" not in out
-
-
-def test_bump_sets_cursor_to_newest(tmp_path, monkeypatch):
-    monkeypatch.setattr(show, "JSONL_DIR", tmp_path)
-    monkeypatch.setattr(show, "STATE_PATH", tmp_path / "signal-state.json")
-    _write(tmp_path, "2026-06-07.jsonl", [
-        _rec(1, "2026-06-07T10:00:00Z"),
-        _rec(3, "2026-06-07T12:00:00Z"),
-        _rec(2, "2026-06-07T11:00:00Z"),
-    ])
-    show.main(["--bump"])
-    saved = json.loads((tmp_path / "signal-state.json").read_text())
-    assert saved["cursor"] == "2026-06-07T12:00:00Z"  # newest by ts, not file order

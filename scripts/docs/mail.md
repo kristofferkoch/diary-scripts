@@ -28,9 +28,9 @@ uv run mailshow thread:00000000000349df
 uv run mailshow --headers-only --limit=20 'from:gonordic'
 uv run mailshow --max-chars=8000 id:<message-id>
 
-# Process-new-mail entrypoint: starts from memory/mail-state.json:last_successful_run.
-uv run mailshow --since-cursor --headers-only
-uv run mailshow --since-cursor 'from:astrid'   # narrow within the cursor window
+# Process-new-mail entrypoint: explicit half-open window (since, until]
+uv run mailshow --since 2026-11-01T06:52:57Z --headers-only
+uv run mailshow --since 2026-11-01 --until 2026-11-02 'from:astrid'
 ```
 
 Don't write fresh inline `python3 -c "..."` blocks for body extraction — extend this
@@ -38,16 +38,18 @@ tool instead so improvements stick.
 
 ### Processing new mail (SOP)
 
-The cursor `memory/mail-state.json` → `last_successful_run` is the start
-point. It's **hand-maintained** and easy to forget — the cursor has
-drifted multiple times because earlier passes wrote the daily note but
-never bumped the JSON.
+The window comes from the sjekk cursor `memory/sjekk/cursor.json`
+(git-ignored, written only by `sjekk-advance`). Mail is filtered on the
+`Date:` header, which can predate arrival, so its window starts 24 h before
+the cursor and the previous window's ids are excluded (`--exclude-ids`).
+The reader itself is stateless: it takes `--since/--until` and writes
+nothing.
 
 In a sjekk, `sjekk-collect` has already done step 0 (freshness check +
 conditional sync) and produced `memory/sjekk/latest/mail.txt` (step 1's
 output) — read that file instead of re-running.
 
-0. **Check when mail last synced — FIRST.** Before reading the cursor,
+0. **Check when mail last synced — FIRST.** Before reading the window,
    confirm the local index is current, otherwise you triage a stale
    snapshot and miss mail that's already on the server.
    `systemctl --user show mail-sync.service -p ExecMainExitTimestamp --value`
@@ -56,25 +58,24 @@ output) — read that file instead of re-running.
    the user says mail "just arrived", force one and wait for it to finish
    before continuing: `systemctl --user start mail-sync.service` (blocks
    until `mbsync` + `notmuch new` complete — look for `No new mail` /
-   `Processed N files` in the journal). Only then read the cursor. Lesson
+   `Processed N files` in the journal). Only then read the window. Lesson
    2026-05-29: triaged a booking, then more mail (date-change +
    payment link) landed seconds later — re-syncing first each pass caught
    the full thread instead of a half-state.
-1. **Read the cursor** — `uv run mailshow --since-cursor --headers-only`
-   (or add a filter: `--since-cursor 'from:astrid'`). The tool reads
-   `memory/mail-state.json` itself and prints the cursor it used. Anything
-   returned is candidate-new.
+1. **Read the window** — `uv run mailshow --since <cursor−24h> --until <T>`
+   (or use the parameters printed in `INDEX.md`; add a filter as a query
+   argument). The tool prints the notmuch query it built. Anything returned
+   is candidate-new.
 2. **Cross-check recent daily notes** (`memory/YYYY-MM-DD.md`) for
    "Mail-status" / "Inbox-gjennomgang" sections that already cover items
    in that window. If they do, the real high-water mark is the latest of
-   those, not the JSON cursor.
+   those, not the window's lower bound.
 3. **Triage** with `mailshow` / `search-mail`. Record durable facts
    per `~/diary/AGENTS.md` §Memory.
-4. **Bump `last_successful_run`** in `memory/mail-state.json` to the
-   timestamp of the newest message processed (use the message's `Date:`
-   header in UTC), and commit it together with the memory updates under
-   `MEM:`. Don't skip this step — that's what causes the cursor to lag
-   real sweeps.
+4. **Advance the cursor** — `uv run sjekk-advance mail` once triaged. It
+   sets the cursor to the bundle window's `until` (not "newest message
+   shown") and carries the overlap ids. Nothing to commit: the cursor is
+   git-ignored runtime state.
 
 **Also check sent mail when summarising thread state.** The mail cursor
 tracks `tag:inbox` only — user's own replies and forwards never enter the

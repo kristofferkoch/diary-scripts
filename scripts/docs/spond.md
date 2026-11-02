@@ -4,9 +4,10 @@
 
 Evaluation phase, no timer yet. `uv run spond-sync --once` pulls
 chats + events + posts via the Olen/Spond library and appends raw JSONL
-to `/var/lib/diary/legacy-state/spond/YYYY-MM-DD.jsonl`. State cursor lives at
-`/var/lib/diary/legacy-state/spond-state.json` (auto-bumped by the tool — unlike the mail
-cursor). Use `uv run spondshow --since-cursor [--headers-only]` to
+to `/var/lib/diary/legacy-state/spond/YYYY-MM-DD.jsonl`. The sync's own poll
+watermark lives at `/var/lib/diary/legacy-state/spond-state.json` and is
+**collector state — never a triage cursor**. Triage uses an explicit window:
+`uv run spondshow --since <T> --until <T2> [--headers-only]` to
 triage new items; `--kind event --future` filters to upcoming events.
 Run **manually** for now; we'll add a systemd timer once we trust it.
 
@@ -24,15 +25,15 @@ post bodies, while payment receipts come in over mail.
 - 2FA must be **off** on the Spond account — Olen/Spond doesn't implement
   the OTP-verify flow
   ([issue #205](https://github.com/Olen/Spond/issues/205)).
-- `spondshow` reads `spond.rsvp_member_id` from root-owned
-  `/etc/diary/trusted.toml` to surface accept/decline/unanswered markers in
-  event headers. For interactive use, `--rsvp-as MEMBER_ID` or
-  `$SPOND_RSVP_MEMBER_ID` overrides the trusted value (CLI wins); ordinary
-  `config/local.toml` is not consulted.
+- `spondshow` does **not** read trusted config any more (2026-11-02: the
+  whole track failed because it did). RSVP markers are cosmetic and come
+  only from `--rsvp-as MEMBER_ID` or `$SPOND_RSVP_MEMBER_ID`; the sync still
+  uses `spond.rsvp_member_id` for the event activity key, so an RSVP change
+  re-emits the event regardless of how it is displayed.
 
 ### Processing new Spond items (SOP)
 
-Unlike the mail cursor, `/var/lib/diary/legacy-state/spond-state.json` is auto-bumped —
+`/var/lib/diary/legacy-state/spond-state.json` is auto-bumped by the sync —
 running `spond-sync --once` updates `last_successful_run` and the
 per-chat / per-event / per-post seen-sets on every successful run. The
 cursor reflects "the last time `spond-sync` ran cleanly", not "the
@@ -45,16 +46,17 @@ last time we wrote a digest".
    (In a sjekk, `sjekk-collect` already ran this in Phase A, and its
    Phase B produced `memory/sjekk/latest/spond.txt` — step 2's output —
    and `spond-events.txt` — step 2b's output.)
-2. **Triage new records** — `uv run spondshow --since-cursor
+2. **Triage new records** — `uv run spondshow --since <cursor> --until <T>
    --headers-only` for a one-line summary per record; drop
    `--headers-only` to see full JSON bodies. Filter with `--kind
    chat|event|post` or pin to `--chat <id>` / `--event <id>`.
    Events are tracked by a **content key** (`event_activity_key`), so an
    RSVP change, reschedule, or cancellation on an already-seen event
-   re-emits and shows up here. Both sync and display read the tracked member
-   from trusted `spond.rsvp_member_id`, so the key folds in that member's own
-   response and reconciliation keeps its markers without shell exports.
-   `$SPOND_RSVP_MEMBER_ID` remains an interactive sync override. If neither
+   re-emits and shows up here. The sync reads the tracked member from
+   trusted `spond.rsvp_member_id`, so the key folds in that member's own
+   response; the display marker needs `--rsvp-as` (or the env var) because
+   the reader holds no privileged config. `$SPOND_RSVP_MEMBER_ID` remains an
+   interactive sync override. If neither
    setting is present, `spond-sync` prints a `!!` warning and only
    reschedule/cancellation are caught, not RSVP. (Before 2026-05-29
    events used a flat id-only seen-set that swallowed RSVP changes
@@ -64,7 +66,7 @@ last time we wrote a digest".
    reconcile every `[?]`/`[✓]`/`[✗]` RSVP marker against `CALENDAR.md`. A
    marker that disagrees with the calendar (or a calendar line still
    saying "RSVP: svar?" for an event user has since answered) is the
-   signal to update. Catches anything the cursor logic misses.
+   signal to update. Catches anything the window misses.
    **`[event AVLYST]`** (with the organiser's `reason=`) is a cancelled
    event: it keeps its original start time, so mark the `CALENDAR.md` line
    avlyst (or drop it) rather than reading it as a live commitment. These

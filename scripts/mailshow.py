@@ -10,8 +10,8 @@ Examples:
     scripts/mailshow.py --max-chars=8000 thread:0000000000000018
     scripts/mailshow.py --attachment-text id:abcdef@example.com
     scripts/mailshow.py --attachments=/tmp/foo id:abcdef@example.com
-    scripts/mailshow.py --since-cursor --headers-only   # everything since memory/mail-state.json
-    scripts/mailshow.py --since-cursor 'from:astrid'     # narrow the since-cursor sweep
+    scripts/mailshow.py --since 2026-11-01T06:52:57Z --headers-only
+    scripts/mailshow.py --since 2026-11-01 --until 2026-11-02 'from:astrid'
 
 Notes:
   - Mail is READ-ONLY (see TOOLS.md). This script never sends or modifies mail.
@@ -21,42 +21,31 @@ from __future__ import annotations
 
 import argparse
 import email
-import json
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from email.policy import default as email_default
 from pathlib import Path
 
-from mail_reader.config import workspace_root
-
 from scripts.attachment_store import write_attachment
-
-MAIL_STATE_PATH = workspace_root() / "memory" / "mail-state.json"
-
-
-def load_cursor(state_path: Path = MAIL_STATE_PATH) -> datetime:
-    """Read `last_successful_run` from the mail-state JSON and return as a UTC datetime."""
-    data = json.loads(state_path.read_text())
-    raw = data["last_successful_run"]
-    # fromisoformat in older Pythons rejects the trailing "Z"; normalize it.
-    if raw.endswith("Z"):
-        raw = raw[:-1] + "+00:00"
-    dt = datetime.fromisoformat(raw)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+from scripts.sjekk_cursor import parse_iso
 
 
-def cursor_query(cursor: datetime, extra: str | None) -> str:
-    """Build a notmuch query for inbox mail strictly newer than `cursor`, optionally AND-ed with `extra`.
+def window_query(since: datetime | None, until: datetime | None,
+                 extra: str | None) -> str:
+    """Build a notmuch query for inbox mail in the half-open window ``(since, until]``.
 
-    notmuch's `date:@N..` is inclusive at the lower bound, so we add 1 second to
-    skip the cursor message itself (the cursor records the Date of the last
-    successfully processed mail; that mail is, by definition, done).
+    notmuch's ``date:@N..`` is inclusive at both ends, so the lower bound is
+    shifted one second past ``since`` (the message at ``since`` was triaged with
+    the previous window). A ``None`` bound is left open.
     """
-    base = f"tag:inbox and date:@{int(cursor.timestamp()) + 1}.."
+    parts = ["tag:inbox"]
+    if since is not None or until is not None:
+        lo = f"@{int(since.timestamp()) + 1}" if since is not None else ""
+        hi = f"@{int(until.timestamp())}" if until is not None else ""
+        parts.append(f"date:{lo}..{hi}")
+    base = " and ".join(parts)
     if extra:
         return f"({base}) and ({extra})"
     return base
@@ -225,12 +214,18 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("query", nargs="?",
                     help="A notmuch query (id:..., thread:..., or any search expression). "
-                         "Optional when --since-cursor is given; if both are given, they are AND-ed.")
-    ap.add_argument("--since-cursor", action="store_true",
-                    help="Start from memory/mail-state.json's last_successful_run "
-                         "(builds `tag:inbox and date:@<unix>..`). The cursor is hand-maintained "
-                         "— see scripts/docs/mail.md → 'Processing new mail (SOP)'.")
-    ap.add_argument("--limit", type=int, default=20, help="Max messages to render for non-id queries (default: 20).")
+                         "Optional when --since/--until is given; if both are given, they are AND-ed.")
+    ap.add_argument("--since", default=None,
+                    help="ISO date/datetime; only inbox mail with a Date strictly after it.")
+    ap.add_argument("--until", default=None,
+                    help="ISO date/datetime; only inbox mail with a Date at or before it.")
+    ap.add_argument("--exclude-ids", type=Path, default=None, metavar="FILE",
+                    help="Skip message ids listed one per line (the previous window's overlap ids).")
+    ap.add_argument("--ids-out", type=Path, default=None, metavar="FILE",
+                    help="Write the ids shown, one per line (for the bundle manifest).")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="Max messages to render (default: 20, or all inbox mail "
+                         "when a --since/--until window is given).")
     ap.add_argument("--max-chars", type=int, default=4000, help="Truncate each body at N chars (default: 4000, 0 = no truncation).")
     ap.add_argument("--headers-only", action="store_true", help="Print headers + attachment list, skip body.")
     ap.add_argument("--attachment-text", action="store_true",
@@ -239,18 +234,39 @@ def main(argv: list[str] | None = None) -> int:
                     help="Save raw attachment bytes to DIR (created if missing).")
     args = ap.parse_args(argv)
 
-    if args.since_cursor:
-        cursor = load_cursor()
-        q = cursor_query(cursor, args.query.strip() if args.query else None)
-        print(f"(cursor: {cursor.isoformat()} → {q})", file=sys.stderr)
-    elif args.query:
-        q = args.query.strip()
+    since = parse_iso(args.since) if args.since else None
+    until = parse_iso(args.until) if args.until else None
+    if since is not None or until is not None or args.query:
+        q = window_query(since, until, args.query.strip() if args.query else None)
+        print(f"(window: {q})", file=sys.stderr)
     else:
-        ap.error("query is required unless --since-cursor is given")
+        ap.error("a query, --since or --until is required")
     if q.startswith("id:"):
         msg_ids = [q[3:]]
     else:
-        msg_ids = notmuch_search_ids(q, args.limit)
+        limit = args.limit
+        if limit is None:
+            limit = 10000 if (since is not None or until is not None) else 20
+        msg_ids = notmuch_search_ids(q, limit)
+
+    excluded: set[str] = set()
+    if args.exclude_ids:
+        try:
+            excluded = {
+                line.strip().removeprefix("id:")
+                for line in args.exclude_ids.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            }
+        except OSError as exc:
+            print(f"!! cannot read --exclude-ids {args.exclude_ids}: {exc}",
+                  file=sys.stderr)
+    if excluded:
+        msg_ids = [mid for mid in msg_ids if mid not in excluded]
+
+    if args.ids_out:
+        args.ids_out.write_text("".join(f"{mid}\n" for mid in msg_ids),
+                                encoding="utf-8")
+
     if not msg_ids:
         print("(no matching messages)", file=sys.stderr)
         return 1

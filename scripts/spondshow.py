@@ -3,16 +3,18 @@
 Read Spond JSONL records from /var/lib/diary/legacy-state/spond/ as readable text.
 
 Examples:
-    scripts/spondshow.py --since-cursor                    # everything new since cursor
-    scripts/spondshow.py --since-cursor --kind chat
+    scripts/spondshow.py --since 2026-05-20 --until 2026-05-21
     scripts/spondshow.py --since 2026-05-20 --kind event
-    scripts/spondshow.py --headers-only --since-cursor     # one-line summary per record
+    scripts/spondshow.py --headers-only --since 2026-05-20  # one-line summary per record
     scripts/spondshow.py --chat <chat-id>                  # all records for a specific chat
     scripts/spondshow.py --kind event --future             # only future events
     SPOND_RSVP_MEMBER_ID=<id> scripts/spondshow.py ...     # surface RSVP markers
 
-Mirrors `mailshow.py --since-cursor` — the cursor is
-/var/lib/diary/legacy-state/spond-state.json's `last_successful_run`, written by `spond_sync.py`.
+Stateless, like every sjekk reader: an explicit half-open window
+`(since, until]` over `fetched_at`, no cursor reads or writes. Spond's
+"cursor" is the collector's poll watermark and must never be used as a triage
+mark; reading it here used to drop the batch the run had just fetched. The
+sjekk cursor lives in `memory/sjekk/cursor.json` (`sjekk-advance`).
 """
 from __future__ import annotations
 
@@ -24,9 +26,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from mail_reader.config import legacy_state_root, trusted_cfg
+from mail_reader.config import legacy_state_root
 
-STATE_PATH = legacy_state_root() / "spond-state.json"
 JSONL_DIR = legacy_state_root() / "spond"
 RSVP_ENV = "SPOND_RSVP_MEMBER_ID"
 
@@ -86,14 +87,8 @@ def parse_iso(s: str) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
-def load_cursor() -> datetime | None:
-    if not STATE_PATH.exists():
-        return None
-    raw = json.loads(STATE_PATH.read_text()).get("last_successful_run")
-    return parse_iso(raw) if raw else None
-
-
-def iter_records(since: datetime | None, kinds: set[str] | None) -> Iterator[dict[str, Any]]:
+def iter_records(since: datetime | None, until: datetime | None,
+                 kinds: set[str] | None) -> Iterator[dict[str, Any]]:
     if not JSONL_DIR.exists():
         return
     for fp in sorted(JSONL_DIR.glob("*.jsonl")):
@@ -114,14 +109,17 @@ def iter_records(since: datetime | None, kinds: set[str] | None) -> Iterator[dic
                 continue
             if kinds and rec.get("kind") not in kinds:
                 continue
-            if since is not None:
-                fetched = rec.get("fetched_at")
-                if fetched:
-                    try:
-                        if parse_iso(fetched) < since:
-                            continue
-                    except ValueError:
-                        pass
+            fetched = rec.get("fetched_at")
+            if fetched:
+                try:
+                    ts = parse_iso(fetched)
+                except ValueError:
+                    ts = None
+                if ts is not None:
+                    if since is not None and ts <= since:
+                        continue
+                    if until is not None and ts > until:
+                        continue
             yield rec
 
 
@@ -191,10 +189,10 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--since-cursor", action="store_true",
-                    help="Start from /var/lib/diary/legacy-state/spond-state.json's last_successful_run.")
     ap.add_argument("--since", type=str, default=None,
-                    help="ISO date or datetime; only records fetched at-or-after this point.")
+                    help="ISO date or datetime; only records fetched strictly after this point.")
+    ap.add_argument("--until", type=str, default=None,
+                    help="ISO date or datetime; only records fetched at or before this point.")
     ap.add_argument("--kind", action="append",
                     choices=sorted(["chat", "event", "post"]), default=None,
                     help="Restrict to one or more kinds (repeat the flag).")
@@ -203,30 +201,22 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--future", action="store_true",
                     help="For events: only those with startTimestamp >= now. No effect on chats/posts.")
     ap.add_argument("--rsvp-as",
-                    default=os.environ.get(RSVP_ENV)
-                    or trusted_cfg("spond.rsvp_member_id", None),
+                    default=os.environ.get(RSVP_ENV),
                     metavar="MEMBER_ID",
                     help=f"Show RSVP status for this Spond member-id in event headers "
-                         f"(default: ${RSVP_ENV} or [spond].rsvp_member_id in "
-                         f"/etc/diary/trusted.toml). Markers: ✓ accepted, ✗ declined, "
-                         f"? unanswered, W waitinglist, u unconfirmed, — not on guest list.")
+                         f"(default: ${RSVP_ENV}). RSVP markers are cosmetic — the Spond "
+                         f"sync already re-emits an event when your own response changes, "
+                         f"so the track does not depend on the trusted collector config. "
+                         f"Markers: ✓ accepted, ✗ declined, ? unanswered, W waitinglist, "
+                         f"u unconfirmed, — not on guest list.")
     ap.add_argument("--headers-only", action="store_true",
                     help="One-line summary per record; no JSON body.")
     ap.add_argument("--max-chars", type=int, default=4000,
                     help="Truncate per-record JSON body at N chars (default 4000, 0=no truncation).")
     args = ap.parse_args(argv)
 
-    since: datetime | None
-    if args.since_cursor:
-        since = load_cursor()
-        if since is None:
-            print("(no cursor yet — run spond_sync.py first)", file=sys.stderr)
-            return 1
-        print(f"(cursor: {since.isoformat()})", file=sys.stderr)
-    elif args.since:
-        since = parse_iso(args.since)
-    else:
-        since = None
+    since = parse_iso(args.since) if args.since else None
+    until = parse_iso(args.until) if args.until else None
 
     kinds = set(args.kind) if args.kind else None
     now = datetime.now(timezone.utc) if args.future else None
@@ -234,7 +224,7 @@ def main(argv: list[str] | None = None) -> int:
     _RSVP_MEMBER_ID = args.rsvp_as
 
     count = 0
-    for rec in iter_records(since, kinds):
+    for rec in iter_records(since, until, kinds):
         data = rec.get("data") or {}
         rec_id = data.get("id") or data.get("uid") or data.get("chatId")
         if args.chat and rec.get("kind") == "chat" and rec_id != args.chat:

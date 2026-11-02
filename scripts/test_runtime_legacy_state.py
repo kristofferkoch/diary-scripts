@@ -17,7 +17,6 @@ def test_all_producers_and_readers_share_runtime_root_outside_tracked_memory():
     for path in (
         spond_sync.STATE_PATH,
         spond_sync.OUT_DIR,
-        spondshow.STATE_PATH,
         spondshow.JSONL_DIR,
         vigilo_sync.STATE_PATH,
         vigilo_sync.OUT_DIR,
@@ -49,7 +48,7 @@ def test_runtime_jsonl_and_cursor_are_readable_by_existing_workflows(
     monkeypatch.setattr(embed_messages, "legacy_state_root", lambda: tmp_path)
     monkeypatch.setattr(spondshow, "JSONL_DIR", output_dir)
     assert list(embed_messages.iter_records("spond", False)) == [record]
-    assert list(spondshow.iter_records(None, None)) == [record]
+    assert list(spondshow.iter_records(None, None, None)) == [record]
 
 
 def test_sync_daily_output_never_targets_tracked_workspace(tmp_path: Path, monkeypatch):
