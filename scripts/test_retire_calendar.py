@@ -353,3 +353,51 @@ def test_ensure_section_returns_existing() -> None:
     )
     s = ensure_section(doc, "May", 2026)
     assert "existing" in "".join(s.lines)
+
+
+# ---------- CLI: dry-run writes nothing; --src/--dst is the worktree hook ----------
+
+CALENDAR = """\
+# Kalender
+
+## One-off events by month
+
+### May 2026
+
+- **2026-05-26 17:30** — Kamp
+"""
+
+PAST = """\
+# Tidligere hendelser
+
+## One-off events by month
+"""
+
+
+def _pair(tmp_path):
+    src = tmp_path / "CALENDAR.md"
+    dst = tmp_path / "CALENDAR-PAST.md"
+    src.write_text(CALENDAR)
+    dst.write_text(PAST)
+    return src, dst
+
+
+def test_main_dry_run_writes_nothing(tmp_path) -> None:
+    from scripts import retire_calendar as rc
+
+    src, dst = _pair(tmp_path)
+    before = (src.read_text(), dst.read_text())
+    assert rc.main(["--src", str(src), "--dst", str(dst),
+                    "--today", "2026-06-01", "--dry-run"]) == 0
+    assert (src.read_text(), dst.read_text()) == before
+
+
+def test_main_applies_to_the_given_paths(tmp_path) -> None:
+    """The sjekk runs the real move against the mem-worktree copies."""
+    from scripts import retire_calendar as rc
+
+    src, dst = _pair(tmp_path)
+    assert rc.main(["--src", str(src), "--dst", str(dst),
+                    "--today", "2026-06-01"]) == 0
+    assert "Kamp" not in src.read_text()
+    assert "Kamp" in dst.read_text()

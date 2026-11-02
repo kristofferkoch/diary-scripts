@@ -121,7 +121,9 @@ TRACK_TOOL = {
 BASE_TRACKS: dict[str, list[list[str]]] = {
     "spond-events.txt": [["spondshow", "--kind", "event", "--future",
                           "--headers-only"]],
-    "calendar-retire.txt": [["retire-calendar"]],
+    # Preview only: the collector must never write tracked repo content.
+    # The sjekk applies the move in its mem worktree (SJEKK.md §5).
+    "calendar-retire.txt": [["retire-calendar", "--dry-run"]],
     "backup-health.txt": [["systemctl", "show", "restic-backup.service",
                            "-p", "Result", "-p", "ExecMainExitTimestamp",
                            "--value"]],

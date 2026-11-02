@@ -45,7 +45,7 @@ by 24 h). Readers write nothing; the collector writes the run's
 | `signal.txt` | `signalshow --since <cursor> --until <T> --headers-only` |
 | `vigilo.txt` | `vigiloshown --since <cursor> --until <T> --headers-only` |
 | `skolemelding.txt` | `skolemeldingshow --since <cursor> --until <T> --headers-only` |
-| `calendar-retire.txt` | `retire-calendar` (real run — idempotent; moved lines captured for enrichment) |
+| `calendar-retire.txt` | `retire-calendar --dry-run` (preview only — the move is applied in the mem worktree) |
 | `backup-health.txt` | `systemctl show restic-backup.service -p Result -p ExecMainExitTimestamp --value` |
 | `embed-health.txt` | `psql -d mailvec -t -c "SELECT source, now() - max(embedded_at) FROM messages GROUP BY source ORDER BY source;"` (per-source, so one stale source can't hide behind the others) |
 | `services.txt` | `systemctl --user is-active signal-capture.service` + mail-sync timestamp |
@@ -60,8 +60,15 @@ open only files with content.**
 same treatment as `memory/signal/`).
 
 Stays agent-side (the collector deliberately does none of this): cursor
-**advance** (`sjekk-advance <track>` after triage), calendar enrichment,
-daily-note / topic-file filing, receipt digesting into `RECEIPTS.md`.
+**advance** (`sjekk-advance <track>` after triage), the **calendar move**
+itself (`retire-calendar --src/--dst` against the mem worktree copies) and
+its enrichment, daily-note / topic-file filing, receipt digesting into
+`RECEIPTS.md`.
+
+`calendar-retire.txt` is a preview: `--dry-run` reports the one-off events
+whose end date has passed, and the sjekk applies the move in the worktree
+that will be committed (SJEKK.md §5). A collector must never leave tracked
+files dirty in the integration checkout.
 
 ## Cursor and window
 

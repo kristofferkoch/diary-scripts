@@ -27,7 +27,9 @@ Recurring weekly/monthly/quarterly sections are never touched.
 ### Manual step — enrichment
 
 In a sjekk the collector (`sjekk-collect`) has already run the tool — the
-moved lines are captured in `memory/sjekk/latest/calendar-retire.txt`.
+`sjekk-collect` runs `retire-calendar --dry-run`, so `calendar-retire.txt`
+previews the expired lines and **writes nothing**; the sjekk applies the move
+in its mem worktree with `--src`/`--dst` (SJEKK.md §5).
 After running the script, look through the lines it moved (printed on
 stderr). For any event the daily-note sweep gave new context to — an
 action's outcome, who showed up, what was decided — open

@@ -17,11 +17,18 @@ Everything else — recurring sections, prose, the `## Pågående …` block,
 the file header — is left untouched. When nothing is expired, both files
 are byte-identical on disk (idempotent).
 
+The collector runs this **`--dry-run`** and writes nothing: a collect must
+never modify tracked repo content. The sjekk applies the move in its
+`mem/` worktree, pointing at the worktree copies:
+
+    uv run retire-calendar --src ~/diary-worktrees/<slug>/CALENDAR.md \
+                           --dst ~/diary-worktrees/<slug>/CALENDAR-PAST.md
+
 Usage::
 
     uv run scripts/retire_calendar.py                    # today = date.today()
     uv run scripts/retire_calendar.py --today 2026-06-01
-    uv run scripts/retire_calendar.py --dry-run
+    uv run scripts/retire_calendar.py --dry-run          # what sjekk-collect does
     uv run scripts/retire_calendar.py --src foo.md --dst bar.md
 """
 from __future__ import annotations

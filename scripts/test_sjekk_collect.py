@@ -138,6 +138,13 @@ def test_write_run_writes_the_manifest(tmp_path) -> None:
     assert "window:" in (run / "INDEX.md").read_text()
 
 
+def test_calendar_retire_track_is_preview_only() -> None:
+    """A collect must never write tracked repo content (CALENDAR.md); it only
+    previews the expired lines and the sjekk applies the move in a worktree."""
+    [argv] = BASE_TRACKS["calendar-retire.txt"]
+    assert argv == ["retire-calendar", "--dry-run"]
+
+
 def test_embed_health_track_is_per_source() -> None:
     """The runbook calls a source green on its own gap, so the collector must
     group by source — one aggregate would let a stale source hide behind a
