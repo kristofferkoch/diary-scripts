@@ -69,8 +69,14 @@ completed event IDs, and quarantined message/file variants:
   INBOX→Archive moves and tag reconciliation do not strand an old pathname.
 - Completion is journaled only after the spool's final link and directory
   `fsync`; a crash before that journal commit is retried as a duplicate.
+- Pending IDs for the whole run are persisted in one journal write before the
+  first spool write, and a no-change schedule rewrites the journal at most
+  twice per run rather than once per message.
 - Timeout, `OSError`, and transient database/read failures stay pending for the
   next schedule. Only deterministic malformed/oversized content is quarantined.
+- A pending ID that no longer resolves to any file at all (the message was
+  deleted) is dropped from the journal instead of being re-queried on every
+  schedule; nothing remains to export.
 - Quarantined variants do not block other messages or get reread on every
   schedule. Entries remain local review state and require explicit owner action
   to clear.
@@ -80,10 +86,14 @@ content raises `EventConflictError`; neither path overwrites the existing file.
 Malformed events raise `EventValidationError`. Writes use a same-directory
 temporary file, `fchmod` then file `fsync`, and an atomic hard-link-without-
 replacement. The temporary name is unlinked **before** the directory `fsync` and
-acknowledgement, so acknowledged entries are single-link readable files. Readers
-reject links, multiple hard links, oversized files, invalid UTF-8/JSON, duplicate
-JSON keys, unknown fields, non-finite numbers, excessive nesting, and IDs that do
-not match their immutable identity.
+acknowledgement, so acknowledged entries are single-link readable files. A crash
+between the final link and that unlink leaves a second link; the next write for
+the same event removes a leftover temp that still shares the committed inode
+(after the normal retry window, so a live writer is not raced) and repairs the
+entry instead of failing on it forever. Readers reject links, multiple hard
+links, oversized files, invalid UTF-8/JSON, duplicate JSON keys, unknown fields,
+non-finite numbers, excessive nesting, and IDs that do not match their immutable
+identity.
 
 ## Ownership and configuration
 

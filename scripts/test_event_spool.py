@@ -289,3 +289,18 @@ def test_temp_is_unlinked_before_directory_fsync_crash(
     assert path.stat().st_nlink == 1
     assert spool.read(item["event_id"]) == item
     assert list(spool.root.glob("*.tmp")) == []
+
+
+def test_crash_between_link_and_unlink_is_repaired_on_the_next_write(spool: EventSpool):
+    """A crash after the final link but before the temp unlink must not wedge the entry."""
+    item = event()
+    assert spool.write(item) == "written"
+    path = spool.path_for(item["event_id"])
+    leftover = spool.root / f".{item['event_id']}.{os.getpid()}.0123456789abcdef.tmp"
+    os.link(path, leftover)
+    with pytest.raises(EventValidationError, match="single-link"):
+        spool.read(item["event_id"])
+    assert spool.write(item) == "duplicate"
+    assert not leftover.exists()
+    assert path.stat().st_nlink == 1
+    assert spool.read(item["event_id"]) == item
