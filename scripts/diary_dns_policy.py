@@ -168,24 +168,26 @@ class DNSPolicyService:
         allow = decision in {"allow", "would_allow"}
         return PolicyReply(allow, decision, state.lower(), reason, NOERROR if allow else REFUSED)
 
-    def _record(self, name: str, protocol: str, reply: PolicyReply) -> None:
-        self.audit.write({
+    def _record(self, name: str | None, protocol: str, reply: PolicyReply) -> None:
+        event = {
             "event": "dns.query",
             "component": "diary-dns-policyd",
             "operation": "query",
             "decision": reply.decision,
             "lock_state": reply.lock_state,
             "reason": reply.reason,
-            "dns_name": name,
             "protocol": protocol,
             "caller": {"pid": 0, "uid": self.agent_uid, "gid": self.agent_gid},
-        })
+        }
+        if name is not None:
+            event["dns_name"] = name
+        self.audit.write(event)
 
     def authorize(self, value: object) -> PolicyReply:
         if not isinstance(value, dict) or set(value) != {"dns_name", "protocol"}:
             raise DNSPolicyError("policy request requires exactly dns_name and protocol")
         value = cast(dict[str, Any], value)
-        name = dns_name(value["dns_name"])
+        name = None if value["dns_name"] is None else dns_name(value["dns_name"])
         protocol = value["protocol"]
         if not isinstance(protocol, str) or protocol not in PROTOCOLS:
             raise DNSPolicyError("protocol must be udp or tcp")
@@ -264,9 +266,9 @@ class PolicyClient:
         self.socket_path = socket_path
         self.timeout = timeout
 
-    def authorize(self, name: str, protocol: str) -> PolicyReply:
+    def authorize(self, name: str | None, protocol: str) -> PolicyReply:
         try:
-            name = dns_name(name)
+            name = None if name is None else dns_name(name)
             if protocol not in PROTOCOLS:
                 raise DNSPolicyError("protocol must be udp or tcp")
             reply = request(

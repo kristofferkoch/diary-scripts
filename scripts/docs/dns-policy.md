@@ -13,8 +13,8 @@ The concrete AUD-03 service is root-run `diary-dns-auditd.service`, listening on
 loopback port 1053 and redirecting only the configured upstream's port-53
 traffic. CTL-04 installs `diary-dns-auditd.service.d/50-dns-policy.conf` to order
 it after the policy daemon and activate the lock failsafe on proxy failure. The
-proxy must call the policy socket before every upstream exchange; that code-side
-integration is a merge gate, not something this sidecar performs itself.
+proxy calls `PolicyClient.authorize` exactly once for every UDP/TCP message
+before any upstream exchange and emits no separate query-decision audit event.
 
 For every UDP or TCP query, after validating the DNS message and extracting its
 single question name, the proxy sends one bounded newline-delimited JSON object
@@ -24,7 +24,9 @@ to `/run/diary-dns-policy/socket`:
 {"dns_name":"example.test","protocol":"udp"}
 ```
 
-The request contains no identity, state, destination, URL, or free-form fields.
+A malformed or unapproved message uses `"dns_name":null`; it is still policy
+gated but no name is invented. The request contains no identity, state,
+destination, URL, or free-form fields.
 The socket is `root:diary-dns-proxy` mode `0660`. The policy daemon runs
 `root:root` with `SupplementaryGroups=diary-dns-proxy`, which permits the group
 `chown` without adding a capability. It also checks kernel peer credentials and
@@ -53,10 +55,14 @@ become `policy_unavailable` plus `REFUSED`. The proxy must not infer permission
 from the presence of the word `attended`.
 
 The proxy waits on every query without a policy cache or retry. For refusal it
-constructs the DNS response locally, preserving the request ID and normal DNS
-response semantics, and does not contact upstream. An armed allowance may use
-only the existing AUD-03 upstream after the synchronous audit succeeds. There
-is no system-resolver, direct-DNS, alternate-identity, or replay fallback.
+constructs the DNS response locally, preserving the transaction ID, question,
+opcode/recursion flags, and TCP two-byte framing. Unparseable questions receive a
+header-only refusal when a DNS header exists; a datagram too short for a header
+is dropped because no valid transaction response can be built. No refusal
+contacts upstream. Only an exact armed-attended or dark allowance may use the
+existing AUD-03 upstream, with the original message preserved even when larger
+than 8,192 bytes. There is no system-resolver, direct-DNS,
+alternate-identity, cache, retry, or replay fallback.
 
 While unarmed, the sidecar returns only the exact dark `would_allow` tuple and
 does not depend on controller or audit availability. The arm file must be a

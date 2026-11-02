@@ -1,9 +1,7 @@
 """Isolated DNS proxy, metadata, and alternate-resolution audit tests."""
 from __future__ import annotations
 
-import grp
 import json
-import os
 import socket
 import struct
 import threading
@@ -13,6 +11,7 @@ import pytest
 
 from scripts import diary_audit as audit
 from scripts import diary_dns_audit as dns
+from scripts import diary_dns_policy as policy
 from scripts import diary_network_audit as network
 
 
@@ -90,13 +89,6 @@ def test_query_name_is_bounded_approved_metadata() -> None:
     assert dns.query_name(message, "udp") == "example.com"
     framed = struct.pack("!H", len(message)) + message
     assert dns.query_name(framed, "tcp") == "example.com"
-    event = dns.query_event(message, "udp", UID, GID, "192.0.2.53", 53)
-    assert event is not None
-    assert event["dns_name"] == "example.com"
-    assert event["caller"] == {"pid": 0, "uid": UID, "gid": GID}
-    assert "private" not in json.dumps(event)
-    normalized, redacted = audit.normalize_event(event)
-    assert normalized == event and redacted == []
 
 
 def test_compressed_query_name_and_pointer_loop() -> None:
@@ -238,65 +230,68 @@ def test_alternate_identity_mismatch_fails_closed() -> None:
         network.events_from_datagram(bytes(message), GROUP, UID, GID)
 
 
-def test_udp_proxy_forwards_unchanged_when_audit_is_unavailable() -> None:
+class FakePolicy:
+    def __init__(self, reply: policy.PolicyReply) -> None:
+        self.reply = reply
+        self.calls: list[tuple[str | None, str]] = []
+
+    def authorize(self, name: str | None, protocol: str) -> policy.PolicyReply:
+        self.calls.append((name, protocol))
+        return self.reply
+
+
+def dark_policy() -> FakePolicy:
+    return FakePolicy(policy.PolicyReply(True, "would_allow", "not_applicable", "audit_only", 0))
+
+
+def attended_policy() -> FakePolicy:
+    return FakePolicy(policy.PolicyReply(True, "allow", "attended", "attended", 0))
+
+
+def locked_policy() -> FakePolicy:
+    return FakePolicy(policy.PolicyReply(False, "deny", "locked", "locked", 5))
+
+
+def test_refusal_preserves_transaction_id_question_and_wire_framing() -> None:
+    message = query()
+    response = dns.refusal(message, "udp")
+    assert response is not None
+    identifier, flags, questions, answers, authority, additional = struct.unpack_from("!HHHHHH", response)
+    assert identifier == 0x1234
+    assert flags & 0x8000 and flags & 0x000F == 5
+    assert (questions, answers, authority, additional) == (1, 0, 0, 0)
+    assert response[12:] == message[12:]
+    framed = dns.refusal(struct.pack("!H", len(message)) + message, "tcp")
+    assert framed is not None
+    assert struct.unpack_from("!H", framed)[0] == len(response)
+    assert framed[2:] == response
+
+
+def test_malformed_refusal_is_header_only_and_too_short_has_no_response() -> None:
+    message = struct.pack("!HHHHHH", 0xBEEF, 0x0100, 0, 0, 0, 0)
+    response = dns.refusal(message, "udp")
+    assert response is not None
+    assert struct.unpack("!HHHHHH", response) == (0xBEEF, 0x8105, 0, 0, 0, 0)
+    assert dns.refusal(b"\x12", "udp") is None
+
+
+def test_dark_udp_forwards_large_query_unchanged_once() -> None:
     upstream = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     upstream.bind(("127.0.0.1", 0))
     upstream.settimeout(2)
     received = []
-
-    def serve_upstream() -> None:
-        message, client = upstream.recvfrom(65_535)
-        received.append(message)
-        upstream.sendto(b"response bytes", client)
-
-    thread = threading.Thread(target=serve_upstream)
-    thread.start()
-
-    def failed_writer(_path, _event):
-        raise dns.DNSAuditError("audit unavailable")
-
-    proxy = dns.DNSProxy(
-        "127.0.0.1", 0, "127.0.0.1", upstream.getsockname()[1], UID, GID,
-        writer=failed_writer,
-    )
-    proxy.start()
-    client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    client.settimeout(2)
-    try:
-        message = query()
-        client.sendto(message, ("127.0.0.1", proxy.port))
-        assert client.recv(65_535) == b"response bytes"
-        assert received == [message]
-        assert proxy.sink.unavailable == 1
-    finally:
-        client.close()
-        proxy.close()
-        upstream.close()
-        thread.join(2)
-
-
-def test_udp_proxy_forwards_valid_query_larger_than_8192_bytes() -> None:
-    upstream = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    upstream.bind(("127.0.0.1", 0))
-    upstream.settimeout(2)
-    received = []
-    written = []
-    delivered = threading.Event()
 
     def serve_upstream() -> None:
         message, client = upstream.recvfrom(65_535)
         received.append(message)
         upstream.sendto(b"large query response", client)
 
-    def writer(_path, event):
-        written.append(event)
-        delivered.set()
-        return {"ok": True}
-
     thread = threading.Thread(target=serve_upstream)
     thread.start()
+    policy_client = dark_policy()
     proxy = dns.DNSProxy(
-        "127.0.0.1", 0, "127.0.0.1", upstream.getsockname()[1], UID, GID, writer=writer,
+        "127.0.0.1", 0, "127.0.0.1", upstream.getsockname()[1], UID, GID,
+        policy_client=policy_client,
     )
     proxy.start()
     client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -306,9 +301,7 @@ def test_udp_proxy_forwards_valid_query_larger_than_8192_bytes() -> None:
         client.sendto(message, ("127.0.0.1", proxy.port))
         assert client.recv(65_535) == b"large query response"
         assert received == [message]
-        assert delivered.wait(2)
-        assert written[0]["dns_name"] == "example.com"
-        assert "aaaa" not in json.dumps(written[0])
+        assert policy_client.calls == [("example.com", "udp")]
     finally:
         client.close()
         proxy.close()
@@ -316,7 +309,7 @@ def test_udp_proxy_forwards_valid_query_larger_than_8192_bytes() -> None:
         thread.join(2)
 
 
-def test_tcp_proxy_forwards_and_records_fixed_identity() -> None:
+def test_attended_tcp_forwards_after_exact_policy_allowance() -> None:
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("127.0.0.1", 0))
@@ -335,155 +328,142 @@ def test_tcp_proxy_forwards_and_records_fixed_identity() -> None:
 
     thread = threading.Thread(target=serve_upstream)
     thread.start()
-    written = []
-    delivered = threading.Event()
-
-    def writer(_path, event):
-        written.append(event)
-        delivered.set()
-        return {"ok": True}
-
+    policy_client = attended_policy()
     proxy = dns.DNSProxy(
-        "127.0.0.1", 0, "127.0.0.1", listener.getsockname()[1], UID, GID, writer=writer,
+        "127.0.0.1", 0, "127.0.0.1", listener.getsockname()[1], UID, GID,
+        policy_client=policy_client,
     )
     proxy.start()
     try:
         message = query()
         with socket.create_connection(("127.0.0.1", proxy.port), timeout=2) as client:
             client.sendall(struct.pack("!H", len(message)) + message)
-            header = dns._receive_exact(client, 2)
-            assert header == struct.pack("!H", 8)
+            assert dns._receive_exact(client, 2) == struct.pack("!H", 8)
             assert dns._receive_exact(client, 8) == b"response"
-        assert delivered.wait(2)
         assert received == [message]
-        assert written[0]["event"] == "dns.query"
-        assert written[0]["protocol"] == "tcp"
-        assert written[0]["caller"] == {"pid": 0, "uid": UID, "gid": GID}
-        assert written[0]["dns_name"] == "example.com"
+        assert policy_client.calls == [("example.com", "tcp")]
     finally:
         proxy.close()
         listener.close()
         thread.join(2)
 
 
-def test_real_audit_socket_preserves_proxy_identity_and_name(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    journal = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-    journal.bind(str(tmp_path / "journal.sock"))
-    journal.settimeout(2)
-    store = audit.DedupStore(str(tmp_path / "dedup.json"))
-    service = audit.AuditService(store, audit.JournalWriter(str(tmp_path / "journal.sock")))
-    group = grp.getgrgid(os.getegid()).gr_name
-    server = audit.AuditDaemon(str(tmp_path / "audit.sock"), service, group)
-    monkeypatch.setattr(server, "authorized", lambda _: True)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        event = dns.query_event(query(), "udp", UID, GID, "192.0.2.53", 53)
-        assert event is not None
-        reply = dns.request(str(tmp_path / "audit.sock"), event)
-        assert reply["ok"] is True
-        record = dict(line.split("=", 1) for line in journal.recv(65_535).decode("ascii").splitlines())
-        assert record["DIARY_AUDIT_EVENT"] == "dns.query"
-        assert record["DIARY_AUDIT_DNS_NAME"] == "example.com"
-        assert record["DIARY_AUDIT_CALLER_UID"] == str(UID)
-        assert record["DIARY_AUDIT_CALLER_GID"] == str(GID)
-        assert record["DIARY_AUDIT_DECISION"] == "would_deny"
-        assert "DIARY_AUDIT_QUERY" not in record
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
-        journal.close()
+def test_armed_udp_and_tcp_denials_never_call_upstream(monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_upstream(*_args):
+        raise AssertionError("denied query reached upstream")
 
-
-def test_full_stalled_audit_queue_has_bounded_shutdown(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-) -> None:
-    writer_started = threading.Event()
-    release_writer = threading.Event()
-
-    def stalled_writer(_path, _event):
-        writer_started.set()
-        release_writer.wait(2)
-        return {"ok": True}
-
-    sink = dns.AuditSink("/run/test/audit.sock", stalled_writer)
-    sink.work = dns.queue.Queue(maxsize=1)
-    monkeypatch.setattr(dns, "SHUTDOWN_TIMEOUT", 0.05)
-    sink.start()
-    try:
-        sink.observe({"event": "first"})
-        assert writer_started.wait(2)
-        sink.observe({"event": "second"})
-        sink.close()
-        assert sink.shutdown_loss == 2
-        assert "shutdown_loss=2" in capsys.readouterr().err
-        sink.observe({"event": "late producer"})
-        assert sink.shutdown_loss == 3
-    finally:
-        release_writer.set()
-        sink.thread.join(2)
-    assert not sink.thread.is_alive()
-
-
-def test_persistent_tcp_shutdown_drains_handlers_and_accounts_residual_audit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(2)
-    listener.settimeout(2)
-
-    def serve_upstream() -> None:
-        for _ in range(2):
-            connection, _address = listener.accept()
-            with connection:
-                header = dns._receive_exact(connection, 2)
-                assert header is not None
-                message = dns._receive_exact(connection, struct.unpack("!H", header)[0])
-                assert message == query()
-                connection.sendall(struct.pack("!H", 8) + b"response")
-
-    upstream_thread = threading.Thread(target=serve_upstream)
-    upstream_thread.start()
-    writer_started = threading.Event()
-    release_writer = threading.Event()
-
-    def stalled_writer(_path, _event):
-        writer_started.set()
-        release_writer.wait(2)
-        return {"ok": True}
-
-    monkeypatch.setattr(dns, "SHUTDOWN_TIMEOUT", 0.05)
-    proxy = dns.DNSProxy(
-        "127.0.0.1", 0, "127.0.0.1", listener.getsockname()[1], UID, GID,
-        writer=stalled_writer,
-    )
-    proxy.sink.work = dns.queue.Queue(maxsize=1)
+    monkeypatch.setattr(dns, "exchange_udp", no_upstream)
+    monkeypatch.setattr(dns, "exchange_tcp", no_upstream)
+    policy_client = locked_policy()
+    proxy = dns.DNSProxy("127.0.0.1", 0, "127.0.0.1", 53, UID, GID, policy_client=policy_client)
     proxy.start()
-    client = socket.create_connection(("127.0.0.1", proxy.port), timeout=2)
+    client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     client.settimeout(2)
     try:
-        for _ in range(2):
-            message = query()
-            client.sendall(struct.pack("!H", len(message)) + message)
-            assert dns._receive_exact(client, 2) == struct.pack("!H", 8)
-            assert dns._receive_exact(client, 8) == b"response"
-        assert writer_started.wait(2)
-        assert proxy.tcp.active == 1
-        proxy.close()
-        assert proxy.tcp.active == 0
-        assert not proxy.tcp_clients
-        assert proxy.sink.shutdown_loss == 2
+        message = query()
+        client.sendto(message, ("127.0.0.1", proxy.port))
+        response = client.recv(65_535)
+        assert struct.unpack_from("!H", response)[0] == 0x1234
+        assert struct.unpack_from("!H", response, 2)[0] & 0x000F == 5
+        with socket.create_connection(("127.0.0.1", proxy.port), timeout=2) as tcp_client:
+            tcp_client.sendall(struct.pack("!H", len(message)) + message)
+            header = dns._receive_exact(tcp_client, 2)
+            assert header == struct.pack("!H", len(response))
+            assert dns._receive_exact(tcp_client, len(response)) == response
+        assert policy_client.calls == [("example.com", "udp"), ("example.com", "tcp")]
     finally:
-        release_writer.set()
         client.close()
         proxy.close()
+
+
+def test_real_policy_timeout_becomes_refused_without_upstream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(tmp_path / "slow-policy.sock"))
+    listener.listen(1)
+
+    def slow_policy() -> None:
+        connection, _ = listener.accept()
+        with connection:
+            connection.recv(2048)
+            threading.Event().wait(0.2)
         listener.close()
-        proxy.sink.thread.join(2)
-        upstream_thread.join(2)
-    assert not proxy.sink.thread.is_alive()
-    assert not upstream_thread.is_alive()
+
+    thread = threading.Thread(target=slow_policy, daemon=True)
+    thread.start()
+    monkeypatch.setattr(dns, "exchange_udp", lambda *_: pytest.fail("timeout reached upstream"))
+    proxy = dns.DNSProxy(
+        "127.0.0.1", 0, "127.0.0.1", 53, UID, GID,
+        policy_client=policy.PolicyClient(str(tmp_path / "slow-policy.sock"), timeout=0.02),
+    )
+    proxy.start()
+    client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    client.settimeout(1)
+    try:
+        client.sendto(query(), ("127.0.0.1", proxy.port))
+        response = client.recv(65_535)
+        assert struct.unpack_from("!H", response)[0] == 0x1234
+        assert struct.unpack_from("!H", response, 2)[0] & 0x000F == 5
+    finally:
+        client.close()
+        proxy.close()
+        thread.join(1)
+    assert not thread.is_alive()
+
+
+def test_malformed_message_is_policy_gated_without_inventing_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(dns, "exchange_udp", lambda *_: pytest.fail("denial reached upstream"))
+    policy_client = locked_policy()
+    proxy = dns.DNSProxy("127.0.0.1", 0, "127.0.0.1", 53, UID, GID, policy_client=policy_client)
+    proxy.start()
+    client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    client.settimeout(2)
+    try:
+        message = struct.pack("!HHHHHH", 0xBEEF, 0x0100, 0, 0, 0, 0)
+        client.sendto(message, ("127.0.0.1", proxy.port))
+        response = client.recv(65_535)
+        assert struct.unpack("!HHHHHH", response) == (0xBEEF, 0x8105, 0, 0, 0, 0)
+        assert policy_client.calls == [(None, "udp")]
+    finally:
+        client.close()
+        proxy.close()
+
+
+def test_too_short_armed_message_is_dropped_without_upstream(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(dns, "exchange_udp", lambda *_: pytest.fail("short denial reached upstream"))
+    policy_client = locked_policy()
+    proxy = dns.DNSProxy("127.0.0.1", 0, "127.0.0.1", 53, UID, GID, policy_client=policy_client)
+    allowed, response = proxy.policy_decision(b"\x12", "udp")
+    assert allowed is False and response is None
+    assert policy_client.calls == [(None, "udp")]
+    proxy.close()
+
+
+def test_persistent_tcp_shutdown_remains_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class StalledPolicy(FakePolicy):
+        def authorize(self, name: str | None, protocol: str) -> policy.PolicyReply:
+            started.set()
+            release.wait(2)
+            return super().authorize(name, protocol)
+
+    monkeypatch.setattr(dns, "SHUTDOWN_TIMEOUT", 0.05)
+    policy_client = StalledPolicy(policy.PolicyReply(True, "allow", "attended", "attended", 0))
+    proxy = dns.DNSProxy("127.0.0.1", 0, "127.0.0.1", 53, UID, GID, policy_client=policy_client)
+    proxy.start()
+    client = socket.create_connection(("127.0.0.1", proxy.port), timeout=2)
+    try:
+        message = query()
+        client.sendall(struct.pack("!H", len(message)) + message)
+        assert started.wait(1)
+        proxy.close()
+        assert proxy.started is False
+    finally:
+        release.set()
+        client.close()
+        proxy.close()
+    assert proxy.tcp.wait_idle(1)
+    assert not proxy.tcp_clients

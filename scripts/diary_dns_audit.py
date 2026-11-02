@@ -1,12 +1,10 @@
 #!/usr/bin/python3
-"""Audit-only per-identity DNS forwarding with trusted query-name metadata."""
+"""Per-identity UDP/TCP DNS forwarding gated by trusted lock policy."""
 from __future__ import annotations
 
 import argparse
 import ipaddress
-import json
 import os
-import queue
 import signal
 import socket
 import socketserver
@@ -14,22 +12,22 @@ import struct
 import sys
 import threading
 import time
-from collections.abc import Callable
-from typing import Any, cast
+from typing import Any, Protocol, cast
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, "/usr/local/lib/diary")
+from scripts.diary_dns_policy import PolicyClient
 
 DEFAULT_LISTEN = "127.0.0.1"
 DEFAULT_PORT = 1053
-DEFAULT_SOCKET = "/run/diary-audit/socket"
-AUDIT_TIMEOUT = 2.0
+DEFAULT_POLICY_SOCKET = "/run/diary-dns-policy/socket"
 UPSTREAM_TIMEOUT = 5.0
-QUEUE_SIZE = 1024
 MAX_CLIENTS = 128
 SHUTDOWN_TIMEOUT = 5.0
-MAX_AUDIT_RESPONSE = 64 * 1024
 
 
 class DNSAuditError(ValueError):
-    """DNS metadata or the trusted audit channel failed validation."""
+    """DNS metadata or the trusted policy channel failed validation."""
 
 
 def _labels(data: bytes, offset: int) -> tuple[str, int]:
@@ -96,141 +94,26 @@ def query_name(message: bytes, protocol: str) -> str | None:
     return name
 
 
-def query_event(
-    message: bytes,
-    protocol: str,
-    uid: int,
-    gid: int,
-    upstream: str,
-    upstream_port: int,
-) -> dict[str, Any] | None:
-    if protocol not in ("udp", "tcp"):
-        raise DNSAuditError("unsupported DNS transport")
-    name = query_name(message, protocol)
-    if name is None:
+def refusal(message: bytes, protocol: str) -> bytes | None:
+    """Build a local REFUSED response without contacting a resolver."""
+    data = message[2:] if protocol == "tcp" else message
+    if len(data) < 12:
         return None
-    return {
-        "event": "dns.query",
-        "component": "policy_proxy",
-        "operation": "resolve",
-        "decision": "would_deny",
-        "lock_state": "not_applicable",
-        "reason": "audit_only",
-        "destination_ip": upstream,
-        "destination_port": upstream_port,
-        "protocol": protocol,
-        "dns_name": name,
-        "caller": {"pid": 0, "uid": uid, "gid": gid},
-    }
-
-
-def request(socket_path: str, event: dict[str, Any]) -> dict[str, Any]:
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        sock.settimeout(AUDIT_TIMEOUT)
-        sock.connect(socket_path)
-        value = {"cmd": "write", "event": event}
-        sock.sendall(json.dumps(value, separators=(",", ":")).encode("ascii") + b"\n")
-        data = b""
-        while not data.endswith(b"\n"):
-            chunk = sock.recv(65_535)
-            if not chunk:
-                break
-            data += chunk
-            if len(data) > MAX_AUDIT_RESPONSE:
-                raise DNSAuditError("audit response is too large")
-        reply = json.loads(data)
-    except (OSError, json.JSONDecodeError) as exc:
-        raise DNSAuditError(f"cannot use trusted audit socket: {exc}") from exc
-    finally:
-        sock.close()
-    if not isinstance(reply, dict) or not reply.get("ok"):
-        error = reply.get("error", "audit request failed") if isinstance(reply, dict) else "audit request failed"
-        raise DNSAuditError(str(error))
-    return reply
-
-
-class AuditSink:
-    """A bounded, non-blocking audit queue that cannot apply DNS backpressure."""
-
-    def __init__(
-        self,
-        socket_path: str,
-        writer: Callable[[str, dict[str, Any]], dict[str, Any]] = request,
-    ) -> None:
-        self.socket_path = socket_path
-        self.writer = writer
-        self.work: queue.Queue[Any] = queue.Queue(maxsize=QUEUE_SIZE)
-        self.sentinel = object()
-        self.thread = threading.Thread(target=self._run, name="diary-dns-audit-writer", daemon=True)
-        self.lock = threading.Lock()
-        self.accepting = True
-        self.dropped = 0
-        self.unavailable = 0
-        self.shutdown_loss = 0
-
-    def start(self) -> None:
-        self.thread.start()
-
-    def observe(self, event: dict[str, Any] | None) -> None:
-        if event is None:
-            return
-        with self.lock:
-            if not self.accepting:
-                self.shutdown_loss += 1
-                return
-            try:
-                self.work.put_nowait(event)
-            except queue.Full:
-                self.dropped += 1
-
-    def _run(self) -> None:
-        while True:
-            event = self.work.get()
-            try:
-                if event is self.sentinel:
-                    return
-                try:
-                    self.writer(self.socket_path, event)
-                except (DNSAuditError, OSError):
-                    with self.lock:
-                        self.unavailable += 1
-            finally:
-                self.work.task_done()
-
-    def close(self) -> None:
-        with self.lock:
-            if not self.accepting:
-                return
-            self.accepting = False
-            discarded = 0
-            try:
-                self.work.put_nowait(self.sentinel)
-            except queue.Full:
-                try:
-                    self.work.get_nowait()
-                    self.work.task_done()
-                    discarded = 1
-                except queue.Empty:
-                    pass
-                self.work.put_nowait(self.sentinel)
-        self.thread.join(SHUTDOWN_TIMEOUT)
-        alive = self.thread.is_alive()
-        with self.work.mutex:
-            queued = self.work._qsize()
-            unfinished = self.work.unfinished_tasks
-        queued_events = max(0, queued - 1)
-        in_flight = int(alive and unfinished > queued)
-        with self.lock:
-            self.shutdown_loss += discarded + queued_events + in_flight
-            if self.dropped or self.unavailable or self.shutdown_loss:
-                print(
-                    "diary-dns-auditd: audit loss: "
-                    f"queue_overflow={self.dropped} audit_unavailable={self.unavailable} "
-                    f"shutdown_loss={self.shutdown_loss}",
-                    file=sys.stderr,
-                    flush=True,
-                )
+    identifier, flags, questions = struct.unpack_from("!HHH", data)
+    response_flags = 0x8000 | (flags & 0x7900) | 5
+    question = b""
+    question_count = 0
+    if not flags & 0x8000 and questions == 1:
+        try:
+            _name, offset = _labels(data, 12)
+        except DNSAuditError:
+            pass
+        else:
+            if offset + 4 <= len(data):
+                question = data[12:offset + 4]
+                question_count = 1
+    response = struct.pack("!HHHHHH", identifier, response_flags, question_count, 0, 0, 0) + question
+    return struct.pack("!H", len(response)) + response if protocol == "tcp" else response
 
 
 def _receive_exact(sock: socket.socket, length: int) -> bytes | None:
@@ -338,6 +221,10 @@ class _TCPHandler(socketserver.BaseRequestHandler):
         cast(Any, self.server).owner.handle_tcp(self.request)
 
 
+class PolicyClientProtocol(Protocol):
+    def authorize(self, name: str | None, protocol: str) -> Any: ...
+
+
 class DNSProxy:
     def __init__(
         self,
@@ -347,15 +234,15 @@ class DNSProxy:
         upstream_port: int,
         uid: int,
         gid: int,
-        audit_socket: str = DEFAULT_SOCKET,
-        writer: Callable[[str, dict[str, Any]], dict[str, Any]] = request,
+        policy_socket: str = DEFAULT_POLICY_SOCKET,
+        policy_client: PolicyClientProtocol | None = None,
     ) -> None:
         self.listen = str(ipaddress.IPv4Address(listen))
         self.upstream = str(ipaddress.IPv4Address(upstream))
         self.upstream_port = upstream_port
         self.uid = uid
         self.gid = gid
-        self.sink = AuditSink(audit_socket, writer)
+        self.policy = policy_client or PolicyClient(policy_socket)
         self.stopping = threading.Event()
         self.tcp_lock = threading.Lock()
         self.tcp_clients: set[socket.socket] = set()
@@ -380,18 +267,20 @@ class DNSProxy:
     def start(self) -> None:
         if self.started:
             return
-        self.sink.start()
         for thread in self.threads:
             thread.start()
         self.started = True
 
-    def observe(self, message: bytes, protocol: str) -> None:
-        self.sink.observe(query_event(
-            message, protocol, self.uid, self.gid, self.upstream, self.upstream_port,
-        ))
+    def policy_decision(self, message: bytes, protocol: str) -> tuple[bool, bytes | None]:
+        decision = self.policy.authorize(query_name(message, protocol), protocol)
+        return decision.allow, None if decision.allow else refusal(message, protocol)
 
     def handle_udp(self, message: bytes, client: tuple[str, int], listener: socket.socket) -> None:
-        self.observe(message, "udp")
+        allowed, rejected = self.policy_decision(message, "udp")
+        if not allowed:
+            if rejected is not None:
+                listener.sendto(rejected, client)
+            return
         response = exchange_udp(message, (self.upstream, self.upstream_port))
         if response is not None:
             listener.sendto(response, client)
@@ -413,7 +302,12 @@ class DNSProxy:
                 message = _receive_exact(client, length)
                 if message is None:
                     return
-                self.observe(header + message, "tcp")
+                framed = header + message
+                allowed, rejected = self.policy_decision(framed, "tcp")
+                if not allowed:
+                    if rejected is not None:
+                        client.sendall(rejected)
+                    continue
                 response = exchange_tcp(message, (self.upstream, self.upstream_port))
                 if response is None:
                     return
@@ -447,7 +341,6 @@ class DNSProxy:
         deadline = time.monotonic() + SHUTDOWN_TIMEOUT
         self.udp.wait_idle(max(0, deadline - time.monotonic()))
         self.tcp.wait_idle(max(0, deadline - time.monotonic()))
-        self.sink.close()
         self.started = False
 
 
@@ -478,7 +371,7 @@ def daemon_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--upstream-port", type=int, default=53)
     parser.add_argument("--uid", type=int, required=True)
     parser.add_argument("--gid", type=int, required=True)
-    parser.add_argument("--socket", default=DEFAULT_SOCKET)
+    parser.add_argument("--policy-socket", default=DEFAULT_POLICY_SOCKET)
     args = parser.parse_args(argv)
     if os.geteuid() != 0:
         parser.error("diary-dns-auditd must run as root")
@@ -489,7 +382,7 @@ def daemon_main(argv: list[str] | None = None) -> int:
     try:
         proxy = DNSProxy(
             args.listen, args.port, args.upstream, args.upstream_port,
-            args.uid, args.gid, args.socket,
+            args.uid, args.gid, args.policy_socket,
         )
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
@@ -506,6 +399,7 @@ def daemon_main(argv: list[str] | None = None) -> int:
     finally:
         proxy.close()
         signal.signal(signal.SIGTERM, previous_handler)
+    return 0
 
 
 if __name__ == "__main__":

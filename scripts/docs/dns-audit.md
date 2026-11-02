@@ -1,46 +1,44 @@
 # Per-identity DNS and alternate-resolution audit
 
-AUD-03 adds an audit-only DNS policy proxy and dedicated accept-only nftables
-rules. It does not connect to lock state and installs no `drop` or `reject`
-verdict. The general-agent lockdown remains dark.
+AUD-03 provides the UDP/TCP proxy and accept-only alternate-resolution
+observation. CTL-04 connects that proxy to lock policy without adding a second
+proxy or query-decision audit stream. Enforcement remains dark by default.
 
 ## Approved resolver path
 
-The root installer requires an owner-selected numeric IPv4 upstream resolver
-and resolves the current `agent` UID/GID. Those values are rendered into
-root-owned rules and a root-owned unit; neither DNS packets nor proxy requests
-can select a policy identity. The proxy listens on `127.0.0.1:1053` for UDP and
-TCP and forwards each request unchanged to the configured upstream. UDP receives
+The installer fixes an owner-selected numeric IPv4 upstream and the current
+`agent` UID/GID in root-owned rules and units. The proxy listens on
+`127.0.0.1:1053` for UDP and TCP. Before every upstream exchange it calls the
+trusted `diary-dns-policyd` exactly once. Only exact armed-attended or unarmed
+dark permission forwards the original request to that upstream. UDP receives
 use a full 65,535-byte bound rather than `socketserver`'s 8,192-byte default.
-The proxy relays only upstream responses and never synthesizes an allow/deny
-DNS answer.
+
+Armed denial, malformed policy replies, and policy timeouts produce a local DNS
+`REFUSED` without upstream contact. Valid responses preserve the transaction ID,
+question, opcode/recursion flags, and TCP framing; malformed questions receive a
+header-only refusal when possible. There is no alternate resolver, cache,
+retry, or delayed replay. See `dns-policy.md` for the exact decision contract
+and loopback/firewall behavior.
 
 A dedicated NAT output rule redirects only the selected agent UID's UDP/TCP
-port-53 traffic to that exact upstream. Other agent DNS servers remain direct
-alternate paths. The DNS rules unit `BindsTo` the proxy: stopping or losing the
-proxy removes the redirect and alternate-path observation rules, so normal
-resolution returns to its original path instead of depending on a dead audit
-component. Starting a healthy proxy restores the rules. This is observation
-fail-open behavior, not future locked-mode fail-closed behavior.
+port-53 traffic to that exact upstream. The audit-only DNS rules unit `BindsTo`
+the proxy and removes its observation/NAT table when the proxy stops. CTL-04's
+separately armed locked rules fail closed and do not inherit this dark
+fail-open behavior.
 
-Each parseable single-question query produces `dns.query` with component
-`policy_proxy`, operation `resolve`, decision `would_deny`, reason `audit_only`,
-and lock state `not_applicable`. Metadata is limited to the normalized question
-name, upstream IP/port, UDP/TCP transport, and the installer-fixed agent
-UID/GID. Query type, answer data, and the rest of the DNS message are not
-recorded. Malformed or unsupported messages still forward but do not invent a
-name. The proxy supports compressed question names; IDNA remains in its ASCII
-wire representation.
+`diary-dns-policyd` is the sole writer of proxy `dns.query` decisions. Dark
+queries produce `would_allow` / `not_applicable` / `audit_only`; attended and
+locked states produce their real decisions. Metadata is limited to an approved
+question name when available, UDP/TCP transport, decision/state/reason, and the
+fixed agent UID/GID. Malformed messages remain gated with no invented name.
+Compressed names and ASCII IDNA wire names retain their existing handling.
 
-Audit writes use the existing AUD-01 trusted socket and a bounded 1,024-event
-asynchronous queue. A stalled or unavailable audit writer cannot delay or
-prevent forwarding, and failed events are not retried into a later policy
-state. Queue/writer loss and bounded-shutdown residue are counted on the
-namespaced stderr journal. Shutdown stops listeners, wakes persistent TCP
-clients, and waits a bounded period for active handlers before closing the
-audit queue. The closed queue rejects and counts any late producer without a
-sentinel race. At most 128 concurrent client handlers are accepted; excess
-datagrams/connections retain ordinary DNS timeout/retry behavior.
+Policy calls are synchronous and bounded; there is no proxy audit queue or
+conflicting `would_deny` event. Shutdown stops listeners, wakes persistent TCP
+clients, and waits a bounded period for active handlers. At most 128 concurrent
+client handlers are accepted; excess datagrams/connections retain ordinary DNS
+timeout behavior. The CTL-04 installer deploys the proxy plus its root-owned
+policy-client library and policy daemon together.
 
 ## Direct and alternate paths
 
@@ -98,8 +96,8 @@ rules, identity selection, or resolution availability.
 2. As `agent`, perform normal UDP and TCP lookups through the configured system
    resolver. Confirm correct answers and `dns.query` journal evidence with
    `DIARY_AUDIT_CALLER_USER=agent`, the expected normalized `dns_name`,
-   upstream/port/protocol, `would_deny`, and `audit_only`. Attempts to put
-   identity-like data in a query must not change caller UID/GID.
+   protocol, `would_allow`, and `audit_only`. Attempts to put identity-like
+   data in a query must not change caller UID/GID.
 3. Exercise direct UDP and TCP DNS to an owner-approved numeric server other
    than the configured upstream, DoT to TCP 853, a DoH-capable TCP 443 path,
    mDNS to UDP 5353, and LLMNR to UDP 5355. Cover IPv4 and IPv6 where the host
@@ -107,9 +105,9 @@ rules, identity selection, or resolution availability.
    identity, while every request retains its pre-AUD-03 network result. Plaintext
    query names must be present only for complete parseable requests; DoH/DoT
    evidence must not contain URLs or payloads.
-4. Freeze `diary-auditd`, make normal lookups, and confirm resolution still
-   succeeds with the same answers and latency bounds, then thaw it. Inspect
-   bounded queue/writer-loss diagnostics. Stop the proxy and confirm the DNS
+4. In dark mode, freeze `diary-auditd`, make normal lookups, and confirm
+   resolution still succeeds with the same answers and latency bounds, then thaw
+   it. Stop the proxy and confirm the DNS
    table is removed and normal resolution still succeeds; restart it and
    confirm rules and query evidence return. Repeat ordinary DSH/Kimi model,
    search/fetch, local UI, and Unix-socket operations.

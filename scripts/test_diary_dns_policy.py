@@ -79,6 +79,15 @@ def test_attended_query_is_the_only_allowance() -> None:
     assert events.events[0]["protocol"] == "tcp"
 
 
+def test_unnameable_message_has_one_policy_event_without_invented_name() -> None:
+    svc, _, events = service("LOCKED")
+    reply = svc.authorize({"dns_name": None, "protocol": "udp"})
+    assert reply.allow is False and reply.rcode == policy.REFUSED
+    assert len(events.events) == 1
+    assert "dns_name" not in events.events[0]
+    assert events.events[0]["decision"] == "deny"
+
+
 def test_unarmed_dark_policy_preserves_audit_only_resolution() -> None:
     svc, lock, events = service("LOCKED")
     svc.armed = lambda: False
