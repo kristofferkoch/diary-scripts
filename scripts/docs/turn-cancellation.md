@@ -92,6 +92,19 @@ operations to restore `dbus.socket` and then `dbus-broker.service` even while
 the public bus remains stopped. Only an actually missing manager is started
 once through `user@<uid>.service`, followed by the same socket/broker
 restoration.
+
+The base controller keeps `ProtectHome=yes` and an empty capability set while
+CTL-02 is dark. The CTL-02 drop-in changes `ProtectHome` to `tmpfs` and binds
+back only `/run/user/<uid>/systemd`, read-only. It binds the directory rather
+than the socket inode so a replacement manager and its new private socket remain
+visible. `/home`, `/root`, every other user runtime, and the agent public bus
+stay hidden. `CAP_DAC_OVERRIDE` is the sole capability in the bounding set: the
+controller runs as root but otherwise cannot traverse the agent-owned
+`0700` runtime directories and connect to the `0600` private socket. No ambient
+capability is needed for the root service, and the read-only bind still permits
+Unix-socket connections. This is required for both scope operations and unlock;
+unit tests outside the controller mount/capability namespace do not prove it.
+
 The controller immediately re-pins and verifies the replacement manager's
 identity. Manager startup may activate `default.target` and its enabled web
 services. The controller first quiesces all auto-started services and scopes
@@ -173,6 +186,20 @@ broker units with the live manager: ordinary unlock restores the stopped socket
 with a private-socket `StartUnit`, starts the broker, preserves the manager PID,
 and proves private status checks and the listener are active. The real outage
 path remains separate. None of the probes stops the real public bus.
+
+After diary approval, the root-only mount/capability gate is:
+
+```bash
+sudo-ask /home/kek/diary-approved/systemd/test-controller-turn-sandbox
+```
+
+It starts a uniquely named transient system service with the controller's
+CTL-02 mount and capability settings. Only the agent manager directory is bound
+into that namespace, so the public bus is absent. The gate proves the sole
+effective/bounding capability is `CAP_DAC_OVERRIDE`, then performs real private
+socket/broker recovery and transient-scope status/control operations. It uses
+only unique synthetic units, requires the existing manager, and never starts,
+stops, or kills the production manager, public bus, or agent workloads.
 
 The ordinary suite includes a production-shaped `SystemdUser("agent")`
 transport regression with the public socket and broker stopped. It rejects any
