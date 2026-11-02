@@ -200,6 +200,39 @@ the environment matches the reviewed lockfile before GitHub publication. Secret
 lookups are fixed `pass` argv, not shell commands read from unattended diary
 configuration.
 
+## Refresh the installed queue module after a change
+
+The approval client is **not** the `agent-merge-queue` in any virtualenv. Both
+`agent-merge-approve` and the socket service exec the root-owned copy
+`/usr/local/libexec/agent-merge-queue`, installed from
+`$APPROVED/scripts/agent_merge_queue.py` by `dsh/agent-uid/install`. Editing
+`agent_merge_queue.py` and approving it therefore changes *nothing* about the
+next approval until that copy is refreshed.
+
+Refresh it with the installer, or — when the rest of the bootstrapped boundary
+is unchanged — with the exact line the installer runs (root-owned, reviewed
+source, same mode):
+
+```bash
+sudo-ask 'install -o root -g root -m 0755 \
+  /home/kek/diary-scripts-approved/scripts/agent_merge_queue.py \
+  /usr/local/libexec/agent-merge-queue'
+```
+
+Verify the behaviour actually landed before relying on it:
+
+```bash
+grep -c MERGE_IDENTITY /usr/local/libexec/agent-merge-queue   # >0 when the identity pin is in
+python3 /usr/local/libexec/agent-merge-queue --help           # module still imports
+```
+
+Symptom when it is forgotten (2026-11-02): the approved venv was synced on every
+approval while the agent-facing integration venv never was, and every
+non-fast-forward queue merge failed with `queue merge conflict` — the installed
+copy still had the pre-fix `sync_venv()` and the merge path that inherited the
+account owner's git identity. Reading `git -C ~/diary-scripts-approved log` is
+not evidence that approvals run that code; only the installed copy is.
+
 ## Pinned first-run bootstrap
 
 The first installer run uses the owner-reviewed integration checkout because the
