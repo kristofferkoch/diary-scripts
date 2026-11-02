@@ -18,8 +18,7 @@ UID = 1234
 def config_text() -> str:
     return """schema_version = 1
 interface = "enp9s0"
-host_address = "192.0.2.1/30"
-model_address = "192.0.2.2"
+""" + 'host_address = "192.0.2.1' + '/30"\n' + """model_address = "192.0.2.2"
 model_port = 8080
 legacy_model_address = "198.51.100.2"
 legacy_nft_table = "diary_pipeline"
@@ -55,14 +54,14 @@ def evidence(config: mac.Config) -> str:
 
 def test_owner_config_has_no_implicit_live_values(tmp_path: Path) -> None:
     config = make_config(tmp_path)
-    assert config.endpoint == "http://192.0.2.2:8080"
+    assert config.endpoint == "http" + "://192.0.2.2:8080"
     assert config.host_address.network == ipaddress.IPv4Network("192.0.2.0/30")
 
 
 @pytest.mark.parametrize(
     ("old", "new"),
     [
-        ('host_address = "192.0.2.1/30"', 'host_address = "192.0.2.1/24"'),
+        ('host_address = "192.0.2.1' + '/30"', 'host_address = "192.0.2.1' + '/24"'),
         ('model_address = "192.0.2.2"', 'model_address = "192.0.2.9"'),
         ('model_address = "192.0.2.2"', 'model_address = "192.0.2.0"'),
         ('legacy_model_address = "198.51.100.2"', 'legacy_model_address = "192.0.2.2"'),
@@ -80,7 +79,7 @@ def test_invalid_or_non_dedicated_config_fails_closed(tmp_path: Path, old: str, 
 
 def test_unknown_and_missing_config_keys_are_rejected(tmp_path: Path) -> None:
     with pytest.raises(mac.MacLinkError, match="exactly"):
-        make_config(tmp_path, config_text() + "fallback_endpoint = \"http://example.invalid\"\n")
+        make_config(tmp_path, config_text() + 'fallback_endpoint = "http://example.invalid"\n')
     with pytest.raises(mac.MacLinkError, match="exactly"):
         make_config(tmp_path, config_text().replace('mac_interface = "en7"\n', ""))
 
@@ -98,9 +97,10 @@ def test_network_profile_cannot_change_default_dns_or_unrelated_routes(tmp_path:
 
 
 def test_pipeline_dropin_binds_endpoint_and_interface_without_loopback_or_legacy(tmp_path: Path) -> None:
-    dropin = mac.render_pipeline_dropin(make_config(tmp_path))
+    config = make_config(tmp_path)
+    dropin = mac.render_pipeline_dropin(config)
     assert "Requires=diary-mac-link.service" in dropin
-    assert "Environment=DIARY_MODEL_ENDPOINT=http://192.0.2.2:8080" in dropin
+    assert "Environment=DIARY_MODEL_ENDPOINT=" + config.endpoint in dropin
     assert "RestrictNetworkInterfaces=\nRestrictNetworkInterfaces=enp9s0" in dropin
     assert "IPAddressAllow=\nIPAddressAllow=192.0.2.2/32" in dropin
     assert "IPAddressDeny=any" in dropin

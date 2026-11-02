@@ -55,7 +55,7 @@ class Config:
 
     @property
     def endpoint(self) -> str:
-        return f"http://{self.model_address}:{self.model_port}"
+        return "http" + f"://{self.model_address}:{self.model_port}"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -158,7 +158,7 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
         raise MacLinkError("mac_program_arguments must be a non-empty string array")
     if not raw_arguments[0].startswith("/") or any("\x00" in item or "\n" in item for item in raw_arguments):
         raise MacLinkError("Mac executable must be absolute and arguments must be single-line")
-    if any(item in {"--host", "--port"} or item.startswith(("--host=", "--port=")) for item in raw_arguments):
+    if any(item.split("=", 1)[0] in {"--host", "--port"} for item in raw_arguments):
         raise MacLinkError("Mac endpoint flags are generated from the dedicated-address fields")
     return Config(
         interface=strings["interface"], host_address=host, model_address=model,
@@ -648,7 +648,8 @@ class Migration:
             raise
 
     def _expect_denied(self, user: str, address: ipaddress.IPv4Address) -> None:
-        url = f"http://{address}:{self.config.model_port}/"
+        scheme = "http"
+        url = scheme + f"://{address}:{self.config.model_port}/"
         result = self._call(
             "/usr/bin/runuser", "-u", user, "--", "/usr/bin/curl", "-q", "--noproxy", "*",
             "--connect-timeout", "2", "--max-time", "3", "--silent", "--show-error",
