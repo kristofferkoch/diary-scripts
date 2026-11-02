@@ -43,6 +43,11 @@ than stuck.
 - Approving a command does not serialise its *execution*: as before, the next
   prompt can be answered while an approved command is still running.
 
+Daemon log lines never overwrite the prompt. If the broker logs while a prompt
+is on screen (a queued request, or an approved command exiting), the prompt
+line is cleared, the log is printed, and the prompt is redrawn beneath it. On
+`TERM=dumb` it reprints without the clear-line escape.
+
 ## Temporarily accepting ordinary requests
 
 For a larger system rework, start the daemon with:

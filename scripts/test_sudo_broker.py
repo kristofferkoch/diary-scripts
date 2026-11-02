@@ -734,3 +734,65 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def test_log_during_a_prompt_prints_above_it_and_redraws(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A log line must never be appended to the `[y/N]` line.
+
+    2026-11-02 transcript: `└─ approve? [y/N] [sudo-broker] QUEUED (1 ahead)`.
+    The line is cleared, the log takes it, and the prompt is reprinted below.
+    """
+    monkeypatch.setenv("TERM", "xterm")
+    sink = _TtySink()
+    patched = _Patch()
+    patched.setattr(sys, "stdout", sink)
+    patched.setattr(sys, "stderr", io.StringIO())
+    try:
+        sudo_broker._set_prompt("└─ approve? [y/N] ")
+        sudo_broker.log("EXIT 0: 'true'")
+        written = sink.output()
+    finally:
+        sudo_broker._clear_prompt()
+        patched.restore()
+        sink.close()
+    expected = (
+        "\r\x1b[K[sudo-broker] EXIT 0: 'true'\n"
+        "└─ approve? [y/N] "
+    ).encode()
+    assert expected in written
+
+
+def test_log_during_a_prompt_on_a_dumb_terminal_avoids_escapes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TERM", "dumb")
+    sink = _TtySink()
+    patched = _Patch()
+    patched.setattr(sys, "stdout", sink)
+    patched.setattr(sys, "stderr", io.StringIO())
+    try:
+        sudo_broker._set_prompt("└─ approve? [y/N] ")
+        sudo_broker.log("EXIT 0: 'true'")
+        written = sink.output()
+    finally:
+        sudo_broker._clear_prompt()
+        patched.restore()
+        sink.close()
+    assert b"\x1b" not in written
+    assert written.endswith("└─ approve? [y/N] ".encode())
+
+
+def test_log_without_a_prompt_goes_to_stderr() -> None:
+    sink = _TtySink()
+    err = io.StringIO()
+    patched = _Patch()
+    patched.setattr(sys, "stdout", sink)
+    patched.setattr(sys, "stderr", err)
+    try:
+        sudo_broker.log("listening")
+    finally:
+        patched.restore()
+        sink.close()
+    assert err.getvalue().endswith("[sudo-broker] listening\n")
