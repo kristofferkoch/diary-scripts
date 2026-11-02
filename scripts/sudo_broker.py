@@ -80,6 +80,23 @@ CHILD_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 _send_lock = threading.Lock()
 _prompt_lock = threading.Lock()
+#: Everything written to the operator's terminal goes through this lock, so a
+#: log line can never land in the middle of the prompt.
+_term_lock = threading.RLock()
+#: The last prompt line currently on screen, or None between prompts.
+_prompt_text: str | None = None
+
+
+def _set_prompt(text: str) -> None:
+    global _prompt_text
+    with _term_lock:
+        _prompt_text = text
+
+
+def _clear_prompt() -> None:
+    global _prompt_text
+    with _term_lock:
+        _prompt_text = None
 
 #: Requests allowed to be pending at once (the head plus those waiting).
 #: The queue is in-memory on purpose: a request must never outlive the daemon.
@@ -134,7 +151,29 @@ _turn_queue = _TurnQueue()
 
 
 def log(msg: str) -> None:
-    print(f"[sudo-broker] {msg}", file=sys.stderr, flush=True)
+    """Write one daemon log line without destroying an open prompt.
+
+    When a prompt is on screen the line is printed above it and the prompt is
+    redrawn underneath, instead of being appended to the `[y/N]` line by
+    whichever thread logged at that moment.
+    """
+    line = f"[sudo-broker] {msg}"
+    with _term_lock:
+        prompt = _prompt_text
+        stream = terminal() if prompt is not None else None
+        if prompt is not None and stream is not None:
+            try:
+                if os.environ.get("TERM") == "dumb":
+                    stream.write(f"\n{line}\n{prompt}")
+                else:
+                    # \r\x1b[K clears the prompt line, the log takes it, and
+                    # the prompt is reprinted below.
+                    stream.write(f"\r\x1b[K{line}\n{prompt}")
+                stream.flush()
+                return
+            except (OSError, ValueError):
+                pass
+        print(line, file=sys.stderr, flush=True)
 
 
 def resolve_target(name: str) -> tuple[pwd.struct_passwd | None, str]:
@@ -196,11 +235,12 @@ def write_terminal(text: str) -> None:
     stream = terminal()
     if stream is None:
         return
-    try:
-        stream.write(text)
-        stream.flush()
-    except (OSError, ValueError):
-        pass
+    with _term_lock:
+        try:
+            stream.write(text)
+            stream.flush()
+        except (OSError, ValueError):
+            pass
 
 
 def bell() -> None:
@@ -350,21 +390,27 @@ def approve(
             log(f"DROPPED (client gone while queued): {cmd!r} from uid {uid}")
             return False, "client disconnected while queued"
         with _prompt_lock:
-            print("", flush=True)
-            print("┌─ sudo-broker " + "─" * 58, flush=True)
-            print(f"│ from : {name} (uid {uid}, pid {pid})", flush=True)
-            print(f"│ cwd  : {sanitize(cwd, 512)}", flush=True)
-            print(f"│ as   : {as_user}", flush=True)
-            print(f"│ run  : {sanitize(cmd)}", flush=True)
-            waiting = len(_turn_queue) - 1
-            if waiting:
-                print(f"│ queue: {waiting} more waiting", flush=True)
-            if AUTO_ACCEPT_ALL and not require_confirmation:
-                print("└─ AUTO-ACCEPT-ALL — running without confirmation", flush=True)
+            prompt_line = "└─ approve? [y/N] "
+            auto = AUTO_ACCEPT_ALL and not require_confirmation
+            with _term_lock:
+                print("", flush=True)
+                print("┌─ sudo-broker " + "─" * 58, flush=True)
+                print(f"│ from : {name} (uid {uid}, pid {pid})", flush=True)
+                print(f"│ cwd  : {sanitize(cwd, 512)}", flush=True)
+                print(f"│ as   : {as_user}", flush=True)
+                print(f"│ run  : {sanitize(cmd)}", flush=True)
+                waiting = len(_turn_queue) - 1
+                if waiting:
+                    print(f"│ queue: {waiting} more waiting", flush=True)
+                if auto:
+                    print("└─ AUTO-ACCEPT-ALL — running without confirmation", flush=True)
+                else:
+                    print("│ no timeout — answer when you have read it", flush=True)
+                    print(prompt_line, end="", flush=True)
+                    _set_prompt(prompt_line)
+            if auto:
                 log(f"AUTO-APPROVED (as {as_user}): {cmd!r} from uid {uid} (cwd {cwd})")
                 return True, ""
-            print("│ no timeout — answer when you have read it", flush=True)
-            print("└─ approve? [y/N] ", end="", flush=True)
             notify(
                 f"sudo-broker: approval requested (as {as_user})",
                 f"{name} (uid {uid}) wants to run: {cmd}",
@@ -382,11 +428,15 @@ def approve(
                     )
                 else:
                     bell()  # still unanswered — nudge the terminal again
+            with _term_lock:
+                _clear_prompt()
+                if answer not in ("y", "yes"):
+                    print("(sudo-broker: denied)", flush=True)
+                else:
+                    print("(sudo-broker: approved — running)", flush=True)
             if answer not in ("y", "yes"):
-                print("(sudo-broker: denied)", flush=True)
                 log(f"DENIED (operator said no): {cmd!r} from uid {uid}")
                 return False, "denied by operator"
-            print("(sudo-broker: approved — running)", flush=True)
             log(f"APPROVED (as {as_user}): {cmd!r} from uid {uid} (cwd {cwd})")
             return True, ""
     finally:
