@@ -863,3 +863,40 @@ def test_decision_rejects_a_confirm_field_that_disagrees(services: Services) -> 
     )
 
     assert status == 403
+
+
+def _merge_begin(services: Services, origin: str) -> int:
+    body = json.dumps({
+        "action": "merge", "queue_oid": QUEUE_OID, "base_oid": BASE_OID, "repo": "scripts",
+    })
+    connection = http.client.HTTPConnection(
+        "127.0.0.1", services.fresh_server.server_port, timeout=6,
+    )
+    connection.request(
+        "POST", "/lock/merge/begin",
+        headers={
+            "X-Diary-Merge-Begin": "yes",
+            "Content-Type": "application/json",
+            "Origin": origin,
+            "Sec-Fetch-Site": "same-origin",
+            "Cookie": f"{SESSION_COOKIE}=owner",
+        },
+        body=body,
+    )
+    response = connection.getresponse()
+    response.read()
+    connection.close()
+    return response.status
+
+
+def test_merge_begin_accepts_an_opaque_origin(services: Services) -> None:
+    """Firefox sends Origin: null; the ceremony must still start."""
+    services.auth_state.add("owner")
+
+    assert _merge_begin(services, "null") == 303
+
+
+def test_merge_begin_refuses_a_foreign_origin(services: Services) -> None:
+    services.auth_state.add("owner")
+
+    assert _merge_begin(services, "https://evil.example") == 403

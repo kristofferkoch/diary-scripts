@@ -582,7 +582,12 @@ class FreshUnlockHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _require_same_origin(self, confirmation_header: str) -> None:
-        if self.headers.get("Origin") != self.server.config.public_origin:
+        # Browsers are inconsistent: some omit Origin and Firefox sends the
+        # opaque value "null" on a same-origin form post. Only a concrete
+        # mismatching origin is refused; Sec-Fetch-Site plus the session-bound
+        # transaction do the authorization.
+        origin = self.headers.get("Origin")
+        if origin not in (None, "null") and origin != self.server.config.public_origin:
             raise AuthorizationError("same-origin browser request required")
         if self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}:
             raise AuthorizationError("cross-site request rejected")
@@ -605,7 +610,12 @@ class FreshUnlockHandler(BaseHTTPRequestHandler):
         exact public origin and a same-site request, and both are only accepted
         together with a live owner session by the caller.
         """
-        if self.headers.get("Origin") != self.server.config.public_origin:
+        # Browsers are inconsistent: some omit Origin and Firefox sends the
+        # opaque value "null" on a same-origin form post. Only a concrete
+        # mismatching origin is refused; Sec-Fetch-Site plus the session-bound
+        # transaction do the authorization.
+        origin = self.headers.get("Origin")
+        if origin not in (None, "null") and origin != self.server.config.public_origin:
             raise AuthorizationError("same-origin browser request required")
         if self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}:
             raise AuthorizationError("cross-site request rejected")
