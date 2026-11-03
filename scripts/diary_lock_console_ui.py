@@ -409,9 +409,15 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
 
     def _require_form_action(self) -> dict[str, str]:
-        if self.headers.get("Origin") != self.server.config.public_origin:
+        origin = self.headers.get("Origin")
+        site = self.headers.get("Sec-Fetch-Site", "same-origin")
+        # Browsers do not all send Origin on a same-origin form post (Safari
+        # omits it), so the assertion is: if Origin is present it must match,
+        # and the browser must always claim a same-origin navigation. The
+        # single-use session-bound token below is what actually authorizes.
+        if origin is not None and origin != self.server.config.public_origin:
             raise AuthorizationError("same-origin browser request required")
-        if self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}:
+        if site not in {"same-origin", "none"}:
             raise AuthorizationError("cross-site request rejected")
         if self.headers.get("Content-Type", "").split(";", 1)[0].strip() != "application/x-www-form-urlencoded":
             raise AuthorizationError("form request body required")

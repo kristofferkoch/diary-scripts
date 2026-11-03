@@ -775,3 +775,46 @@ def test_diary_publication_does_not_sync_a_python_environment(
     # The reviewed base still reaches the publisher for both repositories; only
     # the venv sync differs.
     assert calls == [("a" * 40, False, "b" * 40), ("a" * 40, True, "b" * 40)]
+
+
+def test_decide_accepts_a_browser_that_omits_origin(services: Services) -> None:
+    """Safari omits Origin on same-origin form posts; the token still authorizes."""
+    cookies = authorized(services)
+    token = page_token(services, cookies)
+    body = urllib.parse.urlencode({
+        "repo": "scripts", "action": "merge",
+        "queue_oid": QUEUE_OID, "base_oid": BASE_OID, "csrf": token,
+    })
+    status, raw = http_request(
+        services.ui_server, "POST", "/lock/merge/decide",
+        cookies=cookies,
+        headers={
+            "Sec-Fetch-Site": "same-origin",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body=body,
+    )
+
+    assert status == 200
+    assert b"Merged" in raw
+
+
+def test_decide_refuses_cross_site_fetch_metadata(services: Services) -> None:
+    """A cross-site form post is refused even without an Origin header."""
+    cookies = authorized(services)
+    token = page_token(services, cookies)
+    body = urllib.parse.urlencode({
+        "repo": "scripts", "action": "merge",
+        "queue_oid": QUEUE_OID, "base_oid": BASE_OID, "csrf": token,
+    })
+    status, _ = http_request(
+        services.ui_server, "POST", "/lock/merge/decide",
+        cookies=cookies,
+        headers={
+            "Sec-Fetch-Site": "cross-site",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body=body,
+    )
+
+    assert status == 403
