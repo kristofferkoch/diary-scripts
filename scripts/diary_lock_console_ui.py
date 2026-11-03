@@ -27,6 +27,7 @@ from typing import Any, Callable
 
 from scripts import agent_merge_console as console
 from scripts.diary_lock_ui import AutheliaClient, Config, OwnerUIError, _cookies, load_config
+from scripts import diary_lock_ui as owner_ui
 
 DEFAULT_CONFIG = "/etc/diary/lock-auth.toml"
 DEFAULT_EXECUTOR_SOCKET = "/run/diary-merge-console/socket"
@@ -428,6 +429,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 self._json(404, {"error": "not found"})
         except ConsoleUIError as exc:
             self._html(exc.status, render_result(exc.code))
+        except owner_ui.AuthorizationError:
+            # The owner-UI client raises its own authorization error when the
+            # presented session is missing or not a two-factor owner session.
+            # Mapping it to "unavailable" told the browser the service was down
+            # instead of asking for authorization.
+            self._html(403, render_result("unauthorized"))
+        except owner_ui.OwnerUIError:
+            self._html(503, render_result("unavailable"))
         except Exception:
             self._html(503, render_result("unavailable"))
 

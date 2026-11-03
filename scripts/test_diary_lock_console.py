@@ -605,3 +605,25 @@ def test_socket_activated_stdio_mode_checks_the_peer_uid_and_answers_once(
     finally:
         client.close()
         server.close()
+
+
+def test_anonymous_page_asks_for_authorization_instead_of_reporting_an_outage(
+    services: Services,
+) -> None:
+    """A missing session is an authorization state, not a service outage."""
+    status, body = http_request(services.ui_server, "GET", "/lock/merge/")
+
+    assert status == 403
+    assert b"Authorization required" in body
+
+
+def test_first_factor_session_is_refused_as_unauthorized(services: Services) -> None:
+    """Password-only Authelia sessions must read as 403, not 503."""
+    services.auth_state.add("first", level=1, second=0)
+    status, body = http_request(
+        services.ui_server, "GET", "/lock/merge/",
+        cookies={SESSION_COOKIE: "first"},
+    )
+
+    assert status == 403
+    assert b"Authorization required" in body
