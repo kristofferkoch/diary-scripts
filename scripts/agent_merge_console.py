@@ -41,6 +41,20 @@ class ApprovedBaseChanged(QueueChanged):
     """Approved master no longer matches the reviewed diff base."""
 
 
+class PublicationNotStarted(ConsoleError):
+    """The decision failed before any repository operation was attempted."""
+
+
+class PublicationFailed(ConsoleError):
+    """Publication was attempted; the state is derived from the repositories."""
+
+    STATES = ("published", "not_published", "unknown")
+
+    def __init__(self, state: str) -> None:
+        self.state = state if state in self.STATES else "unknown"
+        super().__init__(f"publication outcome: {self.state}")
+
+
 @dataclass(frozen=True)
 class OwnerGrant:
     """A trusted CTL-07 authorization result, never a browser-supplied claim."""
@@ -68,6 +82,9 @@ class DecisionRecord:
             "owner_authorized": "allow",
             "merge_completed": "allow",
             "merge_failed": "error",
+            "merge_failed_published": "error",
+            "merge_failed_not_published": "error",
+            "merge_failed_unknown": "error",
             "owner_denied": "deny",
             "queue_changed": "deny",
             "base_changed": "deny",
@@ -267,14 +284,54 @@ class MergeConsole:
             self._record(action, reviewed_oid, reviewed_base, "owner_denied")
             return DecisionResult(action, reviewed_oid, reviewed_base, "denied")
 
-        self._record(action, reviewed_oid, reviewed_base, "owner_authorized")
+        try:
+            self._record(action, reviewed_oid, reviewed_base, "owner_authorized")
+        except Exception as exc:
+            # Nothing has touched a repository yet, and the pre-merge audit is
+            # mandatory, so this is a clean refusal rather than an unknown state.
+            raise PublicationNotStarted(
+                "the decision could not be audited; nothing was published"
+            ) from exc
         try:
             self.publisher(reviewed_oid, self.paths, expected_base=reviewed_base)
-        except Exception:
-            self._record(action, reviewed_oid, reviewed_base, "merge_failed")
-            raise
-        self._record(action, reviewed_oid, reviewed_base, "merge_completed")
+        except Exception as exc:
+            state = self._publication_state(reviewed_oid)
+            self._record_best_effort(
+                action, reviewed_oid, reviewed_base, f"merge_failed_{state}",
+            )
+            raise PublicationFailed(state) from exc
+        try:
+            self._record(action, reviewed_oid, reviewed_base, "merge_completed")
+        except Exception as exc:
+            # The merge happened; only the completion record is missing.
+            raise PublicationFailed("published") from exc
         return DecisionResult(action, reviewed_oid, reviewed_base, "merged")
+
+    def _publication_state(self, reviewed_oid: str) -> str:
+        """Derive what actually happened, rather than guessing from the error."""
+        try:
+            in_approved = queue.git(
+                self.paths.approved, "merge-base", "--is-ancestor", reviewed_oid, "master",
+                check=False,
+            ).returncode == 0
+            if in_approved:
+                return "published"
+            head = queue.git(self.paths.queue, "rev-parse", "HEAD").stdout.strip()
+            if head == reviewed_oid:
+                return "not_published"
+            return "unknown"
+        except Exception:
+            return "unknown"
+
+    def _record_best_effort(
+        self, action: DecisionAction, oid: str, base: str, outcome: str,
+    ) -> None:
+        try:
+            self._record(action, oid, base, outcome)
+        except Exception:
+            # Reporting the repository state must not be masked by a second
+            # audit failure.
+            pass
 
 
 DIFF_LINE_CLASSES = {

@@ -153,3 +153,23 @@ def test_audit_restart_keeps_state_and_accepts_writes(
 
     assert third["ok"] is True
     assert wait_events(stack.audit)[-1]["DIARY_AUDIT_EVENT_ID"] == "c" * 40
+
+
+def test_failed_publication_reports_the_repository_state(stack: harness.Stack) -> None:
+    """A publisher failure must say whether anything actually got published."""
+    from scripts import diary_merge_console_service as executor
+
+    reviewed = harness.enqueue_change(stack.scripts)
+    base = base_oid(stack.scripts)
+
+    def failing(*_args: object, **_kwargs: object) -> bool:
+        raise RuntimeError("injected publication failure")
+
+    reply = stack.decide(
+        "scripts", "merge", reviewed, base, publisher=failing,  # type: ignore[arg-type]
+    )
+
+    assert reply["error"] == "not_published"
+    assert harness.git(stack.scripts.approved, "rev-parse", "HEAD") == base
+    reasons = [event["DIARY_AUDIT_REASON"] for event in wait_events(stack.audit, 2)]
+    assert reasons == ["owner_authorized", "merge_failed_not_published"]

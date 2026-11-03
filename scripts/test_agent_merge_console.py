@@ -320,7 +320,7 @@ def test_audit_failure_prevents_merge(
     base = git(paths.approved, "rev-parse", "master")
     published = remote_head(remote)
 
-    with pytest.raises(OSError, match="audit failure"):
+    with pytest.raises(console.PublicationNotStarted, match="could not be audited"):
         make_console(paths, reports, FailingAudit()).decide("merge", oid, base)
 
     assert remote_head(remote) == published
@@ -409,3 +409,93 @@ def test_render_console_names_the_queue_under_review() -> None:
 
     assert '<code id="repo">diary</code>' in page
     assert 'name="repo" value="diary"' in page
+
+
+# --------------------------------------------------- publication outcome (D2)
+
+
+def _head(paths: queue.QueuePaths, which: str) -> str:
+    return git(paths.approved if which == "approved" else paths.queue, "rev-parse", "HEAD")
+
+
+def test_audit_failure_before_publication_reports_nothing_published(
+    environment: tuple[queue.QueuePaths, Path, Path],
+) -> None:
+    """An audit crash before the publisher must not read as an unknown merge."""
+    paths, _, reports = environment
+    reviewed, base = _head(paths, "queue"), _head(paths, "approved")
+    console_ = make_console(paths, reports, auditor=FailingAudit())
+
+    with pytest.raises(console.PublicationNotStarted) as excinfo:
+        console_.decide("merge", reviewed, base)
+
+    assert "nothing was published" in str(excinfo.value)
+    assert _head(paths, "approved") == base
+    assert _head(paths, "queue") == reviewed
+
+
+def test_publisher_failure_before_any_change_reports_not_published(
+    environment: tuple[queue.QueuePaths, Path, Path],
+) -> None:
+    paths, _, reports = environment
+    reviewed, base = _head(paths, "queue"), _head(paths, "approved")
+    auditor = FakeAudit()
+
+    def failing(*_args: object, **_kwargs: object) -> bool:
+        raise RuntimeError("injected publisher failure")
+
+    console_ = make_console(paths, reports, auditor=auditor, publisher=failing)
+
+    with pytest.raises(console.PublicationFailed) as excinfo:
+        console_.decide("merge", reviewed, base)
+
+    assert excinfo.value.state == "not_published"
+    assert [record.outcome for record in auditor.records] == [
+        "owner_authorized", "merge_failed_not_published",
+    ]
+
+
+def test_publisher_failure_after_publication_reports_published(
+    environment: tuple[queue.QueuePaths, Path, Path],
+) -> None:
+    paths, _, reports = environment
+    reviewed, base = _head(paths, "queue"), _head(paths, "approved")
+
+    def publishes_then_fails(oid: str, target: queue.QueuePaths, **kwargs: object) -> bool:
+        queue.approve_queue(oid, target, sync_environment=False, **kwargs)  # type: ignore[arg-type]
+        raise RuntimeError("completion record lost")
+
+    console_ = make_console(paths, reports, publisher=publishes_then_fails)
+
+    with pytest.raises(console.PublicationFailed) as excinfo:
+        console_.decide("merge", reviewed, base)
+
+    assert excinfo.value.state == "published"
+    assert git(paths.approved, "merge-base", "--is-ancestor", reviewed, "master") == ""
+
+
+def test_publisher_failure_after_the_queue_moved_reports_unknown(
+    environment: tuple[queue.QueuePaths, Path, Path],
+) -> None:
+    paths, _, reports = environment
+    reviewed, base = _head(paths, "queue"), _head(paths, "approved")
+
+    def moves_queue_then_fails(oid: str, target: queue.QueuePaths, **_kwargs: object) -> bool:
+        commit(target.queue, "later.py", "VALUE = 2\n", "another queued change")
+        raise RuntimeError("outcome cannot be derived")
+
+    console_ = make_console(paths, reports, publisher=moves_queue_then_fails)
+
+    with pytest.raises(console.PublicationFailed) as excinfo:
+        console_.decide("merge", reviewed, base)
+
+    assert excinfo.value.state == "unknown"
+
+
+def test_executor_replies_distinguish_publication_states() -> None:
+    from scripts import diary_merge_console_service as executor
+
+    assert executor.error_reply(console.PublicationNotStarted("x"))["error"] == "not_published"
+    assert executor.error_reply(console.PublicationFailed("not_published"))["error"] == "not_published"
+    assert executor.error_reply(console.PublicationFailed("published"))["error"] == "published_unconfirmed"
+    assert executor.error_reply(console.PublicationFailed("unknown"))["error"] == "publication_unknown"

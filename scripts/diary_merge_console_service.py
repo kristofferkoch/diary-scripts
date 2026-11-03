@@ -273,6 +273,17 @@ def error_reply(exc: Exception) -> dict[str, Any]:
         return {"ok": False, "error": "queue_changed"}
     if isinstance(exc, ExecutorError):
         return {"ok": False, "error": "unavailable"}
+    if isinstance(exc, console.PublicationNotStarted):
+        return {"ok": False, "error": "not_published"}
+    if isinstance(exc, console.PublicationFailed):
+        return {
+            "ok": False,
+            "error": {
+                "published": "published_unconfirmed",
+                "not_published": "not_published",
+                "unknown": "publication_unknown",
+            }[exc.state],
+        }
     if isinstance(exc, console.ConsoleError):
         return {"ok": False, "error": "invalid"}
     return {"ok": False, "error": "merge_failed"}

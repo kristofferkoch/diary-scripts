@@ -210,6 +210,9 @@ MESSAGES = {
     "unauthorized": ("Authorization required", "A fresh owner authorization was required and was not accepted."),
     "unavailable": ("Unavailable", "The trusted service is unavailable; nothing was merged."),
     "merge_failed": ("Unknown outcome", "Publication failed or its result could not be confirmed. Check the repository state before retrying."),
+    "not_published": ("Nothing published", "The decision stopped before any repository operation. Nothing was merged or pushed; it is safe to review and retry."),
+    "published_unconfirmed": ("Published, completion unconfirmed", "The merge was published, but the completion record could not be written. Approved master already contains the reviewed queue."),
+    "publication_unknown": ("Publication outcome unknown", "The repositories changed during publication, so the result could not be derived. Check approved master and the queue before retrying."),
     "invalid": ("Rejected", "The decision request was invalid; nothing was merged."),
     "forbidden": ("Refused", "The request was refused; nothing was merged or pushed."),
     "empty": ("Nothing queued", "No queued diary-scripts changes require review."),
@@ -562,6 +565,9 @@ def _decision_error(code: str) -> ConsoleUIError:
         "unauthorized": (AuthorizationError, 403),
         "unavailable": (DecisionUnavailable, 503),
         "merge_failed": (DecisionFailed, 502),
+        "not_published": (DecisionFailed, 502),
+        "published_unconfirmed": (DecisionFailed, 502),
+        "publication_unknown": (DecisionUnavailable, 503),
     }
     kind, status = mapping.get(code, (DecisionRejected, 409))
     resolved = code if code in MESSAGES else "invalid"

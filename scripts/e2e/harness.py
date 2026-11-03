@@ -324,6 +324,7 @@ class Stack:
     def decide(
         self, repo: str, action: str, queue_oid: str, base_oid: str,
         transaction: str = "e2e-transaction",
+        publisher: queue.QueuePaths | None = None,  # type: ignore[valid-type]
     ) -> dict[str, Any]:
         from scripts import diary_merge_console_service as executor
 
@@ -341,7 +342,7 @@ class Stack:
                 self.paths_by_repo,
                 self.verifier,
                 auditor=decision_audit(self.audit),
-                publisher=publish_without_venv,
+                publisher=publisher or publish_without_venv,
                 lock_state="locked",
             )
         except Exception as exc:  # mirrored to the socket reply the console sees
