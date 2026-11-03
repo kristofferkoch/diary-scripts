@@ -657,3 +657,52 @@ def test_audit_preflight_fails_when_the_field_is_dropped() -> None:
 def test_audit_preflight_fails_when_the_write_is_rejected() -> None:
     with pytest.raises(audit.AuditError, match="preflight write was rejected"):
         audit.preflight("/scratch/socket", _FakeAuditService(reject=True))
+
+
+def test_preflight_polls_until_the_journal_flushes() -> None:
+    """The write is accepted before journald has it; retry rather than fail."""
+    written = {"ok": True}
+    calls = {"n": 0}
+
+    def request(socket_path: str, payload: dict) -> dict:
+        if payload["cmd"] == "write":
+            return written
+
+        calls["n"] += 1
+        event_id = "x" * 32
+        if calls["n"] < 3:
+            return {"groups": []}
+        return {"groups": [{
+            "event": audit.PREFLIGHT_EVENT, "event_id": event_id,
+            "repository": "scripts",
+        }]}
+
+    # The written event's id must match what the report returns.
+    def request_with_id(socket_path: str, payload: dict) -> dict:
+        if payload["cmd"] == "write":
+            written["event_id"] = payload["event"]["event_id"]
+            return written
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return {"groups": []}
+        return {"groups": [{
+            "event": audit.PREFLIGHT_EVENT, "event_id": written["event_id"],
+            "repository": "scripts",
+        }]}
+
+    result = audit.preflight("/tmp/ignored.sock", request_with_id, timeout=2.0)
+
+    assert result["repository"] == "scripts"
+    assert calls["n"] == 3
+
+
+def test_preflight_times_out_with_a_clear_error() -> None:
+    def request(socket_path: str, payload: dict) -> dict:
+        if payload["cmd"] == "write":
+            return {"ok": True}
+        return {"groups": []}
+
+    with pytest.raises(audit.AuditError) as excinfo:
+        audit.preflight("/tmp/ignored.sock", request, timeout=0.2)
+
+    assert "did not reach the trusted journal" in str(excinfo.value)

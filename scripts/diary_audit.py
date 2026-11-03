@@ -956,6 +956,7 @@ PREFLIGHT_EVENT = "audit.preflight"
 def preflight(
     socket_path: str = DEFAULT_SOCKET,
     request_fn: Callable[..., dict[str, Any]] = request,
+    timeout: float = 10.0,
 ) -> dict[str, Any]:
     """Prove the running daemon journals the fields a decision needs.
 
@@ -980,15 +981,24 @@ def preflight(
         raise AuditError(
             f"audit preflight write was rejected: {written.get('error', 'unknown error')}"
         )
-    report = request_fn(socket_path, {
-        "cmd": "baseline", "since": "5m", "until": "now", "limit": 200,
-    })
-    matches = [
-        group for group in report.get("groups", [])
-        if group.get("event") == PREFLIGHT_EVENT and group.get("event_id") == event["event_id"]
-    ]
-    if not matches:
-        raise AuditError("audit preflight event did not reach the trusted journal")
+    # A write is accepted by the daemon before journald has necessarily flushed
+    # it, and the report reads the journal rather than the daemon's memory. Poll
+    # for a bounded time instead of failing on the first read.
+    deadline = time.monotonic() + timeout
+    while True:
+        report = request_fn(socket_path, {
+            "cmd": "baseline", "since": "5m", "until": "now", "limit": 200,
+        })
+        matches = [
+            group for group in report.get("groups", [])
+            if group.get("event") == PREFLIGHT_EVENT
+            and group.get("event_id") == event["event_id"]
+        ]
+        if matches:
+            break
+        if time.monotonic() >= deadline:
+            raise AuditError("audit preflight event did not reach the trusted journal")
+        time.sleep(0.1)
     if matches[0].get("repository") != "scripts":
         raise AuditError(
             "audit preflight event lost its repository field in the trusted journal"
