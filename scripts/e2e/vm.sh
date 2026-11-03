@@ -364,8 +364,11 @@ vm_provision_base() {
     local name=$1
     vm_script "$name" <<PROVISION
 echo "provisioning: packages"
+# The Cloud image is leaner than the old container image: the installers call
+# script(1), semanage, openssl and systemd-analyze during their dark tests.
 dnf -y --setopt=install_weak_deps=False install \
     python3 git curl gcc golang tar make shadow-utils nftables policycoreutils \
+    policycoreutils-python-utils util-linux-script openssl \
     >/tmp/dnf.log 2>&1 || { tail -30 /tmp/dnf.log; exit 1; }
 echo "provisioning: identities"
 getent group kek >/dev/null || groupadd -g 1000 kek
