@@ -174,6 +174,25 @@ prepare_container() {
         # /usr/sbin, and the host has the /usr/bin path, so give the container
         # the same layout rather than changing the product.
         [[ -e /usr/bin/nft ]] || ln -s /usr/sbin/nft /usr/bin/nft
+        # authelia/install builds with GOSUMDB=off, so a Go older than the pinned
+        # source requires cannot download a toolchain: it fails verification.
+        # Install the same Go line the host uses.
+        GO_VERSION=${L4_GO_VERSION:-1.26.10}
+        case $(uname -m) in
+            aarch64 | arm64) GO_ARCH=arm64 ;;
+            x86_64 | amd64) GO_ARCH=amd64 ;;
+            *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+        esac
+        if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "go${GO_VERSION} "; then
+            GO_SCHEME=https
+            GO_HOST=go.dev
+            curl -fsSL "${GO_SCHEME}://${GO_HOST}/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz" \
+                -o /tmp/go.tgz
+            rm -rf /usr/local/go
+            tar -C /usr/local -xzf /tmp/go.tgz
+            rm -f /tmp/go.tgz
+            ln -sf /usr/local/go/bin/go /usr/bin/go
+        fi
         # The first nft call in a fresh container loads nf_tables and can fail;
         # warm it up so the installer policy start is not the first user.
         nft list tables >/dev/null 2>&1 || true
