@@ -50,6 +50,14 @@ def decision_events(handle: harness.AuditHandle) -> list[dict[str, str]]:
     ]
 
 
+def wait_events(handle: harness.AuditHandle, count: int = 1) -> list[dict[str, str]]:
+    def ready():
+        events = decision_events(handle)
+        return events if len(events) >= count else None
+
+    return harness.wait_for(ready) or []
+
+
 def base_oid(paths) -> str:
     return harness.git(paths.approved, "rev-parse", "master")
 
@@ -72,7 +80,7 @@ def test_audit_daemon_journals_the_decision_repository(
     reply = stack.audit.write(decision_event())
 
     assert reply["ok"] is True
-    recorded = decision_events(stack.audit)[-1]
+    recorded = wait_events(stack.audit)[-1]
     assert recorded["DIARY_AUDIT_REPOSITORY"] == "diary"
     assert recorded["DIARY_AUDIT_EVENT_ID"] == QUEUE
     assert recorded["DIARY_AUDIT_BASE_OID"] == BASE
@@ -91,9 +99,10 @@ def test_merge_publishes_the_scratch_queue(stack: harness.Stack) -> None:
     assert harness.git(Path(origin), "rev-parse", "master") == reviewed
     assert harness.git(stack.scripts.integration, "rev-parse", "HEAD") == reviewed
 
-    reasons = [event["DIARY_AUDIT_REASON"] for event in decision_events(stack.audit)]
+    events = wait_events(stack.audit, 2)
+    reasons = [event["DIARY_AUDIT_REASON"] for event in events]
     assert reasons == ["owner_authorized", "merge_completed"]
-    for event in decision_events(stack.audit):
+    for event in events:
         assert event["DIARY_AUDIT_REPOSITORY"] == "scripts"
         assert event["DIARY_AUDIT_EVENT_ID"] == reviewed
         assert event["DIARY_AUDIT_BASE_OID"] == base
@@ -107,7 +116,7 @@ def test_stale_queue_oid_is_refused_without_publication(stack: harness.Stack) ->
 
     assert reply["error"] == "queue_changed"
     assert harness.git(stack.scripts.approved, "rev-parse", "HEAD") == base
-    reasons = [event["DIARY_AUDIT_REASON"] for event in decision_events(stack.audit)]
+    reasons = [event["DIARY_AUDIT_REASON"] for event in wait_events(stack.audit)]
     assert reasons == ["queue_changed"]
 
 
@@ -134,7 +143,13 @@ def test_audit_restart_keeps_state_and_accepts_writes(
     stack.audit = harness.start_audit(stack.scratch, state=state)
 
     second = stack.audit.write(decision_event())
-
     assert second["ok"] is True
     assert second["count"] == 2
-    assert decision_events(stack.audit)[-1]["DIARY_AUDIT_REPOSITORY"] == "diary"
+
+    # A duplicate inside the suppression window updates counters without a new
+    # journal datagram; a distinct event must still be emitted after restart.
+    other = dict(decision_event(), event_id="c" * 40)
+    third = stack.audit.write(other)
+
+    assert third["ok"] is True
+    assert wait_events(stack.audit)[-1]["DIARY_AUDIT_EVENT_ID"] == "c" * 40

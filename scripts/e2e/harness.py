@@ -85,6 +85,17 @@ class Scratch:
         shutil.rmtree(self.root, ignore_errors=True)
 
 
+def wait_for(predicate, timeout: float = 2.0, interval: float = 0.01):
+    """Poll a condition until it is truthy; the journal sink is asynchronous."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        time.sleep(interval)
+    return predicate()
+
+
 def root_escapes(candidate: Path, root: Path) -> bool:
     """True when a resolved path is outside the scratch root or forbidden."""
     try:
@@ -269,8 +280,22 @@ class StubVerifier:
         return self.transaction is None or self.transaction == transaction
 
 
+class ServiceAuditor:
+    """Decision auditor that records through the daemon's service stack.
+
+    The production adapter sends the same event over the daemon socket; the
+    transport is the only difference, and it is the root-only piece.
+    """
+
+    def __init__(self, handle: AuditHandle) -> None:
+        self.handle = handle
+
+    def record(self, record: console.DecisionRecord) -> None:
+        self.handle.write(record.as_audit_event())
+
+
 def decision_audit(handle: AuditHandle) -> console.DecisionAuditor:
-    return console.DiaryDecisionAudit(str(handle.socket_path))
+    return ServiceAuditor(handle)
 
 
 def publish_without_venv(

@@ -75,6 +75,7 @@ Per-tool detail and the triage SOPs live in `docs/`. This file is the index.
 | [`docs/agent-merge.md`](docs/agent-merge.md) | `agent-merge-queue` / `agent-merge-approve`: separate automatic and approved trees, exact-OID owner publication |
 | [`docs/agent-merge-review.md`](docs/agent-merge-review.md) | advisory local-model scripts-queue review, pre-queue allowlist rejection, owner-readable reports |
 | [`docs/agent-merge-console.md`](docs/agent-merge-console.md) | prepared LATER-01 owner Merge/Deny UI extension, exact-OID decisions, audit, and CTL-07/09 integration gates |
+| [`docs/e2e-harness.md`](docs/e2e-harness.md) | unprivileged, scratch-state end-to-end harness for the merge console: protocol stack, audit journal mapping, publication, and what layer 2 must add |
 | [`docs/sudo-broker.md`](docs/sudo-broker.md) | `sudo-broker` / `sudo-ask`: per-command root approval from an open terminal, replacing standing `NOPASSWD` |
 | [`docs/audit.md`](docs/audit.md) | `diary-audit` / `diary-auditd`: trusted metadata-only journal writer, duplicate counters, baseline/review reports |
 | [`docs/production-baseline.md`](docs/production-baseline.md) | `diary-production-baseline`: AUD-05 coverage, duration, finding classification, and owner-review evidence |
