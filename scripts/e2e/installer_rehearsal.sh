@@ -23,7 +23,7 @@ set -euo pipefail
 readonly CONTAINER_DIARY=/home/kek/diary-approved
 readonly CONTAINER_SCRIPTS=/home/kek/diary-scripts-approved
 readonly DEFAULT_IMAGE=registry.fedoraproject.org/fedora:41
-readonly BOOT_TIMEOUT=${L4_BOOT_TIMEOUT:-120}
+readonly BOOT_TIMEOUT=${L4_BOOT_TIMEOUT:-300}
 readonly INSTALL_TIMEOUT=${L4_INSTALL_TIMEOUT:-1800}
 
 IMAGE=${L4_IMAGE:-$DEFAULT_IMAGE}
@@ -83,7 +83,7 @@ require_clean_checkout() {
     [[ -n $path ]] || die "missing $label path (see --help)"
     [[ -d $path ]] || die "$label is not a directory: $path"
     [[ -d $path/.git ]] || die "$label is not a Git checkout with private metadata: $path"
-    if [[ -n $(git -C "$path" status --porcelain) ]]; then
+    if [[ -n $(git -c safe.directory="$path" -C "$path" status --porcelain) ]]; then
         die "$label has uncommitted changes; a rehearsal must run against approved content: $path"
     fi
 }
@@ -143,8 +143,8 @@ start_container() {
         --security-opt label=disable \
         --volume "$scripts_mount:$CONTAINER_SCRIPTS:ro" \
         --volume "$diary_mount:$CONTAINER_DIARY:ro" \
-        "$IMAGE" /sbin/init >/dev/null \
-        || die "could not start container $name"
+        "$IMAGE" /bin/sh -c 'dnf -q -y install systemd >/dev/null 2>&1 && exec /usr/sbin/init' \
+        >/dev/null || die "could not start container $name"
 
     local deadline=$((SECONDS + BOOT_TIMEOUT))
     local state=
