@@ -58,13 +58,74 @@ Deliberately different from production, and why:
 | Submit button field (`confirm`) rejected | **L2** (browser): the rendered form must be submitted as a browser submits it |
 | Stale verifier socket, installer ordering | **L4** (root rehearsal): the fresh service chowns its socket and the installers must run as root |
 
-## Layer 2 must add
+## Layer 2 — the browser
 
-1. The console server (`diary_lock_console_ui.ConsoleServer`) behind a scratch
-   HTTP origin, plus the fake Authelia forward-auth server already used by
-   `test_diary_fresh_unlock.py`.
-2. A browser driver (Playwright) that loads the rendered page and clicks the
-   real forms, so `Origin`, `Sec-Fetch-Site`, the submit button, the two-click
-   ceremony, and stale/replayed grants are exercised as a browser produces them.
-3. A deployment rehearsal for the installers (L4) that runs the root-only
-   wiring in a scratch tree or a container and checks the preflight ordering.
+Layer 2 puts the console in the middle of the same scratch stack and drives it
+with a real Chromium. It exists because three production failures were invisible
+to hand-built requests: the submit button's own field, an `Origin` the browser
+omits or sends as `null`, and a form rendered before the ceremony.
+
+```bash
+# one-time provisioning, outside the repo
+npm install --prefix ~/.cache/diary-e2e playwright-core
+
+E2E_PLAYWRIGHT_CORE=~/.cache/diary-e2e/node_modules/playwright-core/index.mjs \
+E2E_CHROMIUM=~/.cache/ms-playwright/chromium-1223/chrome-linux/chrome \
+PYTHONPATH=. uv run pytest -q scripts/test_e2e_console_browser.py
+```
+
+The file skips itself when either variable is unset, so the normal suite stays
+network-free and browser-free. It runs in about 15 seconds.
+
+What is real in this layer:
+
+| Piece | Reality |
+| --- | --- |
+| Console host | the real `diary_lock_console_ui.ConsoleServer` on loopback, configured with the proxy origin |
+| Executor transport | the real Unix-socket protocol (`ExecutorClient` ↔ a Unix stream server that calls `handle_request`) |
+| Browser | Chromium via `playwright-core`; the rendered forms are clicked, not posted by hand |
+| Same-origin front | a loopback proxy; it rewrites `Origin` only for the opaque-origin scenario |
+| Ceremony | a stand-in service that issues the transaction cookie and accepts exactly one consume, so the two-click flow, replay, and stale grants are exercised |
+| Authelia | a forward-auth stand-in answering only for a registered owner session |
+
+Deliberately different, and why:
+
+- **Real Authelia and Caddy are L3.** This layer checks the console's own
+  browser-facing behaviour; redirects, cookies, and forward-auth seams are L3.
+- **The genuine WebAuthn ceremony is not performed.** The stand-in plays the
+  service, not the authenticator; the virtual-authenticator ceremony is an L3
+  concern.
+- **The audit transport is L1's.** The console writes through the same service
+  the socket handler calls; the socket peer check is L4.
+
+## Coverage against the production failures
+
+| Production failure | Covered by |
+| --- | --- |
+| Audit daemon dropped `repository` (KeyError, empty reply, "unknown outcome") | **L1**: `test_audit_daemon_journals_the_decision_repository` fails with the exact `KeyError` on the pre-fix code and passes after the field map fix |
+| Merge published nothing / stale pair accepted | **L1**: `test_merge_publishes_the_scratch_queue`, `test_stale_queue_oid_is_refused_without_publication` |
+| Cross-repository grant accepted | **L1**: `test_scripts_grant_cannot_decide_the_diary_queue`; **L2** replays it through the console |
+| Audit state lost or refusing writes after a restart | **L1**: `test_audit_restart_keeps_state_and_accepts_writes` |
+| `AuthorizationError` rendered as 503 | **L2**: every scenario asserts the page, not an outage |
+| `Origin` missing and `Origin: null` | **L2**: `test_opaque_origin_is_accepted`; the missing-header path is the same code branch |
+| Submit button field (`confirm`) rejected | **L2**: `test_rendered_form_submits_the_button_field` |
+| Two-click ceremony published twice or not at all | **L2**: `test_two_click_ceremony_publishes_once` |
+| Stale form treated as an attack | **L2**: `test_stale_form_re_renders_instead_of_refusing` |
+| Replayed grant accepted | **L2**: `test_replayed_grant_cannot_publish_twice` |
+| Deny published something | **L2**: `test_deny_publishes_nothing_and_audits` |
+| Installed helper missing (`agent_merge_pii`), module-level `mail_reader` import | installer smoke test in `install-owner-ui-root`; **L4** for the installed layout |
+| Stale verifier socket, installer ordering | **L4** (root rehearsal) |
+
+Evidence that the browser layer is sensitive to the real bugs: run against the
+console module from `a5ad908` (before the `Origin` and submit-button fixes) and
+six of the seven scenarios fail; they pass on the fixed module. The one that
+passes either way is `test_foreign_origin_is_refused`, which asserts a refusal
+that the pre-fix code produced for everything.
+
+## Still missing
+
+1. **L3**: real Caddy and Authelia, including a virtual-authenticator WebAuthn
+   ceremony and the forward-auth redirect seams.
+2. **L4**: a root/vm rehearsal of the installers — system Python, installed
+   helper layout, socket peer authorization, SELinux labels, deployment order,
+   and the installer's functional preflight.
