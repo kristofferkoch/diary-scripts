@@ -283,11 +283,15 @@ What it does:
    container could not provide: SELinux `Enforcing`, a virtio block device (a real
    kernel), and a working nftables.
 4. Runs, in order: `systemd/install-audit-root`,
-   `systemd/install-controller-root`, `authelia/install`,
-   `systemd/install-owner-ui-root` — from the approved tree, with each installer
-   bounded by a timeout and its output kept in the scratch directory. The
-   controller step is required because the console installer restarts and checks
-   `diary-locked`, which the controller installer owns.
+   `systemd/install-network-audit-root`, `systemd/install-controller-root`,
+   `authelia/install`, `systemd/install-owner-ui-root` — from the approved tree,
+   with each installer bounded by a timeout and its output kept in the scratch
+   directory. AUD-02 precedes CTL-01 because the controller's startup failsafe
+   verifies the NFLOG forwarder, and a *missing* unit answers `systemctl
+   is-active` with exit 4 ("unknown") rather than 3 ("inactive"), which the
+   failsafe treats as unverifiable. The controller step is required because the
+   console installer restarts and checks `diary-locked`, which the controller
+   installer owns.
 5. Asserts the audit daemon, controller and console are active; `/lock/health`
    answers 200; the unlock route answers 404; the UI enablement file and the
    enforcement arm file are absent; `diary-audit preflight` passes;

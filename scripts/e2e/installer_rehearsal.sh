@@ -227,6 +227,11 @@ positive_case() {
 
     run_installer "$HAPPY_VM" audit \
         "$TARGET_DIARY/systemd/install-audit-root"
+    # CTL-03's failsafe verifies the NFLOG forwarder when the controller starts,
+    # and a missing unit answers exit 4 ("unknown"), not 3 ("inactive"), so AUD-02
+    # has to be installed before CTL-01.
+    run_installer "$HAPPY_VM" network-audit \
+        "$TARGET_DIARY/systemd/install-network-audit-root"
     # The console installer restarts and checks diary-locked, which belongs to
     # the controller installer; a fresh guest needs it before the console.
     run_installer "$HAPPY_VM" controller \
@@ -243,6 +248,8 @@ positive_case() {
         "$TARGET_DIARY/systemd/install-owner-ui-root"
 
     expect_in_guest "$HAPPY_VM" "audit daemon active" systemctl is-active diary-auditd
+    expect_in_guest "$HAPPY_VM" "NFLOG forwarder active" \
+        systemctl is-active diary-network-auditd
     expect_in_guest "$HAPPY_VM" "controller active and locked" \
         systemctl is-active diary-lockd diary-locked
     expect_in_guest "$HAPPY_VM" "console host active" systemctl is-active diary-lock-ui
@@ -292,6 +299,8 @@ negative_case() {
 
     run_installer "$NEGATIVE_VM" pre-fix-audit \
         "$TARGET_DIARY/systemd/install-audit-root"
+    run_installer "$NEGATIVE_VM" pre-fix-network-audit \
+        "$TARGET_DIARY/systemd/install-network-audit-root"
     run_installer "$NEGATIVE_VM" pre-fix-controller \
         "$TARGET_DIARY/systemd/install-controller-root"
 
