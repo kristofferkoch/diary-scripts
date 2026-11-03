@@ -433,14 +433,20 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if repo not in REPOS:
             raise AuthorizationError("review repository must be scripts or diary")
         reply = self.server.executor.request({"cmd": "snapshot", "repo": repo})
-        if not reply.ok:
+        if not reply.ok or reply.snapshot is None:
             raise DecisionUnavailable("the merge review is unavailable")
         snapshot = _snapshot_from_json(reply.snapshot)
         empty_both = False
         if snapshot is None:
             other = "diary" if repo == "scripts" else "scripts"
             other_reply = self.server.executor.request({"cmd": "snapshot", "repo": other})
-            empty_both = other_reply.ok and not _snapshot_from_json(other_reply.snapshot)
+            # A malformed or missing reply for the other queue must not turn a
+            # valid empty page into an outage; only a real empty snapshot counts.
+            other_snapshot = (
+                _snapshot_from_json(other_reply.snapshot)
+                if other_reply.ok and other_reply.snapshot is not None else None
+            )
+            empty_both = other_reply.ok and other_snapshot is None
         token = self.server.csrf.issue(session_digest(cookie, self.server.config.session_cookie))
         self._html(200, render_page(snapshot, token, notice, repo, empty_both))
 

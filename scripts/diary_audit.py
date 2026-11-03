@@ -49,7 +49,7 @@ MAX_REPORT_RECORDS = 10_000
 REQUIRED_FIELDS = ("event", "component", "operation", "decision", "lock_state")
 TOKEN_FIELDS = (
     "event", "component", "operation", "decision", "lock_state", "reason",
-    "event_id", "base_oid", "session_id", "tool", "unit", "protocol",
+    "event_id", "base_oid", "repository", "session_id", "tool", "unit", "protocol",
 )
 OPTIONAL_FIELDS = (
     "reason", "event_id", "base_oid", "repository", "session_id", "tool", "unit", "destination_ip",
@@ -64,6 +64,7 @@ CALLER_FIELDS = frozenset({"pid", "uid", "gid", "unit", "session_id", "tool"})
 DECISIONS = frozenset({"allow", "deny", "would_allow", "would_deny", "observed", "error"})
 LOCK_STATES = frozenset({"locking", "locked", "attended", "unknown", "not_applicable"})
 PROTOCOLS = frozenset({"tcp", "udp", "icmp", "ipv6-icmp"})
+REPOSITORIES = frozenset({"scripts", "diary"})
 ATTENTION_DECISIONS = frozenset({"deny", "would_deny", "error"})
 ATTENTION_EVENTS = frozenset({"controller.break_glass"})
 TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@=-]{0,127}\Z")
@@ -173,6 +174,8 @@ def normalize_event(value: object) -> tuple[dict, list[str]]:
             clean[field] = _dns_name(item)
     if "protocol" in clean and clean["protocol"] not in PROTOCOLS:
         raise AuditError("unsupported protocol")
+    if "repository" in clean and clean["repository"] not in REPOSITORIES:
+        raise AuditError("unsupported repository")
     if "caller" in value:
         caller = value["caller"]
         if not isinstance(caller, dict) or set(caller) - CALLER_FIELDS:

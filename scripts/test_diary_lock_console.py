@@ -762,14 +762,16 @@ def test_diary_publication_does_not_sync_a_python_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A diary approval has no venv; only the scripts repository does."""
-    calls: list[tuple[str, bool]] = []
+    calls: list[tuple[str, bool, str | None]] = []
 
     def fake_approve(reviewed, paths, *, expected_base=None, sync_environment=True):
-        calls.append((reviewed, sync_environment))
+        calls.append((reviewed, sync_environment, expected_base))
         return True
 
     monkeypatch.setattr(executor.queue, "approve_queue", fake_approve)
     executor._publication("diary")("a" * 40, object(), expected_base="b" * 40)  # type: ignore[arg-type]
     executor._publication("scripts")("a" * 40, object(), expected_base="b" * 40)  # type: ignore[arg-type]
 
-    assert calls == [("a" * 40, False), ("a" * 40, True)]
+    # The reviewed base still reaches the publisher for both repositories; only
+    # the venv sync differs.
+    assert calls == [("a" * 40, False, "b" * 40), ("a" * 40, True, "b" * 40)]

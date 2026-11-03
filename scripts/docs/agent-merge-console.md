@@ -44,6 +44,25 @@ rejected before any repository operation. Only the `diary-scripts` queue has an
 advisory model report; the diary page labels that section as unavailable rather
 than pretending it reviewed the change.
 
+## Deployment order for the two-queue console
+
+The console, the root-owned fresh-authorization service, and the audit daemon
+must speak the same protocol. Install in this order; each step fails closed when
+run out of order, and `install-owner-ui-root` now refuses to enable the console
+unless both installed services carry the repository-aware code.
+
+1. Approve the `diary-scripts` change and synchronize the approved checkout.
+2. `install-audit-root` — the audit daemon must accept the `repository` field, or
+   every decision fails closed before any repository operation.
+3. `authelia/install` — the fresh service must bind the repository on begin and
+   consume, or the ceremony is rejected.
+4. Approve the diary pointer so the executor unit's `AGENT_MERGE_DIARY_*`
+   environment exists in the approved checkout.
+5. `install-owner-ui-root` — installs the console, the executor unit, and the
+   diary queue path set.
+
+The local `agent-merge-approve` commands remain available throughout.
+
 ## Decision and audit boundary
 
 CTL-07 must inject an owner-authorization callable. Every Merge or Deny decision

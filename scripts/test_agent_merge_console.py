@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from scripts import agent_merge_console as console
+from scripts import diary_audit
 from scripts import agent_merge_queue as queue
 
 
@@ -390,6 +391,12 @@ def test_snapshot_carries_the_repository_and_audit_records_it() -> None:
     assert event["repository"] == "diary"
     assert event["event_id"] == "a" * 40
     assert event["base_oid"] == "b" * 40
+
+    # The trusted daemon validates every field; the record must pass its
+    # validator, which is also what makes an out-of-order deployment fail closed
+    # instead of silently writing an unreviewable decision.
+    clean, _ = diary_audit.normalize_event(event)
+    assert clean["repository"] == "diary"
 
 
 def test_render_console_names_the_queue_under_review() -> None:

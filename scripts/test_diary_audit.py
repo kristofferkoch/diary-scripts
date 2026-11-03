@@ -581,3 +581,13 @@ def test_malformed_or_oversized_state_record_fails_closed(tmp_path: Path) -> Non
     path.chmod(0o600)
     with pytest.raises(audit.AuditError, match="oversized or incomplete"):
         audit.DedupStore(str(path))
+
+
+def test_repository_is_preserved_and_validated() -> None:
+    """A decision record must keep its queue, and an unknown queue must fail closed."""
+    clean, _ = audit.normalize_event(event(repository="diary"))
+    assert clean["repository"] == "diary"
+
+    for value in ("elsewhere", "scripts ", ""):
+        with pytest.raises(audit.AuditError):
+            audit.normalize_event(event(repository=value))
