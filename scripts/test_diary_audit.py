@@ -616,3 +616,44 @@ def test_decision_repository_reaches_the_journal() -> None:
     fields = audit._journal_fields(event, peer(), [])
 
     assert fields["DIARY_AUDIT_REPOSITORY"] == "diary"
+
+
+class _FakeAuditService:
+    """Answer like the daemon socket: accept a write, then report it back."""
+
+    def __init__(self, reject: bool = False, drop_repository: bool = False) -> None:
+        self.reject = reject
+        self.drop_repository = drop_repository
+        self.requests: list[dict[str, Any]] = []
+
+    def __call__(self, socket_path: str, request: dict[str, Any]) -> dict[str, Any]:
+        self.requests.append(request)
+        if request["cmd"] == "write":
+            self.event = request["event"]
+            return {"ok": False, "error": "rejected"} if self.reject else {"ok": True}
+        group = {
+            key: self.event[key]
+            for key in ("event", "event_id", "repository")
+            if key in self.event and not (key == "repository" and self.drop_repository)
+        }
+        return {"ok": True, "groups": [group]}
+
+
+def test_audit_preflight_reads_the_repository_back() -> None:
+    service = _FakeAuditService()
+
+    group = audit.preflight("/scratch/socket", service)
+
+    assert group["repository"] == "scripts"
+    assert service.requests[0]["cmd"] == "write"
+    assert service.requests[1]["cmd"] == "baseline"
+
+
+def test_audit_preflight_fails_when_the_field_is_dropped() -> None:
+    with pytest.raises(audit.AuditError, match="lost its repository"):
+        audit.preflight("/scratch/socket", _FakeAuditService(drop_repository=True))
+
+
+def test_audit_preflight_fails_when_the_write_is_rejected() -> None:
+    with pytest.raises(audit.AuditError, match="preflight write was rejected"):
+        audit.preflight("/scratch/socket", _FakeAuditService(reject=True))

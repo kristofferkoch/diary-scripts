@@ -94,7 +94,7 @@ FIELD_MAP = {
 REPORT_FIELDS = (
     "event", "component", "operation", "decision", "lock_state", "reason", "unit",
     "destination_ip", "destination_port", "protocol", "dns_name", "repository",
-    "caller_uid",
+    "event_id", "caller_uid",
 )
 
 
@@ -950,6 +950,52 @@ def format_report(report: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+PREFLIGHT_EVENT = "audit.preflight"
+
+
+def preflight(
+    socket_path: str = DEFAULT_SOCKET,
+    request_fn: Callable[..., dict[str, Any]] = request,
+) -> dict[str, Any]:
+    """Prove the running daemon journals the fields a decision needs.
+
+    A validator that accepts a field says nothing about whether the writer can
+    record it: the 2026-11-03 deployment passed a literal grep while every write
+    carrying ``repository`` died in the journal mapping. Write one distinctive
+    event and read it back from the trusted journal instead.
+    """
+    event = {
+        "event": PREFLIGHT_EVENT,
+        "component": "diary-auditd",
+        "operation": "preflight",
+        "decision": "observed",
+        "lock_state": "not_applicable",
+        "reason": "preflight",
+        "event_id": uuid.uuid4().hex,
+        "base_oid": "0" * 40,
+        "repository": "scripts",
+    }
+    written = request_fn(socket_path, {"cmd": "write", "event": event})
+    if not written.get("ok"):
+        raise AuditError(
+            f"audit preflight write was rejected: {written.get('error', 'unknown error')}"
+        )
+    report = request_fn(socket_path, {
+        "cmd": "baseline", "since": "5m", "until": "now", "limit": 200,
+    })
+    matches = [
+        group for group in report.get("groups", [])
+        if group.get("event") == PREFLIGHT_EVENT and group.get("event_id") == event["event_id"]
+    ]
+    if not matches:
+        raise AuditError("audit preflight event did not reach the trusted journal")
+    if matches[0].get("repository") != "scripts":
+        raise AuditError(
+            "audit preflight event lost its repository field in the trusted journal"
+        )
+    return matches[0]
+
+
 def _client_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("--socket", default=DEFAULT_SOCKET)
@@ -959,6 +1005,10 @@ def _client_parser() -> argparse.ArgumentParser:
     revocation = sub.add_parser("revocation-check", help="fail if non-root processes retain the journal group")
     revocation.add_argument("--group", default=DEFAULT_JOURNAL_GROUP)
     sub.add_parser("ping", help="verify journal write and exact heartbeat read-back")
+    sub.add_parser(
+        "preflight",
+        help="write one event and read it back with its repository field",
+    )
     for name in ("baseline", "review"):
         report = sub.add_parser(name, help=f"produce a fixed {name} report")
         report.add_argument("--since", default="24h")
@@ -993,6 +1043,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.cmd == "ping":
             reply = request(args.socket, {"cmd": "ping"})
             print(json.dumps(reply, indent=2, sort_keys=True))
+        elif args.cmd == "preflight":
+            group = preflight(args.socket)
+            print(f"ok: audit preflight recorded {group.get('event', '')} "
+                  f"with repository={group.get('repository', '')}")
         else:
             reply = request(args.socket, {
                 "cmd": args.cmd,
