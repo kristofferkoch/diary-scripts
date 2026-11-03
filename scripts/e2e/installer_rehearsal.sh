@@ -238,12 +238,18 @@ positive_case() {
         "$TARGET_DIARY/systemd/install-controller-root"
     run_installer "$HAPPY_VM" fresh \
         "$TARGET_DIARY/authelia/install"
-    # dsh/agent-uid/install normally provides the root-owned approval client;
-    # the rehearsal runs only the three installers, so install it the same way.
+    # dsh/agent-uid/install normally provides the root-owned approval client and
+    # its helper module; the rehearsal runs only the installers, so lay down the
+    # same pair. Installing only the entry point leaves the console unable to
+    # import agent_merge_pii and the owner-UI installer refuses.
     vm_ssh "$HAPPY_VM" install -o root -g root -m 0755 \
         "$TARGET_SCRIPTS/scripts/agent_merge_queue.py" /usr/local/libexec/agent-merge-queue \
         >>"${SCRATCH}/approval-client.log" 2>&1 \
         || die "could not install the approval client in $HAPPY_VM"
+    vm_ssh "$HAPPY_VM" install -o root -g root -m 0644 \
+        "$TARGET_SCRIPTS/scripts/agent_merge_pii.py" /usr/local/libexec/agent_merge_pii.py \
+        >>"${SCRATCH}/approval-client.log" 2>&1 \
+        || die "could not install the approval client helper in $HAPPY_VM"
     run_installer "$HAPPY_VM" console \
         "$TARGET_DIARY/systemd/install-owner-ui-root"
 
@@ -272,7 +278,10 @@ positive_case() {
 write_prefix_scripts() {
     local target=$1
 
-    cp -a "$APPROVED_SCRIPTS" "$target"
+    # --no-preserve=context: the fixture is built on this host and copied into a
+    # guest by mount, so preserving the host's SELinux context is both unneeded
+    # and denied to an unconfined caller.
+    cp -a --no-preserve=context "$APPROVED_SCRIPTS" "$target"
     rm -rf -- "$target/.git"
     # Keep the daemon's validator and the preflight subcommand, remove only the
     # journal field mapping: this is the production failure the functional
