@@ -168,6 +168,10 @@ prepare_container() {
         dnf -y install python3 git curl gcc golang tar make shadow-utils >/dev/null 2>&1
         getent group kek >/dev/null 2>&1 || groupadd -g 1000 kek
         getent passwd kek >/dev/null 2>&1 || useradd -u 1000 -g kek -d /home/kek -m -s /bin/bash kek
+        # The controller unit runs with SupplementaryGroups=diary-lock-control agent,
+        # so the agent group and identity must exist or the unit cannot start.
+        getent group agent >/dev/null 2>&1 || groupadd --system agent
+        getent passwd agent >/dev/null 2>&1 || useradd --system -u 981 -g agent -d /home/agent -m -s /bin/bash agent
         python3 -c "import sys; assert sys.version_info >= (3, 11), sys.version"
     ' >"${SCRATCH}/prepare-${name}.log" 2>&1; then
         tail -20 "${SCRATCH}/prepare-${name}.log" >&2 || true
