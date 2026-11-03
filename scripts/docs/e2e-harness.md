@@ -168,3 +168,64 @@ Today's bugs and the tests that keep them fixed:
 2. **L4**: a root/vm rehearsal of the installers — system Python, installed
    helper layout, socket peer authorization, SELinux labels, deployment order,
    and the installer's functional preflight.
+
+## Layer 3 — the real edge
+
+Layers 1 and 2 stand in for the edge. This layer runs the edge itself: the
+pinned Authelia build with a generated scratch configuration (file backend,
+`two_factor` on `/lock`, the production cookie name and flags), real Caddy with
+`forward_auth` in front of the console, a self-signed certificate for a scratch
+host, and Chromium with a CDP virtual authenticator. The passkey is registered
+through Authelia's own UI — including the one-time-code identity verification,
+read from the scratch notifier file — so a real WebAuthn assertion reaches the
+server and the session really becomes two-factor.
+
+`scripts/e2e/edge.py` builds the stack; `scripts/e2e/edge_driver.mjs` drives the
+browser; `scripts/test_e2e_edge.py` holds the scenarios:
+
+- anonymous request to `/lock/merge/` → 302 to the portal, never the console;
+- password-only session → still denied;
+- session cookie carries `Secure`, `HttpOnly`, and `SameSite=Strict`;
+- full password + passkey → the console page renders;
+- a browser `Merge` through Caddy and Authelia → exactly one publication.
+
+Provisioning: `caddy`, `authelia`, `openssl`, `node`, and `playwright-core`
+against a cached Chromium. The tests skip when `E2E_PLAYWRIGHT_CORE` or
+`E2E_CHROMIUM` are unset, and skip the whole module when the binaries are
+missing.
+
+Not covered: the installed units, socket peer authorization, SELinux labels,
+installer ordering, and the fresh-authorization service's own session proof
+against Authelia (the layer-3 stack uses the layer-2 ceremony stand-in, so the
+grant is minted by the harness). Those are L4.
+
+## Red-green rule
+
+An e2e-discovered bug is not fixed until **both** exist:
+
+1. a unit-level regression at the lowest layer that reproduces it and fails
+   first, and
+2. the e2e scenario that found it, as the end-to-end guard.
+
+The unit test is the fast local proof and survives harness refactors; the e2e
+scenario is what proves the seam. A fix with only the e2e scenario is not
+accepted, and a bug found in production is not closed until the scenario that
+would have caught it exists.
+
+| production failure | unit regression | e2e scenario | both |
+| --- | --- | --- | --- |
+| installed helper list missing `agent_merge_pii` | none | none (L4) | no |
+| `mail_reader` imported by the console review module | `test_console_deployment_layout` | L2 boots the console | yes |
+| authorization failure reported as 503 | `test_anonymous_page_asks_for_authorization_instead_of_reporting_an_outage` | L3 first-factor denial | unit only |
+| `Origin` omitted by the browser | `test_decide_accepts_a_browser_that_omits_origin` | L2 opaque-origin scenario | partial |
+| `Origin: null` (Firefox) | `test_decide_accepts_an_opaque_null_origin`, `test_merge_begin_accepts_an_opaque_origin` | L2 opaque-origin scenario | yes |
+| submit button's `confirm` field | `test_decision_requires_same_origin_explicit_form_and_current_token` | L2 rendered-form scenario | yes |
+| audit field map dropped `repository` | `test_decision_repository_reaches_the_journal`, `test_every_accepted_event_field_has_a_journal_mapping` | L1 audit scenario | yes |
+| preflight read the journal before the flush | `test_preflight_polls_until_the_journal_flushes` | none (L4) | unit only |
+| `doctor` fell back to `default_paths()` | `test_doctor_requires_an_explicit_approved_checkout` | none (L4) | unit only |
+| grant burned before the pair was checked | `test_stale_pair_is_refused_before_the_grant_is_consumed` | L2 stale-pair scenario | yes |
+| transaction created after logout | `test_begin_capacity_failure_leaves_the_owner_signed_in` | none | unit only |
+
+Rows without both columns are the L4 checklist: the installer rehearsal must
+exercise the helper layout, the deployment order, the functional preflight, and
+the client comparison against a real installation.
