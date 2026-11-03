@@ -460,3 +460,53 @@ def test_non_socket_verify_path_is_refused(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError):
         fresh.discard_stale_socket(str(path))
     assert path.read_text() == "not a socket"
+
+
+def _consumed_merge_grant(store: "fresh.TransactionStore", repo: str) -> str:
+    transaction_id, secret = store.create(
+        "owner", 300, purpose="merge", action="merge",
+        queue_oid="a" * 40, base_oid="b" * 40, repo=repo,
+    )
+    store.authenticate(transaction_id, secret, "owner", fresh._digest("session"))
+    store.consume(transaction_id, secret, "owner", fresh._digest("session"))
+    return transaction_id
+
+
+def test_merge_grant_is_bound_to_its_repository(tmp_path: Path) -> None:
+    """A consumed grant for one queue can never authorize the other."""
+    store = fresh.TransactionStore(tmp_path / "transactions.sqlite3", max_live=4)
+    for repo, other in (("scripts", "diary"), ("diary", "scripts")):
+        transaction_id = _consumed_merge_grant(store, repo)
+        assert store.verify_consumed(
+            transaction_id, repo, "merge", "a" * 40, "b" * 40,
+        ) is not None
+        assert store.verify_consumed(
+            transaction_id, other, "merge", "a" * 40, "b" * 40,
+        ) is None
+
+
+def test_merge_grant_requires_a_known_repository(tmp_path: Path) -> None:
+    store = fresh.TransactionStore(tmp_path / "transactions.sqlite3", max_live=4)
+    with pytest.raises(fresh.AuthorizationError):
+        store.create(
+            "owner", 300, purpose="merge", action="merge",
+            queue_oid="a" * 40, base_oid="b" * 40,
+        )
+    with pytest.raises(fresh.AuthorizationError):
+        store.create(
+            "owner", 300, purpose="merge", action="merge",
+            queue_oid="a" * 40, base_oid="b" * 40, repo="elsewhere",
+        )
+
+
+def test_existing_rows_gain_the_scripts_repository_on_migration(tmp_path: Path) -> None:
+    """Rows created before the diary queue are scripts grants, not unknown ones."""
+    path = tmp_path / "transactions.sqlite3"
+    store = fresh.TransactionStore(path, max_live=4)
+    transaction_id = _consumed_merge_grant(store, "scripts")
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE transactions SET repo = 'scripts'")
+    reopened = fresh.TransactionStore(path, max_live=4)
+    assert reopened.verify_consumed(
+        transaction_id, "scripts", "merge", "a" * 40, "b" * 40,
+    ) is not None

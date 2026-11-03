@@ -33,6 +33,9 @@ DEFAULT_CONFIG = "/etc/diary/lock-auth.toml"
 DEFAULT_EXECUTOR_SOCKET = "/run/diary-merge-console/socket"
 DEFAULT_FRESH_BACKEND = "http" + "://127.0.0.1:9092"
 TRANSACTION_COOKIE = "diary_lock_fresh_unlock"
+REPO_PARAM = "repo"
+DEFAULT_REPO = "scripts"
+REPOS = ("scripts", "diary")
 MERGE_COOKIE_PATH = "/lock/merge"
 DECISION_PATH = "/lock/merge/decide"
 PAGE_PATH = "/lock/merge/"
@@ -118,7 +121,7 @@ class FreshGrantClient:
         self.backend = backend
         self.session_cookie = session_cookie
 
-    def consume(self, cookie_header: str | None) -> None:
+    def consume(self, cookie_header: str | None, repo: str = DEFAULT_REPO) -> None:
         cookies = _cookies(cookie_header)
         selected = [
             f"{name}={cookies[name]}" for name in (self.session_cookie, TRANSACTION_COOKIE) if name in cookies
@@ -132,6 +135,7 @@ class FreshGrantClient:
                     "Origin": self.public_origin,
                     "Sec-Fetch-Site": "same-origin",
                     "X-Diary-Merge-Confirm": "yes",
+                    "X-Diary-Merge-Repo": repo,
                     "Content-Length": "0",
                     "Cookie": "; ".join(selected),
                 },
@@ -192,6 +196,7 @@ def _snapshot_from_json(value: dict[str, Any]) -> console.QueueSnapshot | None:
         return console.QueueSnapshot(
             str(value["queue_oid"]), str(value["base_oid"]), commits,
             str(value["diff"]), console.AdvisoryView(str(advisory["status"]), str(advisory["text"])),
+            repo=str(value.get("repo", DEFAULT_REPO)),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise DecisionUnavailable("the executor snapshot is invalid") from exc
@@ -209,6 +214,23 @@ MESSAGES = {
     "forbidden": ("Refused", "The request was refused; nothing was merged or pushed."),
     "empty": ("Nothing queued", "No queued diary-scripts changes require review."),
 }
+
+
+def render_empty(message: str) -> str:
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'">
+<title>Nothing queued</title>
+<style>body{{font-family:system-ui,sans-serif;max-width:40rem;margin:3rem auto;padding:0 1rem}}code{{overflow-wrap:anywhere}}</style>
+</head>
+<body><h1>Nothing queued</h1><p>{message}</p>
+<p><a href="{_repo_link('scripts')}">diary-scripts queue</a> &middot; <a href="{_repo_link('diary')}">diary queue</a></p>
+</body>
+</html>
+"""
 
 
 def render_result(code: str) -> str:
@@ -230,7 +252,7 @@ def render_result(code: str) -> str:
 AUTHORIZE_ACTION = "/lock/merge/begin"
 
 
-def render_authorize(action: str, queue_oid: str, base_oid: str) -> str:
+def render_authorize(action: str, queue_oid: str, base_oid: str, repo: str) -> str:
     """Offer the fresh-authorization ceremony as a plain same-origin form.
 
     Nothing is decided on this page. It exists so an owner without a current
@@ -253,12 +275,14 @@ def render_authorize(action: str, queue_oid: str, base_oid: str) -> str:
 exactly this action and OID pair:</p>
 <dl>
 <dt>Action</dt><dd><strong>{html.escape(verb)}</strong></dd>
+<dt>Queue</dt><dd><code>{html.escape(repo)}</code></dd>
 <dt>Reviewed queue OID</dt><dd><code>{html.escape(queue_oid)}</code></dd>
 <dt>Approved base OID</dt><dd><code>{html.escape(base_oid)}</code></dd>
 </dl>
 <p>After signing in, the authorization service shows the same decision on its
 own page. Nothing is merged until you confirm here again.</p>
 <form method="post" action="{AUTHORIZE_ACTION}">
+<input type="hidden" name="repo" value="{html.escape(repo, quote=True)}">
 <input type="hidden" name="action" value="{html.escape(action, quote=True)}">
 <input type="hidden" name="queue_oid" value="{html.escape(queue_oid, quote=True)}">
 <input type="hidden" name="base_oid" value="{html.escape(base_oid, quote=True)}">
@@ -270,13 +294,39 @@ own page. Nothing is merged until you confirm here again.</p>
 """
 
 
+def _repo_link(repo: str) -> str:
+    return f"{PAGE_PATH}?{REPO_PARAM}={repo}"
+
+
+def _is_page_path(path: str) -> bool:
+    return urllib.parse.urlsplit(path).path == PAGE_PATH
+
+
+def _selected_repo(path: str) -> str:
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
+    values = query.get(REPO_PARAM, [DEFAULT_REPO])
+    if len(values) != 1 or values[0] not in REPOS:
+        raise AuthorizationError("review repository must be scripts or diary")
+    return values[0]
+
+
 def render_page(
     snapshot: console.QueueSnapshot | None,
     csrf_token: str,
     notice: str | None = None,
+    repo: str = DEFAULT_REPO,
+    empty_both: bool = False,
 ) -> str:
     if snapshot is None:
-        return render_result("empty")
+        other = "diary" if repo == "scripts" else "scripts"
+        if empty_both:
+            message = "Both queues are empty: nothing is waiting for owner review."
+        else:
+            message = (
+                f"No queued changes in <code>{html.escape(repo)}</code>; the "
+                f"<code>{html.escape(other)}</code> queue is still waiting if it has entries."
+            )
+        return render_empty(message)
     return console.render_console(snapshot, DECISION_PATH, csrf_token, notice)
 
 
@@ -376,22 +426,33 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         )
         return {key: values[0] for key, values in parsed.items() if len(values) == 1}
 
-    def _page(self, notice: str | None = None) -> None:
+    def _page(self, notice: str | None = None, repo: str | None = None) -> None:
         cookie = self.headers.get("Cookie")
         self.server.authelia.verify_owner(cookie, "GET", self.path)
-        reply = self.server.executor.request({"cmd": "snapshot"})
-        if not reply.ok or reply.snapshot is None:
+        repo = repo or _selected_repo(self.path)
+        if repo not in REPOS:
+            raise AuthorizationError("review repository must be scripts or diary")
+        reply = self.server.executor.request({"cmd": "snapshot", "repo": repo})
+        if not reply.ok:
             raise DecisionUnavailable("the merge review is unavailable")
         snapshot = _snapshot_from_json(reply.snapshot)
+        empty_both = False
+        if snapshot is None:
+            other = "diary" if repo == "scripts" else "scripts"
+            other_reply = self.server.executor.request({"cmd": "snapshot", "repo": other})
+            empty_both = other_reply.ok and not _snapshot_from_json(other_reply.snapshot)
         token = self.server.csrf.issue(session_digest(cookie, self.server.config.session_cookie))
-        self._html(200, render_page(snapshot, token, notice))
+        self._html(200, render_page(snapshot, token, notice, repo, empty_both))
 
     def _decide(self) -> None:
         cookie = self.headers.get("Cookie")
         self.server.authelia.verify_owner(cookie, "POST", self.path)
         fields = self._require_form_action()
-        if set(fields) != {"action", "queue_oid", "base_oid", "csrf"}:
+        if set(fields) != {"repo", "action", "queue_oid", "base_oid", "csrf"}:
             raise AuthorizationError("invalid decision request")
+        repo = fields["repo"]
+        if repo not in REPOS:
+            raise AuthorizationError("decision repository must be scripts or diary")
         action, queue_oid, base_oid = fields["action"], fields["queue_oid"], fields["base_oid"]
         if action not in {"merge", "deny"}:
             raise AuthorizationError("decision must be merge or deny")
@@ -404,16 +465,19 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             # is a stale form, not an attack: re-render the same reviewed pair
             # with a fresh token instead of dead-ending on "Refused".
             self.log_message("refused decision: stale or missing review form")
-            self._page("That review form expired before it was submitted. Check the same pair and confirm again.")
+            self._page(
+                "That review form expired before it was submitted. Check the same pair and confirm again.",
+                repo,
+            )
             return
         try:
             transaction = _transaction_id(cookie)
-            self.server.fresh.consume(cookie)
+            self.server.fresh.consume(cookie, repo)
         except AuthorizationError:
-            self._html(200, render_authorize(action, queue_oid, base_oid))
+            self._html(200, render_authorize(action, queue_oid, base_oid, repo))
             return
         reply = self.server.executor.request({
-            "cmd": "decide", "action": action, "queue_oid": queue_oid,
+            "cmd": "decide", "repo": repo, "action": action, "queue_oid": queue_oid,
             "base_oid": base_oid, "transaction": transaction,
         })
         if reply.ok:
@@ -431,7 +495,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 self.send_header("Location", PAGE_PATH)
                 self.send_header("Content-Length", "0")
                 self.end_headers()
-            elif method == "GET" and self.path == PAGE_PATH:
+            elif method == "GET" and _is_page_path(self.path):
                 self._page()
             elif method == "POST" and self.path == DECISION_PATH:
                 self._decide()

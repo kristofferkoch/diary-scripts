@@ -33,6 +33,7 @@ DEFAULT_DATABASE = "/var/lib/diary-lock-auth/transactions.sqlite3"
 TRANSACTION_COOKIE = "diary_lock_fresh_unlock"
 MERGE_COOKIE_PATH = "/lock/merge"
 UNLOCK_COOKIE_PATH = "/lock/unlock"
+REPOS = ("scripts", "diary")
 PURPOSES = frozenset({"unlock", "merge"})
 MERGE_ACTIONS = frozenset({"merge", "deny"})
 OID_RE = re.compile(r"[0-9a-f]{40}\Z")
@@ -167,7 +168,8 @@ class TransactionStore:
                     purpose TEXT NOT NULL DEFAULT 'unlock',
                     action TEXT,
                     queue_oid TEXT,
-                    base_oid TEXT
+                    base_oid TEXT,
+                    repo TEXT NOT NULL DEFAULT 'scripts' 
                 )
                 """
             )
@@ -175,6 +177,11 @@ class TransactionStore:
             if "session_hash" not in columns:
                 connection.execute("ALTER TABLE transactions ADD COLUMN session_hash BLOB")
                 connection.execute("DELETE FROM transactions")
+            if "repo" not in columns:
+                # Existing rows predate the diary queue and were all scripts.
+                connection.execute(
+                    "ALTER TABLE transactions ADD COLUMN repo TEXT NOT NULL DEFAULT 'scripts'"
+                )
             for column in ("purpose", "action", "queue_oid", "base_oid"):
                 if column not in columns:
                     default = " NOT NULL DEFAULT 'unlock'" if column == "purpose" else ""
@@ -183,16 +190,22 @@ class TransactionStore:
     def create(
         self, owner: str, ttl: int, *, purpose: str = "unlock",
         action: str | None = None, queue_oid: str | None = None, base_oid: str | None = None,
+        repo: str | None = None,
     ) -> tuple[str, str]:
         if purpose not in PURPOSES:
             raise AuthorizationError("unknown authorization purpose")
         if purpose == "merge" and (
             action not in MERGE_ACTIONS
+            or repo not in REPOS
             or not OID_RE.fullmatch(queue_oid or "")
             or not OID_RE.fullmatch(base_oid or "")
         ):
-            raise AuthorizationError("merge authorization requires an action and full queue/base OIDs")
-        if purpose == "unlock" and any(value is not None for value in (action, queue_oid, base_oid)):
+            raise AuthorizationError(
+                "merge authorization requires an action, repository, and full queue/base OIDs"
+            )
+        if purpose == "unlock" and any(
+            value is not None for value in (action, queue_oid, base_oid, repo)
+        ):
             raise AuthorizationError("unlock authorization cannot carry merge bindings")
         transaction_id = secrets.token_urlsafe(24)
         secret = secrets.token_urlsafe(32)
@@ -210,9 +223,10 @@ class TransactionStore:
                 raise CapacityError("live transaction capacity exceeded")
             connection.execute(
                 "INSERT INTO transactions "
-                "(id, secret_hash, owner, state, created_at, expires_at, purpose, action, queue_oid, base_oid) "
-                "VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
-                (transaction_id, _digest(secret), owner, now, now + ttl, purpose, action, queue_oid, base_oid),
+                "(id, secret_hash, owner, state, created_at, expires_at, purpose, action, queue_oid, base_oid, repo) "
+                "VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)",
+                (transaction_id, _digest(secret), owner, now, now + ttl, purpose, action,
+                 queue_oid, base_oid, repo or "scripts"),
             )
         return transaction_id, secret
 
@@ -243,7 +257,7 @@ class TransactionStore:
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT secret_hash, owner, state, expires_at, created_at, session_hash, "
-                "purpose, action, queue_oid, base_oid FROM transactions WHERE id = ?",
+                "purpose, action, queue_oid, base_oid, repo FROM transactions WHERE id = ?",
                 (transaction_id,),
             ).fetchone()
         if (
@@ -256,21 +270,23 @@ class TransactionStore:
             raise AuthorizationError("invalid, expired, or already used transaction")
         return {
             "created_at": row[4], "session_hash": row[5], "purpose": row[6],
-            "action": row[7], "queue_oid": row[8], "base_oid": row[9],
+            "action": row[7], "queue_oid": row[8], "base_oid": row[9], "repo": row[10],
         }
 
     def verify_consumed(
-        self, transaction_id: str, action: str, queue_oid: str, base_oid: str,
+        self, transaction_id: str, repo: str, action: str, queue_oid: str, base_oid: str,
     ) -> dict[str, Any] | None:
         """Answer only whether this exact merge grant was consumed, never grant."""
         if not isinstance(transaction_id, str) or action not in MERGE_ACTIONS:
+            return None
+        if repo not in REPOS:
             return None
         if not OID_RE.fullmatch(queue_oid) or not OID_RE.fullmatch(base_oid):
             return None
         now = int(self.clock())
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT state, expires_at, purpose, action, queue_oid, base_oid, consumed_at "
+                "SELECT state, expires_at, purpose, action, queue_oid, base_oid, consumed_at, repo "
                 "FROM transactions WHERE id = ?",
                 (transaction_id,),
             ).fetchone()
@@ -280,6 +296,7 @@ class TransactionStore:
             or not hmac.compare_digest(row[4] or "", queue_oid)
             or not hmac.compare_digest(row[5] or "", base_oid)
             or row[6] is None
+            or row[7] != repo
         ):
             return None
         return {"consumed_at": row[6]}
@@ -450,7 +467,7 @@ class AutheliaClient:
         return SessionProof(session_hash=_digest(session))
 
 
-def _confirmation_page(action: str, queue_oid: str, base_oid: str) -> str:
+def _confirmation_page(action: str, queue_oid: str, base_oid: str, repo: str) -> str:
     """Show the decision the ceremony was bound to, on a page the UI cannot forge.
 
     The console is an untrusted convenience layer; this page is served by the
@@ -474,6 +491,7 @@ def _confirmation_page(action: str, queue_oid: str, base_oid: str) -> str:
 the root-owned authorization service, which bound the ceremony to exactly:</p>
 <dl>
 <dt>Action</dt><dd><strong>{html.escape(verb)}</strong></dd>
+<dt>Queue</dt><dd><code>{html.escape(repo)}</code></dd>
 <dt>Reviewed queue OID</dt><dd><code>{html.escape(queue_oid)}</code></dd>
 <dt>Approved base OID</dt><dd><code>{html.escape(base_oid)}</code></dd>
 </dl>
@@ -687,8 +705,11 @@ class FreshUnlockHandler(BaseHTTPRequestHandler):
 
     def _merge_begin(self) -> None:
         body = self._begin_action("X-Diary-Merge-Begin")
-        if set(body) != {"action", "queue_oid", "base_oid"}:
+        if set(body) != {"action", "queue_oid", "base_oid", "repo"}:
             raise AuthorizationError("invalid merge authorization request")
+        repo = body["repo"]
+        if repo not in REPOS:
+            raise AuthorizationError("merge authorization repository must be scripts or diary")
         action = body["action"]
         if action not in MERGE_ACTIONS:
             raise AuthorizationError("merge authorization action must be merge or deny")
@@ -703,7 +724,7 @@ class FreshUnlockHandler(BaseHTTPRequestHandler):
         self.server.authelia.logout(self.headers.get("Cookie"))
         transaction_id, secret = self.server.transactions.create(
             self.server.config.owner_username, self.server.config.transaction_ttl,
-            purpose="merge", action=action, queue_oid=queue_oid, base_oid=base_oid,
+            purpose="merge", action=action, queue_oid=queue_oid, base_oid=base_oid, repo=repo,
         )
         return_url = f"{self.server.config.public_origin}/lock/merge/return"
         location = f"{self.server.config.public_origin}/authelia/?{urllib.parse.urlencode({'rd': return_url})}"
@@ -737,7 +758,9 @@ class FreshUnlockHandler(BaseHTTPRequestHandler):
         )
         self._html(
             200,
-            _confirmation_page(details["action"], details["queue_oid"], details["base_oid"]),
+            _confirmation_page(
+                details["action"], details["queue_oid"], details["base_oid"], details["repo"],
+            ),
         )
 
     def _merge_consume(self) -> None:
@@ -748,6 +771,8 @@ class FreshUnlockHandler(BaseHTTPRequestHandler):
         )
         if details["purpose"] != "merge":
             raise AuthorizationError("transaction is not a merge authorization")
+        if self.headers.get("X-Diary-Merge-Repo") != details["repo"]:
+            raise AuthorizationError("merge authorization repository does not match")
         if details["session_hash"] is None:
             raise AuthorizationError("transaction has no authenticated session binding")
         proof = self.server.authelia.session_proof(
@@ -832,14 +857,18 @@ class MergeGrantVerifyHandler(socketserver.StreamRequestHandler):
             return
         if (
             not isinstance(value, dict)
-            or set(value) != {"cmd", "transaction", "action", "queue_oid", "base_oid"}
+            or set(value) != {"cmd", "repository", "transaction", "action", "queue_oid", "base_oid"}
             or value.get("cmd") != "verify"
-            or not all(isinstance(value[key], str) for key in ("transaction", "action", "queue_oid", "base_oid"))
+            or not all(
+                isinstance(value[key], str)
+                for key in ("repository", "transaction", "action", "queue_oid", "base_oid")
+            )
         ):
             self._reply({"ok": False, "error": "invalid request"})
             return
         result = self.server.transactions.verify_consumed(
-            value["transaction"], value["action"], value["queue_oid"], value["base_oid"],
+            value["transaction"], value["repository"], value["action"],
+            value["queue_oid"], value["base_oid"],
         )
         if result is None:
             self._reply({"ok": False, "error": "no consumed grant for this action and OID pair"})

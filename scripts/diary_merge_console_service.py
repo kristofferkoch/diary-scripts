@@ -50,7 +50,9 @@ def peer_uid(connection: socket.socket) -> int:
 
 
 class GrantVerifier(Protocol):
-    def verify(self, action: str, queue_oid: str, base_oid: str, transaction: str) -> bool:
+    def verify(
+        self, repo: str, action: str, queue_oid: str, base_oid: str, transaction: str,
+    ) -> bool:
         """True only when a consumed owner grant matches this exact decision."""
 
 
@@ -61,9 +63,12 @@ class UnixGrantVerifier:
         self.path = path
         self.timeout = timeout
 
-    def verify(self, action: str, queue_oid: str, base_oid: str, transaction: str) -> bool:
+    def verify(
+        self, repo: str, action: str, queue_oid: str, base_oid: str, transaction: str,
+    ) -> bool:
         request = {
             "cmd": "verify",
+            "repository": repo,
             "transaction": transaction,
             "action": action,
             "queue_oid": queue_oid,
@@ -133,6 +138,7 @@ def _snapshot_payload(snapshot: console.QueueSnapshot | None) -> dict[str, Any]:
         raise ExecutorError("the diff is too large to review in the browser")
     return {
         "pending": True,
+        "repo": snapshot.repo,
         "queue_oid": snapshot.queue_oid,
         "base_oid": snapshot.base_oid,
         "commits": [{"oid": item.oid, "subject": item.subject} for item in snapshot.commits],
@@ -149,6 +155,7 @@ def _console(
     auditor: console.DecisionAuditor,
     publisher: console.Publisher,
     lock_state: str,
+    repo: str = "scripts",
 ) -> console.MergeConsole:
     return console.MergeConsole(
         paths,
@@ -157,16 +164,45 @@ def _console(
         report_dir=review.DEFAULT_REPORT_DIR,
         publisher=publisher,
         lock_state=lock_state,
+        repo=repo,
     )
+
+
+def _publication(repo: str) -> console.Publisher:
+    """Publish with the same environment handling the CLI uses per repository.
+
+    A diary approval has no Python environment to sync; only the scripts
+    repository does. The CLI disables the venv sync for diary, and the console
+    must not reintroduce it.
+    """
+    def publish(
+        reviewed: str, paths: queue.QueuePaths, /, *, expected_base: str | None = None,
+    ) -> bool:
+        return queue.approve_queue(
+            reviewed, paths,
+            expected_base=expected_base,
+            sync_environment=(repo == "scripts"),
+        )
+
+    return publish
+
+
+def _paths_for(paths_by_repo: dict[str, queue.QueuePaths], repo: object) -> queue.QueuePaths:
+    if not isinstance(repo, str) or repo not in console.REPOS:
+        raise ExecutorError("request requires a known repository")
+    try:
+        return paths_by_repo[repo]
+    except KeyError as exc:
+        raise ExecutorError("requested repository is not configured") from exc
 
 
 def handle_request(
     request: object,
-    paths: queue.QueuePaths,
+    paths_by_repo: dict[str, queue.QueuePaths],
     verifier: GrantVerifier,
     *,
     auditor: console.DecisionAuditor,
-    publisher: console.Publisher = queue.approve_queue,
+    publisher: console.Publisher | None = None,
     lock_state: str = "locked",
 ) -> dict[str, Any]:
     """Serve one executor request without trusting any caller-supplied authority."""
@@ -174,11 +210,15 @@ def handle_request(
         raise ExecutorError("request must be a JSON object")
     command = request.get("cmd")
     if command == "snapshot":
-        if set(request) != {"cmd"}:
-            raise ExecutorError("snapshot takes no arguments")
+        if set(request) != {"cmd", "repo"}:
+            raise ExecutorError("snapshot takes exactly one repository")
+        repo = request["repo"]
+        paths = _paths_for(paths_by_repo, repo)
         try:
             snapshot = _console(
-                paths, verifier, _deny_all, auditor=auditor, publisher=publisher, lock_state=lock_state,
+                paths, verifier, _deny_all, auditor=auditor,
+                publisher=publisher or _publication(repo),
+                lock_state=lock_state, repo=repo,
             ).snapshot()
         except queue.QueueError as exc:
             raise ExecutorError("the reviewed queue cannot be read") from exc
@@ -186,8 +226,10 @@ def handle_request(
     if command != "decide":
         raise ExecutorError("unsupported request")
 
-    if set(request) != {"cmd", "action", "queue_oid", "base_oid", "transaction"}:
+    if set(request) != {"cmd", "repo", "action", "queue_oid", "base_oid", "transaction"}:
         raise ExecutorError("decision request has missing or extra fields")
+    repo = request["repo"]
+    paths = _paths_for(paths_by_repo, repo)
     action = request["action"]
     queue_oid = request["queue_oid"]
     base_oid = request["base_oid"]
@@ -204,14 +246,16 @@ def handle_request(
     def authorize(granted: console.DecisionAction, oid: str, base: str) -> console.OwnerGrant:
         if (granted, oid, base) != (action, queue_oid, base_oid):
             raise console.OwnerAuthorizationRequired("authorization does not match the decision")
-        if not verifier.verify(granted, oid, base, transaction):
+        if not verifier.verify(repo, granted, oid, base, transaction):
             raise console.OwnerAuthorizationRequired(
                 "no consumed owner grant matches this action and OID pair"
             )
         return console.OwnerGrant("owner", transaction)
 
     result = _console(
-        paths, verifier, authorize, auditor=auditor, publisher=publisher, lock_state=lock_state,
+        paths, verifier, authorize, auditor=auditor,
+        publisher=publisher or _publication(repo),
+        lock_state=lock_state, repo=repo,
     ).decide(action, queue_oid, base_oid)
     return {"ok": True, "action": result.action, "outcome": result.outcome}
 
@@ -236,7 +280,7 @@ def error_reply(exc: Exception) -> dict[str, Any]:
 
 def _serve_connection(
     connection: socket.socket,
-    paths: queue.QueuePaths,
+    paths_by_repo: dict[str, queue.QueuePaths],
     verifier: GrantVerifier,
     auditor: console.DecisionAuditor,
     publisher: console.Publisher,
@@ -255,7 +299,7 @@ def _serve_connection(
             raise ExecutorError("request is incomplete")
         request = json.loads(line)
         reply = handle_request(
-            request, paths, verifier,
+            request, paths_by_repo, verifier,
             auditor=auditor, publisher=publisher,
             lock_state=lock_state() if callable(lock_state) else lock_state,
         )
@@ -270,12 +314,12 @@ def _serve_connection(
 
 
 def serve_stdio(
-    paths: queue.QueuePaths,
+    paths_by_repo: dict[str, queue.QueuePaths],
     verifier: GrantVerifier,
     allowed_uid: int,
     *,
     auditor: console.DecisionAuditor | None = None,
-    publisher: console.Publisher = queue.approve_queue,
+    publisher: console.Publisher | None = None,
     lock_state: Any = "locked",
     connection: socket.socket | None = None,
 ) -> int:
@@ -289,7 +333,7 @@ def serve_stdio(
         conn.sendall(b'{"ok":false,"error":"caller is not authorized"}\n')
         return 1
     _serve_connection(
-        conn, paths, verifier, auditor or console.DiaryDecisionAudit(), publisher, lock_state,
+        conn, paths_by_repo, verifier, auditor or console.DiaryDecisionAudit(), publisher, lock_state,
     )
     return 0
 
@@ -300,15 +344,15 @@ class ExecutorServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer)
     def __init__(
         self,
         path: str,
-        paths: queue.QueuePaths,
+        paths_by_repo: dict[str, queue.QueuePaths],
         verifier: GrantVerifier,
         allowed_uid: int,
         *,
         auditor: console.DecisionAuditor,
-        publisher: console.Publisher = queue.approve_queue,
+        publisher: console.Publisher | None = None,
         lock_state: Any = "locked",
     ) -> None:
-        self.paths = paths
+        self.paths_by_repo = paths_by_repo
         self.verifier = verifier
         self.allowed_uid = allowed_uid
         self.auditor = auditor
@@ -335,7 +379,7 @@ class ExecutorHandler(socketserver.BaseRequestHandler):
         auditor = server.auditor
         lock_state = server.lock_state() if callable(server.lock_state) else server.lock_state
         _serve_connection(
-            self.request, server.paths, server.verifier, auditor, server.publisher, lock_state,
+            self.request, server.paths_by_repo, server.verifier, auditor, server.publisher, lock_state,
         )
 
 
@@ -349,7 +393,10 @@ def main() -> None:
     parser.add_argument("--lock-state", choices=("auto", "locked", "attended"), default="auto")
     args = parser.parse_args()
 
-    paths = queue.default_paths()
+    paths_by_repo = {
+        "scripts": queue.default_paths(),
+        "diary": queue.diary_paths(),
+    }
     verifier = UnixGrantVerifier(args.verify_socket)
     lock_state: Any = args.lock_state
     if args.lock_state == "auto":
@@ -357,7 +404,7 @@ def main() -> None:
 
     if args.stdio:
         ui_uid = pwd.getpwnam(args.ui_user).pw_uid
-        raise SystemExit(serve_stdio(paths, verifier, ui_uid, lock_state=lock_state))
+        raise SystemExit(serve_stdio(paths_by_repo, verifier, ui_uid, lock_state=lock_state))
 
     ui_uid = pwd.getpwnam(args.ui_user).pw_uid
     try:
@@ -365,7 +412,7 @@ def main() -> None:
     except FileNotFoundError:
         pass
     server = ExecutorServer(
-        args.socket, paths, verifier, ui_uid,
+        args.socket, paths_by_repo, verifier, ui_uid,
         auditor=console.DiaryDecisionAudit(), lock_state=lock_state,
     )
     os.chmod(args.socket, 0o660)

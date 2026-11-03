@@ -40,6 +40,7 @@ class FakeExecutor:
         self.requests: list[dict[str, Any]] = []
         self.snapshot: dict[str, Any] = {
             "pending": True,
+            "repo": "scripts",
             "queue_oid": QUEUE_OID,
             "base_oid": BASE_OID,
             "commits": [{"oid": QUEUE_OID, "subject": "queued change"}],
@@ -51,7 +52,9 @@ class FakeExecutor:
     def request(self, value: dict[str, Any]) -> ui.ExecutorReply:
         self.requests.append(value)
         if value["cmd"] == "snapshot":
-            return ui.ExecutorReply(True, "", self.snapshot, "")
+            snapshot = dict(self.snapshot)
+            snapshot["repo"] = value.get("repo", "scripts")
+            return ui.ExecutorReply(True, "", snapshot, "")
         return self.reply
 
 
@@ -126,10 +129,12 @@ def browser_headers(action: str | None = None) -> dict[str, str]:
     return headers
 
 
-def authorized(services: Services, action: str = "merge") -> dict[str, str]:
+def authorized(services: Services, action: str = "merge", repo: str = "scripts") -> dict[str, str]:
     """Complete a fresh owner ceremony for one merge/deny decision."""
     services.auth_state.add("old")
-    body = json.dumps({"action": action, "queue_oid": QUEUE_OID, "base_oid": BASE_OID})
+    body = json.dumps(
+        {"action": action, "queue_oid": QUEUE_OID, "base_oid": BASE_OID, "repo": repo}
+    )
     connection = http.client.HTTPConnection("127.0.0.1", services.fresh_server.server_port, timeout=6)
     connection.request(
         "POST", "/lock/merge/begin",
@@ -155,8 +160,10 @@ def authorized(services: Services, action: str = "merge") -> dict[str, str]:
     return cookies
 
 
-def page_token(services: Services, cookies: dict[str, str]) -> str:
-    status, raw = http_request(services.ui_server, "GET", "/lock/merge/", cookies=cookies)
+def page_token(services: Services, cookies: dict[str, str], repo: str = "scripts") -> str:
+    status, raw = http_request(
+        services.ui_server, "GET", f"/lock/merge/?repo={repo}", cookies=cookies,
+    )
     assert status == 200
     match = re.search(rb'name="csrf" value="([^"]+)"', raw)
     assert match is not None
@@ -166,10 +173,10 @@ def page_token(services: Services, cookies: dict[str, str]) -> str:
 def decide(
     services: Services, cookies: dict[str, str], token: str,
     action: str = "merge", origin: str = "https://example.test",
-    queue_oid: str = QUEUE_OID,
+    queue_oid: str = QUEUE_OID, repo: str = "scripts",
 ) -> tuple[int, bytes]:
     body = urllib.parse.urlencode(
-        {"action": action, "queue_oid": queue_oid, "base_oid": BASE_OID, "csrf": token}
+        {"repo": repo, "action": action, "queue_oid": queue_oid, "base_oid": BASE_OID, "csrf": token}
     )
     headers = browser_headers()
     headers["Origin"] = origin
@@ -224,7 +231,7 @@ def test_empty_queue_shows_a_page_without_decision_forms(services: Services) -> 
     cookies = authorized(services)
     status, raw = http_request(services.ui_server, "GET", "/lock/merge/", cookies=cookies)
     assert status == 200
-    assert b"No queued diary-scripts changes" in raw
+    assert b"Both queues are empty" in raw
     assert b'name="action"' not in raw
 
 
@@ -332,6 +339,10 @@ def test_executor_refusals_and_failures_map_to_explicit_statuses(
 # ------------------------------------------------------------------- executor unit
 
 
+def _paths_by_repo(tmp_path: Path) -> dict[str, Any]:
+    return {"scripts": _console_paths(tmp_path)}
+
+
 def _console_paths(tmp_path: Path):
     return executor.queue.QueuePaths(
         integration=tmp_path / "integration",
@@ -345,10 +356,12 @@ def _console_paths(tmp_path: Path):
 class FakeVerifier:
     def __init__(self, allow: bool = True) -> None:
         self.allow = allow
-        self.calls: list[tuple[str, str, str, str]] = []
+        self.calls: list[tuple[str, str, str, str, str]] = []
 
-    def verify(self, action: str, queue_oid: str, base_oid: str, transaction: str) -> bool:
-        self.calls.append((action, queue_oid, base_oid, transaction))
+    def verify(
+        self, repo: str, action: str, queue_oid: str, base_oid: str, transaction: str,
+    ) -> bool:
+        self.calls.append((repo, action, queue_oid, base_oid, transaction))
         return self.allow
 
 
@@ -358,7 +371,7 @@ def test_executor_forwards_the_exact_binding_and_requires_a_consumed_grant(
     verifier = FakeVerifier(allow=False)
     recorded: list[Any] = []
 
-    def fake_console(paths, verifier_arg, authorizer, *, auditor, publisher, lock_state):
+    def fake_console(paths, verifier_arg, authorizer, *, auditor, publisher, lock_state, repo="scripts"):
         recorded.append(authorizer)
 
         class FakeConsole:
@@ -373,15 +386,15 @@ def test_executor_forwards_the_exact_binding_and_requires_a_consumed_grant(
 
     monkeypatch.setattr(executor, "_console", fake_console)
     request = {
-        "cmd": "decide", "action": "merge", "queue_oid": QUEUE_OID,
+        "cmd": "decide", "repo": "scripts", "action": "merge", "queue_oid": QUEUE_OID,
         "base_oid": BASE_OID, "transaction": "tx-1",
     }
     with pytest.raises(console.OwnerAuthorizationRequired):
-        executor.handle_request(request, _console_paths(tmp_path), verifier, auditor=object())  # type: ignore[arg-type]
-    assert verifier.calls == [("merge", QUEUE_OID, BASE_OID, "tx-1")]
+        executor.handle_request(request, _paths_by_repo(tmp_path), verifier, auditor=object())  # type: ignore[arg-type]
+    assert verifier.calls == [("scripts", "merge", QUEUE_OID, BASE_OID, "tx-1")]
 
     verifier.allow = True
-    reply = executor.handle_request(request, _console_paths(tmp_path), verifier, auditor=object())  # type: ignore[arg-type]
+    reply = executor.handle_request(request, _paths_by_repo(tmp_path), verifier, auditor=object())  # type: ignore[arg-type]
     assert reply == {"ok": True, "action": "merge", "outcome": "merged"}
 
 
@@ -389,18 +402,18 @@ def test_executor_forwards_the_exact_binding_and_requires_a_consumed_grant(
     "payload",
     [
         {"cmd": "shell", "argv": ["sh"]},
-        {"cmd": "decide", "action": "merge", "queue_oid": QUEUE_OID, "base_oid": BASE_OID},
-        {"cmd": "decide", "action": "push", "queue_oid": QUEUE_OID, "base_oid": BASE_OID, "transaction": "t"},
-        {"cmd": "decide", "action": "merge", "queue_oid": "abc", "base_oid": BASE_OID, "transaction": "t"},
-        {"cmd": "decide", "action": "merge", "queue_oid": QUEUE_OID, "base_oid": BASE_OID, "transaction": "t", "extra": 1},
-        {"cmd": "snapshot", "queue_oid": OTHER_OID},
+        {"cmd": "decide", "repo": "scripts", "action": "merge", "queue_oid": QUEUE_OID, "base_oid": BASE_OID},
+        {"cmd": "decide", "repo": "scripts", "action": "push", "queue_oid": QUEUE_OID, "base_oid": BASE_OID, "transaction": "t"},
+        {"cmd": "decide", "repo": "scripts", "action": "merge", "queue_oid": "abc", "base_oid": BASE_OID, "transaction": "t"},
+        {"cmd": "decide", "repo": "scripts", "action": "merge", "queue_oid": QUEUE_OID, "base_oid": BASE_OID, "transaction": "t", "extra": 1},
+        {"cmd": "snapshot", "repo": "scripts", "queue_oid": OTHER_OID},
     ],
 )
 def test_executor_rejects_anything_outside_its_two_fixed_verbs(
     tmp_path: Path, payload: dict[str, Any],
 ) -> None:
     with pytest.raises(executor.ExecutorError):
-        executor.handle_request(payload, _console_paths(tmp_path), FakeVerifier(), auditor=object())  # type: ignore[arg-type]
+        executor.handle_request(payload, _paths_by_repo(tmp_path), FakeVerifier(), auditor=object())  # type: ignore[arg-type]
 
 
 def test_executor_snapshot_holds_no_decision_authority(
@@ -408,7 +421,7 @@ def test_executor_snapshot_holds_no_decision_authority(
 ) -> None:
     seen: list[Any] = []
 
-    def fake_console(paths, verifier, authorizer, *, auditor, publisher, lock_state):
+    def fake_console(paths, verifier, authorizer, *, auditor, publisher, lock_state, repo="scripts"):
         seen.append(authorizer)
 
         class FakeConsole:
@@ -418,7 +431,7 @@ def test_executor_snapshot_holds_no_decision_authority(
         return FakeConsole()
 
     monkeypatch.setattr(executor, "_console", fake_console)
-    reply = executor.handle_request({"cmd": "snapshot"}, _console_paths(tmp_path), FakeVerifier(), auditor=object())  # type: ignore[arg-type]
+    reply = executor.handle_request({"cmd": "snapshot", "repo": "scripts"}, _paths_by_repo(tmp_path), FakeVerifier(), auditor=object())  # type: ignore[arg-type]
     assert reply == {"ok": True, "snapshot": {"pending": False}}
     with pytest.raises(console.OwnerAuthorizationRequired):
         seen[0]("merge", QUEUE_OID, BASE_OID)
@@ -431,7 +444,7 @@ def test_executor_maps_audit_failure_to_no_repository_operation(
         def record(self, record):
             raise console.ConsoleError("audit unavailable")
 
-    def fake_console(paths, verifier, authorizer, *, auditor, publisher, lock_state):
+    def fake_console(paths, verifier, authorizer, *, auditor, publisher, lock_state, repo="scripts"):
         class FakeQueueConsole:
             def snapshot(self):
                 return None
@@ -443,9 +456,9 @@ def test_executor_maps_audit_failure_to_no_repository_operation(
         return FakeQueueConsole()
 
     monkeypatch.setattr(executor, "_console", fake_console)
-    request = {"cmd": "decide", "action": "deny", "queue_oid": QUEUE_OID, "base_oid": BASE_OID, "transaction": "t"}
+    request = {"cmd": "decide", "repo": "scripts", "action": "deny", "queue_oid": QUEUE_OID, "base_oid": BASE_OID, "transaction": "t"}
     with pytest.raises(console.ConsoleError):
-        executor.handle_request(request, _console_paths(tmp_path), FakeVerifier(), auditor=FailingAudit())
+        executor.handle_request(request, _paths_by_repo(tmp_path), FakeVerifier(), auditor=FailingAudit())
 
 
 # --------------------------------------------------------------- fresh service binding
@@ -456,21 +469,21 @@ def test_merge_grant_is_bound_to_action_and_oids_and_cannot_be_used_as_unlock(se
     transaction_id = cookies[fresh.TRANSACTION_COOKIE].split(".")[0]
     store = services.fresh_server.transactions
 
-    assert store.verify_consumed(transaction_id, "merge", QUEUE_OID, BASE_OID) is None
-    assert store.verify_consumed(transaction_id, "merge", QUEUE_OID, OTHER_OID) is None
-    assert store.verify_consumed(transaction_id, "deny", QUEUE_OID, BASE_OID) is None
+    assert store.verify_consumed(transaction_id, "scripts", "merge", QUEUE_OID, BASE_OID) is None
+    assert store.verify_consumed(transaction_id, "scripts", "merge", QUEUE_OID, OTHER_OID) is None
+    assert store.verify_consumed(transaction_id, "scripts", "deny", QUEUE_OID, BASE_OID) is None
 
     token = page_token(services, cookies)
     assert decide(services, cookies, token)[0] == 200
-    assert store.verify_consumed(transaction_id, "merge", QUEUE_OID, BASE_OID) is not None
-    assert store.verify_consumed(transaction_id, "deny", QUEUE_OID, BASE_OID) is None
+    assert store.verify_consumed(transaction_id, "scripts", "merge", QUEUE_OID, BASE_OID) is not None
+    assert store.verify_consumed(transaction_id, "scripts", "deny", QUEUE_OID, BASE_OID) is None
 
 
 def test_begin_rejects_an_invalid_action_or_incomplete_oids(services: Services) -> None:
     services.auth_state.add("old")
     for body in (
-        {"action": "push", "queue_oid": QUEUE_OID, "base_oid": BASE_OID},
-        {"action": "merge", "queue_oid": "abc", "base_oid": BASE_OID},
+        {"repo": "scripts", "action": "push", "queue_oid": QUEUE_OID, "base_oid": BASE_OID},
+        {"repo": "scripts", "action": "merge", "queue_oid": "abc", "base_oid": BASE_OID},
         {"action": "merge", "queue_oid": QUEUE_OID},
     ):
         status, _ = http_request(
@@ -483,7 +496,7 @@ def test_begin_rejects_an_invalid_action_or_incomplete_oids(services: Services) 
 
 
 def test_merge_begin_requires_a_live_owner_session(services: Services) -> None:
-    body = json.dumps({"action": "merge", "queue_oid": QUEUE_OID, "base_oid": BASE_OID})
+    body = json.dumps({"repo": "scripts", "action": "merge", "queue_oid": QUEUE_OID, "base_oid": BASE_OID})
     headers = {**browser_headers("X-Diary-Merge-Begin"), "Content-Type": "application/json"}
     status, _ = http_request(
         services.fresh_server, "POST", "/lock/merge/begin", headers=headers, body=body,
@@ -499,7 +512,9 @@ def test_merge_begin_requires_a_live_owner_session(services: Services) -> None:
 
 def test_merge_begin_accepts_the_console_form_without_script(services: Services) -> None:
     services.auth_state.add("old")
-    body = urllib.parse.urlencode({"action": "deny", "queue_oid": QUEUE_OID, "base_oid": BASE_OID})
+    body = urllib.parse.urlencode(
+        {"repo": "scripts", "action": "deny", "queue_oid": QUEUE_OID, "base_oid": BASE_OID}
+    )
     connection = http.client.HTTPConnection("127.0.0.1", services.fresh_server.server_port, timeout=6)
     connection.request(
         "POST", "/lock/merge/begin",
@@ -519,7 +534,7 @@ def test_merge_begin_accepts_the_console_form_without_script(services: Services)
 
 def test_return_page_shows_the_decision_bound_to_the_ceremony(services: Services) -> None:
     services.auth_state.add("old")
-    body = json.dumps({"action": "deny", "queue_oid": QUEUE_OID, "base_oid": BASE_OID})
+    body = json.dumps({"repo": "scripts", "action": "deny", "queue_oid": QUEUE_OID, "base_oid": BASE_OID})
     connection = http.client.HTTPConnection("127.0.0.1", services.fresh_server.server_port, timeout=6)
     connection.request(
         "POST", "/lock/merge/begin",
@@ -580,15 +595,15 @@ def test_socket_activated_stdio_mode_checks_the_peer_uid_and_answers_once(
         def snapshot(self):
             return None
 
-    def fake_console(paths, verifier, authorizer, *, auditor, publisher, lock_state):
+    def fake_console(paths, verifier, authorizer, *, auditor, publisher, lock_state, repo="scripts"):
         return FakeConsole()
 
     monkeypatch.setattr(executor, "_console", fake_console)
-    paths = _console_paths(tmp_path)
+    paths = _paths_by_repo(tmp_path)
 
     client, server = socket.socketpair()
     try:
-        client.sendall(b'{"cmd":"snapshot"}\n')
+        client.sendall(b'{"cmd":"snapshot","repo":"scripts"}\n')
         code = executor.serve_stdio(
             paths, FakeVerifier(), os.geteuid(), auditor=object(), connection=server,  # type: ignore[arg-type]
         )
@@ -600,7 +615,7 @@ def test_socket_activated_stdio_mode_checks_the_peer_uid_and_answers_once(
 
     client, server = socket.socketpair()
     try:
-        client.sendall(b'{"cmd":"snapshot"}\n')
+        client.sendall(b'{"cmd":"snapshot","repo":"scripts"}\n')
         code = executor.serve_stdio(
             paths, FakeVerifier(), os.geteuid() + 1, auditor=object(), connection=server,  # type: ignore[arg-type]
         )
@@ -637,7 +652,8 @@ def test_stale_review_form_re_renders_instead_of_dead_ending(services: Services)
     """A form rendered before a ceremony must not fail as "Refused"."""
     services.auth_state.add("owner")
     body = (
-        "action=merge" f"&queue_oid={QUEUE_OID}&base_oid={BASE_OID}&csrf=stale-token"
+        "repo=scripts&action=merge"
+        f"&queue_oid={QUEUE_OID}&base_oid={BASE_OID}&csrf=stale-token"
     )
     status, page = http_request(
         services.ui_server, "POST", "/lock/merge/decide",
@@ -649,3 +665,111 @@ def test_stale_review_form_re_renders_instead_of_dead_ending(services: Services)
     assert status == 200
     assert b"expired before it was submitted" in page
     assert b'name="csrf" value="' in page
+
+
+# ----------------------------------------------------------------- diary queue (CTL-12)
+
+
+def test_page_shows_which_queue_is_under_review(services: Services) -> None:
+    cookies = authorized(services)
+    status, raw = http_request(
+        services.ui_server, "GET", "/lock/merge/?repo=diary", cookies=cookies,
+    )
+
+    assert status == 200
+    assert b'<code id="repo">diary</code>' in raw
+    assert b"diary repository" in raw
+    assert any(request.get("repo") == "diary" for request in services.executor.requests)
+
+
+def test_unknown_repository_is_refused(services: Services) -> None:
+    cookies = authorized(services)
+
+    status, _ = http_request(
+        services.ui_server, "GET", "/lock/merge/?repo=elsewhere", cookies=cookies,
+    )
+    assert status == 403
+
+    body = urllib.parse.urlencode(
+        {"repo": "elsewhere", "action": "merge", "queue_oid": QUEUE_OID,
+         "base_oid": BASE_OID, "csrf": page_token(services, cookies)},
+    )
+    status, _ = http_request(
+        services.ui_server, "POST", "/lock/merge/decide",
+        cookies=cookies,
+        headers={**browser_headers(), "Content-Type": "application/x-www-form-urlencoded"},
+        body=body,
+    )
+    assert status == 403
+
+
+def test_a_scripts_grant_cannot_authorize_the_diary_queue(services: Services) -> None:
+    """The grant binds the repository, so the pair cannot be moved across queues."""
+    cookies = authorized(services, repo="scripts")
+    token = page_token(services, cookies, repo="diary")
+    before = len(services.executor.requests)
+
+    status, raw = decide(services, cookies, token, repo="diary")
+
+    assert status == 200
+    assert b"Fresh authorization required" in raw
+    assert all(request["cmd"] != "decide" for request in services.executor.requests[before:])
+
+
+def test_executor_selects_the_path_set_for_the_requested_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[tuple[str, object]] = []
+
+    def fake_console(paths, verifier, authorizer, *, auditor, publisher, lock_state, repo="scripts"):
+        seen.append((repo, paths))
+
+        class EmptyConsole:
+            def snapshot(self):
+                return None
+
+        return EmptyConsole()
+
+    monkeypatch.setattr(executor, "_console", fake_console)
+    scripts = _console_paths(tmp_path)
+    diary = object()
+
+    reply = executor.handle_request(
+        {"cmd": "snapshot", "repo": "diary"},
+        {"scripts": scripts, "diary": diary},  # type: ignore[dict-item]
+        FakeVerifier(), auditor=object(),
+    )
+
+    assert reply["ok"] is True
+    assert seen == [("diary", diary)]
+
+
+@pytest.mark.parametrize("request_value", [
+    {"cmd": "snapshot"},
+    {"cmd": "snapshot", "repo": "elsewhere"},
+    {"cmd": "snapshot", "repo": "diary", "extra": 1},
+])
+def test_executor_requires_exactly_one_known_repository(
+    tmp_path: Path, request_value: dict[str, Any],
+) -> None:
+    with pytest.raises(executor.ExecutorError):
+        executor.handle_request(
+            request_value, _paths_by_repo(tmp_path), FakeVerifier(), auditor=object(),
+        )
+
+
+def test_diary_publication_does_not_sync_a_python_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A diary approval has no venv; only the scripts repository does."""
+    calls: list[tuple[str, bool]] = []
+
+    def fake_approve(reviewed, paths, *, expected_base=None, sync_environment=True):
+        calls.append((reviewed, sync_environment))
+        return True
+
+    monkeypatch.setattr(executor.queue, "approve_queue", fake_approve)
+    executor._publication("diary")("a" * 40, object(), expected_base="b" * 40)  # type: ignore[arg-type]
+    executor._publication("scripts")("a" * 40, object(), expected_base="b" * 40)  # type: ignore[arg-type]
+
+    assert calls == [("a" * 40, False), ("a" * 40, True)]

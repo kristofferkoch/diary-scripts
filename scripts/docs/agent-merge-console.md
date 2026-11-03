@@ -28,6 +28,22 @@ or Deny and never participate in authorization. Both forms carry hidden queue
 and approved-base OIDs. Those values identify the reviewed pair; they are not
 proof of ownership.
 
+## Both queues
+
+The console reviews the `diary-scripts` queue and the diary repository's own
+queue. The page names the queue under review, and every snapshot and decision
+carries a `repo` field (`scripts` or `diary`) that the executor maps to the
+matching path set; the caller still supplies no path and no Git argument, and an
+unknown or missing repository is rejected rather than defaulted.
+
+The fresh authorization binds the repository along with the action and both
+OIDs, so a grant minted for one queue is refused for the other. The diary path
+keeps the existing forward-only pointer guard: a decision publishes through the
+same `approve_queue(..., expected_base=...)` path, and a stale queue or base is
+rejected before any repository operation. Only the `diary-scripts` queue has an
+advisory model report; the diary page labels that section as unavailable rather
+than pretending it reviewed the change.
+
 ## Decision and audit boundary
 
 CTL-07 must inject an owner-authorization callable. Every Merge or Deny decision

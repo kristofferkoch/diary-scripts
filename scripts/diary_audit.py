@@ -52,7 +52,7 @@ TOKEN_FIELDS = (
     "event_id", "base_oid", "session_id", "tool", "unit", "protocol",
 )
 OPTIONAL_FIELDS = (
-    "reason", "event_id", "base_oid", "session_id", "tool", "unit", "destination_ip",
+    "reason", "event_id", "base_oid", "repository", "session_id", "tool", "unit", "destination_ip",
     "destination_port", "protocol", "dns_name", "caller",
 )
 SENSITIVE_FIELDS = frozenset({

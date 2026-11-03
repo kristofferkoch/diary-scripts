@@ -377,3 +377,28 @@ def test_render_diff_marks_lines_and_escapes_content() -> None:
     assert "&lt;b&gt;" in markup
     assert "&lt;script&gt;" in markup
     assert "<script>" not in markup
+
+
+def test_snapshot_carries_the_repository_and_audit_records_it() -> None:
+    """A decision's audit record names the queue it was bound to."""
+    record = console.DecisionRecord(
+        "merge", "a" * 40, "b" * 40, "owner_authorized", "locked", repository="diary",
+    )
+
+    event = record.as_audit_event()
+
+    assert event["repository"] == "diary"
+    assert event["event_id"] == "a" * 40
+    assert event["base_oid"] == "b" * 40
+
+
+def test_render_console_names_the_queue_under_review() -> None:
+    snapshot = console.QueueSnapshot(
+        "a" * 40, "b" * 40, (console.QueueCommit("a" * 40, "queued"),),
+        "diff", console.AdvisoryView("unavailable", "not for this queue"), repo="diary",
+    )
+
+    page = console.render_console(snapshot, "/lock/merge/decide", "token")
+
+    assert '<code id="repo">diary</code>' in page
+    assert 'name="repo" value="diary"' in page

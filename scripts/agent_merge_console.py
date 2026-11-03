@@ -20,6 +20,8 @@ from scripts import agent_merge_review as review
 from scripts import diary_audit
 
 DecisionAction = Literal["merge", "deny"]
+Repo = Literal["scripts", "diary"]
+REPOS: tuple[str, ...] = ("scripts", "diary")
 MAX_REPORT_BYTES = 2 * 1024 * 1024
 
 
@@ -59,6 +61,7 @@ class DecisionRecord:
     base_oid: str
     outcome: str
     lock_state: str
+    repository: str = "scripts"
 
     def as_audit_event(self) -> dict[str, str]:
         decisions = {
@@ -80,6 +83,7 @@ class DecisionRecord:
             "reason": self.outcome,
             "event_id": self.queue_oid,
             "base_oid": self.base_oid,
+            "repository": self.repository,
         }
 
 
@@ -113,6 +117,7 @@ class QueueSnapshot:
     diff: str
     advisory: AdvisoryView
     pending: bool = True
+    repo: str = "scripts"
 
 
 @dataclass(frozen=True)
@@ -157,9 +162,13 @@ class MergeConsole:
         report_dir: Path = review.DEFAULT_REPORT_DIR,
         publisher: Publisher = queue.approve_queue,
         lock_state: str = "locked",
+        repo: str = "scripts",
     ) -> None:
         if lock_state not in {"locked", "attended"}:
             raise ValueError("console audit lock state must be locked or attended")
+        if repo not in REPOS:
+            raise ValueError("console repository must be scripts or diary")
+        self.repo = repo
         self.paths = paths
         self.authorizer = authorizer
         self.auditor = auditor
@@ -181,6 +190,12 @@ class MergeConsole:
             return _CurrentQueue(oid, base, not already_approved)
 
     def _advisory(self, oid: str, base: str) -> AdvisoryView:
+        if self.repo != "scripts":
+            return AdvisoryView(
+                "unavailable",
+                "The advisory model review covers the diary-scripts queue only. "
+                "Review the real diff; owner approval remains available.",
+            )
         path = self.report_dir / f"{oid}.json"
         try:
             info = path.lstat()
@@ -220,10 +235,13 @@ class MergeConsole:
             ).stdout
             return QueueSnapshot(
                 current.oid, base, commits, diff, self._advisory(current.oid, base),
+                repo=self.repo,
             )
 
     def _record(self, action: DecisionAction, oid: str, base: str, outcome: str) -> None:
-        self.auditor.record(DecisionRecord(action, oid, base, outcome, self.lock_state))
+        self.auditor.record(
+            DecisionRecord(action, oid, base, outcome, self.lock_state, self.repo)
+        )
 
     def decide(self, action: DecisionAction, reviewed_oid: str, reviewed_base: str) -> DecisionResult:
         if (
@@ -298,7 +316,7 @@ def render_console(
         f'<input type="hidden" name="csrf" value="{html.escape(csrf_token, quote=True)}">'
     )
     if snapshot is None:
-        content = "<p>No queued diary-scripts changes require review.</p>"
+        content = "<p>No queued changes require review in this queue.</p>"
     else:
         commits = "".join(
             f"<li><code>{html.escape(item.oid)}</code> {html.escape(item.subject)}</li>"
@@ -311,6 +329,8 @@ def render_console(
         content = f"""
 <section id="merge-review">
   {note}
+  <p class="repo">Queue: <code id="repo">{html.escape(snapshot.repo)}</code>
+    ({html.escape("diary repository" if snapshot.repo == "diary" else "diary-scripts tools repository")})</p>
   <h2>Queued commits</h2>
   <p>Reviewed queue OID: <code id="queue-oid">{html.escape(snapshot.queue_oid)}</code></p>
   <p>Approved master OID: <code id="base-oid">{html.escape(snapshot.base_oid)}</code></p>
@@ -322,6 +342,7 @@ def render_console(
   <p>The report is advisory only. Missing or stale reports do not block owner review or approval.</p>
   <form method="post" action="{html.escape(action_path, quote=True)}">
     {token}
+    <input type="hidden" name="repo" value="{html.escape(snapshot.repo, quote=True)}">
     <input type="hidden" name="action" value="merge">
     <input type="hidden" name="queue_oid" value="{html.escape(snapshot.queue_oid, quote=True)}">
     <input type="hidden" name="base_oid" value="{html.escape(snapshot.base_oid, quote=True)}">
@@ -329,6 +350,7 @@ def render_console(
   </form>
   <form method="post" action="{html.escape(action_path, quote=True)}">
     {token}
+    <input type="hidden" name="repo" value="{html.escape(snapshot.repo, quote=True)}">
     <input type="hidden" name="action" value="deny">
     <input type="hidden" name="queue_oid" value="{html.escape(snapshot.queue_oid, quote=True)}">
     <input type="hidden" name="base_oid" value="{html.escape(snapshot.base_oid, quote=True)}">
@@ -344,6 +366,6 @@ def render_console(
 <title>Owner merge review</title>
 <style>body{{font-family:system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#1b1b1b}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;padding:0;background:#f6f8fa;border:1px solid #d8dee4;border-radius:6px;overflow:hidden}}pre.advisory{{padding:1rem}}code{{overflow-wrap:anywhere;font-size:0.95em}}form{{display:inline-block;margin-right:1rem}}button{{padding:0.5rem 0.9rem;border-radius:4px;border:1px solid #8b949e;background:#f6f8fa;cursor:pointer}}button[value=merge]{{border-color:#1a7f37;background:#e6ffed}}button[value=deny]{{border-color:#cf222e;background:#ffeef0}}button:disabled{{opacity:0.5;cursor:not-allowed}}.notice{{padding:0.6rem 0.8rem;border-left:4px solid #bf8700;background:#fff8c5;border-radius:4px}}.diff{{padding:0.5rem 0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.875rem;line-height:1.45}}.dline{{display:block;padding:0 0.8rem;white-space:pre-wrap}}.dline.add{{background:#e6ffed}}.dline.del{{background:#ffeef0}}.dline.hunk{{background:#eef4ff;color:#0a3069}}.dline.meta{{color:#57606a}}</style>
 </head>
-<body><h1>diary-scripts owner merge review</h1>{content}</body>
+<body><h1>Owner merge review</h1>{content}</body>
 </html>
 """
