@@ -23,7 +23,6 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from mail_reader.config import vlm_url
 from scripts.agent_merge_pii import (
     CONTROL_RE,
     DEFAULT_CONFIG,
@@ -268,7 +267,13 @@ def review_once(
             report["model_error"] = "review input exceeds configured size limit"
         else:
             try:
-                response = call_model(endpoint or vlm_url(), config, review_input, timeout)
+                if endpoint is None:
+                    # Imported lazily: the owner console renders stored reports
+                    # and must not depend on the mail stack or its configuration.
+                    from mail_reader.config import vlm_url
+
+                    endpoint = vlm_url()
+                response = call_model(endpoint, config, review_input, timeout)
                 summary, findings = parse_model_response(response)
                 report["model_status"] = "completed"
                 report["model_summary"] = summary
