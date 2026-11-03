@@ -229,3 +229,81 @@ would have caught it exists.
 Rows without both columns are the L4 checklist: the installer rehearsal must
 exercise the helper layout, the deployment order, the functional preflight, and
 the client comparison against a real installation.
+
+## Layer 4 — the installer rehearsal
+
+Layers 1-3 run the code against scratch state. They cannot see an installed
+layout, the system Python, systemd ordering, or a preflight that passes while the
+component it checks is broken — which is how the helper-list crash and the
+`repository`-field deployment both reached production. Layer 4 runs the real
+installers, in their documented order, inside a systemd-capable container,
+against the approved checkouts.
+
+```bash
+scripts/e2e/installer_rehearsal.sh \
+    --approved-diary   /home/kek/diary-approved \
+    --approved-scripts /home/kek/diary-scripts-approved
+```
+
+It requires Docker access (the agent session does not have it) and network access,
+because the fresh-authorization installer downloads and builds pinned Authelia.
+The image is pulled once; expected runtime is **15-25 minutes**, most of it the
+Authelia build.
+
+What it does:
+
+1. Refuses to start unless both checkouts are clean Git trees, and refuses a
+   non-scratch scratch directory.
+2. Starts a privileged, systemd-capable container with the two approved trees
+   bind-mounted read-only at the exact paths the installers hardcode, provisions
+   `kek` (uid 1000) and the toolchain, and waits for systemd to report ready.
+3. Runs, in order: `systemd/install-audit-root`,
+   `systemd/install-controller-root`, `authelia/install`,
+   `systemd/install-owner-ui-root` — from the approved tree, with each installer
+   bounded by a timeout and its output kept in the scratch directory. The
+   controller step is required because the console installer restarts and checks
+   `diary-locked`, which the controller installer owns.
+4. Asserts the audit daemon, controller and console are active; `/lock/health`
+   answers 200; the unlock route answers 404; the UI enablement file and the
+   enforcement arm file are absent; `diary-audit preflight` passes; and
+   `agent-merge-queue doctor` reports the installed client matches approved.
+5. **Negative case**: builds a fixture from the approved scripts with only the
+   `repository` journal mapping removed — the exact production defect, with the
+   validator and the preflight subcommand intact — installs that audit daemon and
+   the controller, then asserts that `install-owner-ui-root` refuses with "does
+   not journal the repository field" and leaves the console unit unenabled. That
+   is the assertion a grep-based preflight cannot make.
+
+Every check prints `PASS` or `FAIL`; the exit status is non-zero if any installer
+refused or any assertion failed. `--keep` leaves the containers and scratch
+directory for inspection.
+
+### Honest gaps
+
+- **SELinux is disabled in the container** (`label=disable`): labels, file
+  contexts, and the Caddy socket transition are not rehearsed.
+- **The distribution is Fedora, not the host's RHEL-family image**, so package
+  versions and the system Python differ slightly (3.11+ is asserted).
+- **Socket peer authorization** is exercised only as root inside the container;
+  the host's UID mapping and group policy are not.
+- **No host services are touched**: this is not a reboot, lock-transition, or
+  tailnet test, and Caddy/Authelia's live routing stays with L3.
+- The fresh-authorization service's own session proof against Authelia is L3's
+  stand-in, not the installed unit.
+
+### Manual checklist after a real deployment
+
+The rehearsal cannot cover these; verify them by hand after deploying:
+
+1. `systemctl is-active` for the audit daemon, controller, console and executor
+   socket, then `/lock/health` through Caddy over the tailnet origin.
+2. The console page renders behind two-factor Authelia, and an anonymous request
+   is redirected, not served.
+3. One real merge through the page: the root-served confirmation page names the
+   repository and both OIDs; the trusted journal shows `merge_console.decision`
+   with `repository`, the queue OID and the base OID.
+4. `/etc/diary/lock-ui-actions-enabled` is still absent and a UI unlock is
+   refused; `/lock/api/lock` returns 404.
+5. SELinux labels on the dashboard socket and the Caddy connect rule.
+6. A controlled reboot: services come back, the controller starts locked, and the
+   lock audit records a `reason=boot` transition.
