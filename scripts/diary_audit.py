@@ -82,6 +82,7 @@ FIELD_MAP = {
     "reason": "DIARY_AUDIT_REASON",
     "event_id": "DIARY_AUDIT_EVENT_ID",
     "base_oid": "DIARY_AUDIT_BASE_OID",
+    "repository": "DIARY_AUDIT_REPOSITORY",
     "session_id": "DIARY_AUDIT_SESSION_ID",
     "tool": "DIARY_AUDIT_TOOL",
     "unit": "DIARY_AUDIT_UNIT",
@@ -92,7 +93,8 @@ FIELD_MAP = {
 }
 REPORT_FIELDS = (
     "event", "component", "operation", "decision", "lock_state", "reason", "unit",
-    "destination_ip", "destination_port", "protocol", "dns_name", "caller_uid",
+    "destination_ip", "destination_port", "protocol", "dns_name", "repository",
+    "caller_uid",
 )
 
 

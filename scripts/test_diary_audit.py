@@ -591,3 +591,28 @@ def test_repository_is_preserved_and_validated() -> None:
     for value in ("elsewhere", "scripts ", ""):
         with pytest.raises(audit.AuditError):
             audit.normalize_event(event(repository=value))
+
+
+def test_every_accepted_event_field_has_a_journal_mapping() -> None:
+    """A field the daemon validates but cannot journal crashes the handler."""
+    accepted = (set(audit.REQUIRED_FIELDS) | set(audit.OPTIONAL_FIELDS)) - {"caller"}
+    missing = sorted(accepted - set(audit.FIELD_MAP))
+    assert missing == []
+
+
+def test_decision_repository_reaches_the_journal() -> None:
+    event = {
+        "event": "merge_console.decision",
+        "component": "diary-lock-ui",
+        "operation": "merge",
+        "decision": "allow",
+        "lock_state": "locked",
+        "reason": "owner_authorized",
+        "event_id": "a" * 40,
+        "base_oid": "b" * 40,
+        "repository": "diary",
+    }
+
+    fields = audit._journal_fields(event, peer(), [])
+
+    assert fields["DIARY_AUDIT_REPOSITORY"] == "diary"
