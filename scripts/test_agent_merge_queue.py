@@ -889,3 +889,39 @@ def test_sync_does_not_require_historical_submodule_commits(
         "git", "rev-parse", "HEAD", cwd=approved
     )
     assert run("git", "ls-tree", "HEAD", "diary-scripts", cwd=paths.integration).split()[2] == vanished
+
+
+def test_doctor_flags_a_stale_installed_client(tmp_path: Path) -> None:
+    """D6: approving a client change must not silently leave the old one running."""
+    approved = tmp_path / "agent_merge_queue.py"
+    approved.write_text("new client\n")
+    installed = tmp_path / "installed-client"
+    installed.write_text("old client\n")
+
+    ok, message = amq.installed_client_status(installed, approved)
+
+    assert not ok
+    assert "install -o root -g root -m 0755" in message
+    assert str(approved) in message
+
+
+def test_doctor_accepts_a_matching_client(tmp_path: Path) -> None:
+    approved = tmp_path / "agent_merge_queue.py"
+    approved.write_text("same bytes\n")
+    installed = tmp_path / "installed-client"
+    installed.write_bytes(approved.read_bytes())
+
+    ok, message = amq.installed_client_status(installed, approved)
+
+    assert ok
+    assert "matches" in message
+
+
+def test_doctor_reports_a_missing_client(tmp_path: Path) -> None:
+    approved = tmp_path / "agent_merge_queue.py"
+    approved.write_text("new client\n")
+
+    ok, message = amq.installed_client_status(tmp_path / "absent", approved)
+
+    assert not ok
+    assert "missing" in message

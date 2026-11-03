@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import os
 import pwd
 import re
@@ -269,6 +270,44 @@ def worktree_branch(repo: Path, branch: str) -> Path | None:
         elif line == f"branch refs/heads/{branch}" and path is not None:
             return path
     return None
+
+
+INSTALLED_CLIENT = Path("/usr/local/libexec/agent-merge-queue")
+
+
+def client_install_command(source: Path) -> str:
+    """The exact command that refreshes the running approval client."""
+    return (
+        "install -o root -g root -m 0755 "
+        f"{shlex.quote(str(source))} {shlex.quote(str(INSTALLED_CLIENT))}"
+    )
+
+
+def installed_client_status(installed: Path, approved_source: Path) -> tuple[bool, str]:
+    """Compare the running approval client with the approved source.
+
+    The approval client is a root-installed copy, so approving a change to
+    ``agent_merge_queue.py`` does nothing until that copy is refreshed. Compare
+    the bytes rather than a version string: a mixed or hand-edited copy is the
+    failure this exists for.
+    """
+    try:
+        installed_bytes = installed.read_bytes()
+    except OSError:
+        return False, (
+            "the installed approval client is missing; run: "
+            + client_install_command(approved_source)
+        )
+    try:
+        approved_bytes = approved_source.read_bytes()
+    except OSError:
+        return False, f"the approved approval client is missing: {approved_source}"
+    if hashlib.sha256(installed_bytes).digest() != hashlib.sha256(approved_bytes).digest():
+        return False, (
+            "the installed approval client differs from the approved source; run: "
+            + client_install_command(approved_source)
+        )
+    return True, "the installed approval client matches the approved source"
 
 
 def ensure_queue(paths: QueuePaths) -> None:
@@ -769,11 +808,24 @@ def queue_main(argv: list[str] | None = None) -> int:
     agent = sub.add_parser("request", help="bundle and request one source branch as the agent")
     agent.add_argument("repo", choices=("scripts", "diary"))
     agent.add_argument("branch")
+    doctor = sub.add_parser(
+        "doctor", help="compare the installed approval client with the approved source",
+    )
+    doctor.add_argument("--installed", default=str(INSTALLED_CLIENT))
+    doctor.add_argument("--approved", default=None)
     args = parser.parse_args(argv)
     if args.command == "client":
         return approve_main(["--repo", args.repo, args.reviewed])
     if args.command == "request":
         return agent_request(args.repo, args.branch)
+    if args.command == "doctor":
+        approved = (
+            Path(args.approved) if args.approved
+            else default_paths().approved / "scripts" / "agent_merge_queue.py"
+        )
+        ok, message = installed_client_status(Path(args.installed), approved)
+        print(("ok: " if ok else "agent-merge: ") + message, file=sys.stdout if ok else sys.stderr)
+        return 0 if ok else 1
     try:
         if args.command == "queue":
             queue_change(args.branch, args.expected, paths_for(args.repo), repo=args.repo)
