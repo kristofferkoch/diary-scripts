@@ -461,7 +461,15 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         cookie = self.headers.get("Cookie")
         self.server.authelia.verify_owner(cookie, "POST", self.path)
         fields = self._require_form_action()
-        if set(fields) != {"repo", "action", "queue_oid", "base_oid", "csrf"}:
+        # A browser submits the submit button's name/value too, and the reviewed
+        # form uses name="confirm" on both buttons. Accept exactly the fields the
+        # form can produce, reject anything else, and require the decision fields.
+        submitted = set(fields)
+        required = {"repo", "action", "queue_oid", "base_oid", "csrf"}
+        allowed = required | {"confirm"}
+        if not required <= submitted or not submitted <= allowed:
+            raise AuthorizationError("invalid decision request")
+        if "confirm" in fields and fields["confirm"] != fields["action"]:
             raise AuthorizationError("invalid decision request")
         repo = fields["repo"]
         if repo not in REPOS:

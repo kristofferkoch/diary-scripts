@@ -176,7 +176,10 @@ def decide(
     queue_oid: str = QUEUE_OID, repo: str = "scripts",
 ) -> tuple[int, bytes]:
     body = urllib.parse.urlencode(
-        {"repo": repo, "action": action, "queue_oid": queue_oid, "base_oid": BASE_OID, "csrf": token}
+        {
+            "repo": repo, "action": action, "queue_oid": queue_oid,
+            "base_oid": BASE_OID, "csrf": token, "confirm": action,
+        }
     )
     headers = browser_headers()
     headers["Origin"] = origin
@@ -841,3 +844,22 @@ def test_decide_accepts_an_opaque_null_origin(services: Services) -> None:
 
     assert status == 200
     assert b"Merged" in raw
+
+
+def test_decision_rejects_a_confirm_field_that_disagrees(services: Services) -> None:
+    """The submit button must name the same action that is being decided."""
+    cookies = authorized(services)
+    token = page_token(services, cookies)
+    body = urllib.parse.urlencode({
+        "repo": "scripts", "action": "merge",
+        "queue_oid": QUEUE_OID, "base_oid": BASE_OID, "csrf": token,
+        "confirm": "deny",
+    })
+    status, _ = http_request(
+        services.ui_server, "POST", "/lock/merge/decide",
+        cookies=cookies,
+        headers={**browser_headers(), "Content-Type": "application/x-www-form-urlencoded"},
+        body=body,
+    )
+
+    assert status == 403
