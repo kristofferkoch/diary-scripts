@@ -165,7 +165,7 @@ prepare_container() {
     # exist; the container starts empty, so provision just that identity and the
     # tools the three installers need.
     if ! docker exec "$name" bash -eu -c '
-        dnf -y install python3 git curl gcc golang tar make shadow-utils >/dev/null 2>&1
+        dnf -y install python3 git curl gcc golang tar make shadow-utils nftables >/dev/null 2>&1
         getent group kek >/dev/null 2>&1 || groupadd -g 1000 kek
         getent passwd kek >/dev/null 2>&1 || useradd -u 1000 -g kek -d /home/kek -m -s /bin/bash kek
         # The controller unit runs with SupplementaryGroups=diary-lock-control agent,
