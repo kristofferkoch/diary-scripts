@@ -858,12 +858,40 @@ class MergeGrantVerifyServer(socketserver.ThreadingMixIn, socketserver.UnixStrea
         super().__init__(path, MergeGrantVerifyHandler)
 
 
+def discard_stale_socket(path: str) -> None:
+    """Remove a socket left by a killed instance before binding again.
+
+    A Unix socket path is not removed when its process dies, so a restart after
+    a crash fails to bind with EADDRINUSE and the whole service crash-loops.
+    Only a socket that nobody is listening on may be removed; a live listener or
+    a non-socket at that path is an error.
+    """
+    target = Path(path)
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISSOCK(info.st_mode):
+        raise RuntimeError(f"refusing to replace a non-socket at {target}")
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        probe.settimeout(1.0)
+        probe.connect(str(target))
+    except OSError:
+        target.unlink(missing_ok=True)
+    else:
+        raise RuntimeError(f"another verifier is already listening on {target}")
+    finally:
+        probe.close()
+
+
 def start_verify_server(
     path: str, store: TransactionStore, user: str,
 ) -> MergeGrantVerifyServer:
     directory = Path(path).parent
     if not directory.exists():
         directory.mkdir(parents=True, mode=0o750)
+    discard_stale_socket(path)
     account = pwd.getpwnam(user)
     server = MergeGrantVerifyServer(path, store, {account.pw_uid})
     os.chmod(path, 0o660)
