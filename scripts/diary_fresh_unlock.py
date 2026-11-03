@@ -301,6 +301,14 @@ class TransactionStore:
             return None
         return {"consumed_at": row[6]}
 
+    def discard(self, transaction_id: str, secret: str, owner: str) -> None:
+        """Drop a reservation the owner will never be asked to present."""
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM transactions WHERE id = ? AND secret_hash = ? AND owner = ?",
+                (transaction_id, _digest(secret), owner),
+            )
+
     def authenticate(self, transaction_id: str, secret: str, owner: str, session_hash: bytes) -> None:
         self._transition(transaction_id, secret, owner, "pending", "fresh", "authenticated_at", session_hash)
 
@@ -661,7 +669,13 @@ class FreshUnlockHandler(BaseHTTPRequestHandler):
         transaction_id, secret = self.server.transactions.create(
             self.server.config.owner_username, self.server.config.transaction_ttl,
         )
-        self.server.authelia.logout(self.headers.get("Cookie"))
+        try:
+            self.server.authelia.logout(self.headers.get("Cookie"))
+        except Exception:
+            self.server.transactions.discard(
+                transaction_id, secret, self.server.config.owner_username,
+            )
+            raise
         return_url = f"{self.server.config.public_origin}/lock/unlock/return"
         location = f"{self.server.config.public_origin}/authelia/?{urllib.parse.urlencode({'rd': return_url})}"
         self.send_response(303)
@@ -738,7 +752,14 @@ class FreshUnlockHandler(BaseHTTPRequestHandler):
             self.server.config.owner_username, self.server.config.transaction_ttl,
             purpose="merge", action=action, queue_oid=queue_oid, base_oid=base_oid, repo=repo,
         )
-        self.server.authelia.logout(self.headers.get("Cookie"))
+        try:
+            self.server.authelia.logout(self.headers.get("Cookie"))
+        except Exception:
+            # The session survives a failed logout, so the reservation must not.
+            self.server.transactions.discard(
+                transaction_id, secret, self.server.config.owner_username,
+            )
+            raise
         return_url = f"{self.server.config.public_origin}/lock/merge/return"
         location = f"{self.server.config.public_origin}/authelia/?{urllib.parse.urlencode({'rd': return_url})}"
         self.send_response(303)
