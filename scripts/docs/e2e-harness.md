@@ -165,9 +165,9 @@ Today's bugs and the tests that keep them fixed:
 
 1. **L3**: real Caddy and Authelia, including a virtual-authenticator WebAuthn
    ceremony and the forward-auth redirect seams.
-2. **L4**: a root/vm rehearsal of the installers — system Python, installed
-   helper layout, socket peer authorization, SELinux labels, deployment order,
-   and the installer's functional preflight.
+2. **L4**: the VM rehearsal runs the installers in order with a real kernel and
+   SELinux enforcing, but socket peer authorization, the host's exact package
+   set, and the live edge stay outside it (see the layer-4 gaps).
 
 ## Layer 3 — the real edge
 
@@ -233,11 +233,12 @@ the client comparison against a real installation.
 ## Layer 4 — the installer rehearsal
 
 Layers 1-3 run the code against scratch state. They cannot see an installed
-layout, the system Python, systemd ordering, or a preflight that passes while the
-component it checks is broken — which is how the helper-list crash and the
-`repository`-field deployment both reached production. Layer 4 runs the real
-installers, in their documented order, inside a systemd-capable container,
-against the approved checkouts.
+layout, the system Python, systemd ordering, SELinux labels, or a preflight that
+passes while the component it checks is broken — which is how the helper-list
+crash and the `repository`-field deployment both reached production. Layer 4 runs
+the real installers, in their documented order, **inside a Fedora guest**: real
+systemd, SELinux enforcing, a real kernel and the real package set, none of which
+a container reproduces.
 
 ```bash
 scripts/e2e/installer_rehearsal.sh \
@@ -245,29 +246,54 @@ scripts/e2e/installer_rehearsal.sh \
     --approved-scripts /home/kek/diary-scripts-approved
 ```
 
-It requires Docker access (the agent session does not have it) and network access,
-because the fresh-authorization installer downloads and builds pinned Authelia.
-The image is pulled once; expected runtime is **15-25 minutes**, most of it the
-Authelia build.
+It needs qemu on the host (`qemu-system-aarch64`, `qemu-img`, `cloud-utils`,
+`edk2-aarch64`) and network access, because the fresh-authorization installer
+downloads and builds pinned Authelia. Run it as the owner account: it reads the
+approved checkouts' private `.git` metadata.
+
+### Substrate
+
+`scripts/e2e/vm.sh` boots a Fedora Cloud guest and drives it over ssh on a
+loopback port. The approved trees are mounted **read-only as 9p shares** at the
+exact paths the installers hardcode, so nothing is copied into the guest and
+nothing is written back to the checkouts.
+
+- **Base image, built once.** The Fedora Cloud Base qcow2 (checksum-verified
+  against the published `CHECKSUM` file) is booted, provisioned with the toolchain
+  the installers need, powered off, and converted into
+  `$XDG_CACHE_HOME/diary-e2e/prepared-<release>.qcow2`. Every run after that is a
+  throwaway qcow2 overlay of that image: created in milliseconds, no package
+  installation per run.
+- **Acceleration.** `--accel auto` (the default) uses KVM when `/dev/kvm` is
+  writable and TCG otherwise. On arm64 KVM in the guest needs the outer
+  hypervisor to put this host at EL2; without that there is no `/dev/kvm` and the
+  run is TCG-only. The guest, the installers and the assertions are identical —
+  only the runtime changes. Each run records `SUBSTRATE accel=…` in the summary
+  so a slow TCG run is never mistaken for a hang.
+- **Interface.** The rehearsal keeps `--approved-diary`, `--approved-scripts` and
+  `--keep`, and adds `--accel` and `--cache-dir`.
 
 What it does:
 
-1. Refuses to start unless both checkouts are clean Git trees, and refuses a
-   non-scratch scratch directory.
-2. Starts a privileged, systemd-capable container with the two approved trees
-   bind-mounted read-only at the exact paths the installers hardcode, provisions
-   `kek` (uid 1000) and the toolchain, and waits for systemd to report ready.
-3. Runs, in order: `systemd/install-audit-root`,
+1. Refuses to start unless both checkouts are clean Git trees and their `.git` is
+   readable by the invoking account.
+2. Ensures the prepared base image exists, then boots a fresh overlay and waits
+   for systemd to report `running` or `degraded`.
+3. Mounts the approved trees read-only and asserts the substrate properties the
+   container could not provide: SELinux `Enforcing`, a virtio block device (a real
+   kernel), and a working nftables.
+4. Runs, in order: `systemd/install-audit-root`,
    `systemd/install-controller-root`, `authelia/install`,
    `systemd/install-owner-ui-root` — from the approved tree, with each installer
    bounded by a timeout and its output kept in the scratch directory. The
    controller step is required because the console installer restarts and checks
    `diary-locked`, which the controller installer owns.
-4. Asserts the audit daemon, controller and console are active; `/lock/health`
+5. Asserts the audit daemon, controller and console are active; `/lock/health`
    answers 200; the unlock route answers 404; the UI enablement file and the
-   enforcement arm file are absent; `diary-audit preflight` passes; and
-   `agent-merge-queue doctor` reports the installed client matches approved.
-5. **Negative case**: builds a fixture from the approved scripts with only the
+   enforcement arm file are absent; `diary-audit preflight` passes;
+   `agent-merge-queue doctor` reports the installed client matches approved; and
+   the boot has **no SELinux `avc: denied`** entries.
+6. **Negative case**: builds a fixture from the approved scripts with only the
    `repository` journal mapping removed — the exact production defect, with the
    validator and the preflight subcommand intact — installs that audit daemon and
    the controller, then asserts that `install-owner-ui-root` refuses with "does
@@ -275,21 +301,25 @@ What it does:
    is the assertion a grep-based preflight cannot make.
 
 Every check prints `PASS` or `FAIL`; the exit status is non-zero if any installer
-refused or any assertion failed. `--keep` leaves the containers and scratch
-directory for inspection.
+refused or any assertion failed. `--keep` leaves the guest disks, console logs
+and scratch directory for inspection.
 
 ### Honest gaps
 
-- **SELinux is disabled in the container** (`label=disable`): labels, file
-  contexts, and the Caddy socket transition are not rehearsed.
-- **The distribution is Fedora, not the host's RHEL-family image**, so package
-  versions and the system Python differ slightly (3.11+ is asserted).
-- **Socket peer authorization** is exercised only as root inside the container;
-  the host's UID mapping and group policy are not.
+- **The guest is the Fedora Cloud image of the same release, not this host's
+  install.** Package versions match the Fedora 44 line and the system Python is
+  asserted at 3.11+, but the host's extra packages (and any RHEL-family
+  difference) are not present.
+- **SELinux is enforced, but with the guest's own policy.** Labels, file contexts
+  and AVC denials are real; whether the host's policy build matches is not proven.
+- **Socket peer authorization** is exercised only as root inside the guest; the
+  host's UID mapping and group policy are not.
 - **No host services are touched**: this is not a reboot, lock-transition, or
   tailnet test, and Caddy/Authelia's live routing stays with L3.
 - The fresh-authorization service's own session proof against Authelia is L3's
   stand-in, not the installed unit.
+- **TCG says nothing about performance.** Without `/dev/kvm` the guest runs in
+  software emulation, so the runtime is not a production measurement.
 
 ### Manual checklist after a real deployment
 

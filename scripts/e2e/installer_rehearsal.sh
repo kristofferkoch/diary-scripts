@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
-# Layer 4 of the pre-production harness: rehearse the real installers.
+# Layer 4 of the pre-production harness: rehearse the real installers in a VM.
 #
 # Layers 1-3 exercise the code against scratch state. They cannot see an
-# installed layout, the system Python, systemd unit ordering, or an installer
-# preflight that passes while the thing it checks is broken. This layer runs the
-# production installers, in the documented order, inside a systemd-capable
-# container, against the approved checkouts — never against an agent worktree.
+# installed layout, the system Python, systemd unit ordering, SELinux labels, or
+# an installer preflight that passes while the thing it checks is broken. This
+# layer runs the production installers, in the documented order, against the
+# approved checkouts inside a Fedora guest — never against an agent worktree and
+# never on this host.
 #
-# It is deliberately not runnable from an agent session: it needs Docker and it
-# writes to /etc, /usr/local and systemd inside the container. Run it as a user
-# in the docker group:
+# The guest is the substrate; see scripts/e2e/vm.sh. It boots with systemd,
+# SELinux enforcing and the host's package set, so labels and a real kernel are
+# exercised instead of a container's. Without /dev/kvm (no EL2 in this guest) it
+# runs under TCG: same guest, same assertions, slower.
+#
+# It needs qemu on this host and read access to the approved checkouts, so run
+# it as the owner account:
 #
 #   scripts/e2e/installer_rehearsal.sh \
 #       --approved-diary  /home/kek/diary-approved \
@@ -20,19 +25,18 @@
 # check failed or any installer refused.
 set -euo pipefail
 
-readonly CONTAINER_DIARY=/home/kek/diary-approved
-readonly CONTAINER_SCRIPTS=/home/kek/diary-scripts-approved
-readonly DEFAULT_IMAGE=registry.fedoraproject.org/fedora:41
-readonly BOOT_TIMEOUT=${L4_BOOT_TIMEOUT:-300}
-readonly INSTALL_TIMEOUT=${L4_INSTALL_TIMEOUT:-1800}
+readonly TARGET_DIARY=/home/kek/diary-approved
+readonly TARGET_SCRIPTS=/home/kek/diary-scripts-approved
+readonly INSTALL_TIMEOUT=${L4_INSTALL_TIMEOUT:-7200}
 
-IMAGE=${L4_IMAGE:-$DEFAULT_IMAGE}
+# shellcheck source=scripts/e2e/vm.sh
+source "$(dirname "$0")/vm.sh"
+
 APPROVED_DIARY=
 APPROVED_SCRIPTS=
-KEEP=0
 SCRATCH=
-HAPPY_CONTAINER=
-NEGATIVE_CONTAINER=
+HAPPY_VM=
+NEGATIVE_VM=
 declare -a RESULTS=()
 FAILED=0
 
@@ -42,14 +46,17 @@ Usage: installer_rehearsal.sh --approved-diary DIR --approved-scripts DIR [optio
 
   --approved-diary DIR     approved diary checkout (clean, with .git)
   --approved-scripts DIR   approved diary-scripts checkout (clean, with .git)
-  --image REF              container image (default: registry.fedoraproject.org/fedora:41)
-  --keep                   keep the containers and scratch directory for inspection
+  --accel MODE             auto (default), kvm, or tcg; auto uses kvm when this
+                           host exposes /dev/kvm
+  --cache-dir DIR          guest image cache (default: $XDG_CACHE_HOME/diary-e2e)
+  --keep                   keep the guest disks, console logs and scratch directory
   -h, --help               this text
 
-Requires Docker and network access (the fresh-authorization installer downloads
-and builds pinned Authelia). Expected runtime: 15-25 minutes, most of it the
-Authelia build. Nothing on the host is modified; everything happens in the
-container and a scratch directory.
+Needs qemu-system-aarch64, qemu-img, cloud-utils and network access (the
+fresh-authorization installer downloads and builds pinned Authelia). Nothing on
+this host is modified: the guest is a throwaway overlay of a cached prepared
+image, the approved checkouts are mounted read-only, and all state lives in the
+scratch directory.
 USAGE
 }
 
@@ -82,7 +89,10 @@ require_clean_checkout() {
 
     [[ -n $path ]] || die "missing $label path (see --help)"
     [[ -d $path ]] || die "$label is not a directory: $path"
-    [[ -d $path/.git ]] || die "$label is not a Git checkout with private metadata: $path"
+    # A linked worktree has .git as a file, a plain checkout as a directory.
+    [[ -d $path/.git || -f $path/.git ]] \
+        || die "$label is not a Git checkout with private metadata: $path"
+    [[ -r $path/.git ]] || die "$label metadata is not readable by $(id -un): $path"
     if [[ -n $(git -c safe.directory="$path" -C "$path" status --porcelain) ]]; then
         die "$label has uncommitted changes; a rehearsal must run against approved content: $path"
     fi
@@ -93,25 +103,28 @@ parse_args() {
         case $1 in
             --approved-diary) APPROVED_DIARY=${2:?}; shift 2 ;;
             --approved-scripts) APPROVED_SCRIPTS=${2:?}; shift 2 ;;
-            --image) IMAGE=${2:?}; shift 2 ;;
-            --keep) KEEP=1; shift ;;
+            --accel) DIARY_E2E_ACCEL=${2:?}; shift 2 ;;
+            --cache-dir) DIARY_E2E_CACHE=${2:?}; shift 2 ;;
+            --keep) VM_KEEP=1; shift ;;
             -h | --help) usage; exit 0 ;;
             *) die "unknown argument: $1 (see --help)" ;;
         esac
     done
+    export DIARY_E2E_ACCEL DIARY_E2E_CACHE VM_KEEP
 }
 
 cleanup() {
     local status=$?
 
-    if ((${KEEP:-0} == 0)); then
-        [[ -z $HAPPY_CONTAINER ]] || docker rm -f "$HAPPY_CONTAINER" >/dev/null 2>&1 || true
-        [[ -z $NEGATIVE_CONTAINER ]] || docker rm -f "$NEGATIVE_CONTAINER" >/dev/null 2>&1 || true
+    # The guests are always powered off; --keep only preserves their state.
+    [[ -z $HAPPY_VM ]] || vm_stop "$HAPPY_VM" >/dev/null 2>&1 || true
+    [[ -z $NEGATIVE_VM ]] || vm_stop "$NEGATIVE_VM" >/dev/null 2>&1 || true
+    if ((VM_KEEP == 0)); then
         if [[ -n $SCRATCH && -d $SCRATCH ]]; then
             rm -rf -- "$SCRATCH"
         fi
     else
-        log "kept containers: ${HAPPY_CONTAINER:-none} ${NEGATIVE_CONTAINER:-none}"
+        log "kept guests: ${HAPPY_VM:-none} ${NEGATIVE_VM:-none}"
         log "kept scratch: ${SCRATCH:-none}"
     fi
     exit "$status"
@@ -119,91 +132,44 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-check_docker() {
-    command -v docker >/dev/null 2>&1 \
-        || die "docker is not installed; this layer needs a systemd-capable container"
-    if ! docker info >/dev/null 2>&1; then
-        die "docker is not usable by $(id -un); run as a user in the docker group (or via sudo)"
-    fi
-    if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
-        log "pulling $IMAGE once (a few hundred MB)"
-        docker pull "$IMAGE" >/dev/null || die "could not pull $IMAGE"
-    fi
+check_substrate() {
+    command -v qemu-system-aarch64 >/dev/null 2>&1 \
+        || die "qemu-system-aarch64 is not installed; this layer needs a VM substrate"
+    vm_init
+    vm_ensure_base
 }
 
-start_container() {
+start_guest() {
     local name=$1 scripts_mount=$2 diary_mount=$3
 
-    docker run --detach --name "$name" \
-        --privileged \
-        --cgroupns=host \
-        --tmpfs /run \
-        --tmpfs /run/lock \
-        --security-opt seccomp=unconfined \
-        --security-opt label=disable \
-        --volume "$scripts_mount:$CONTAINER_SCRIPTS:ro" \
-        --volume "$diary_mount:$CONTAINER_DIARY:ro" \
-        "$IMAGE" /bin/sh -c 'dnf -q -y install systemd >/dev/null 2>&1 && exec /usr/sbin/init' \
-        >/dev/null || die "could not start container $name"
-
-    local deadline=$((SECONDS + BOOT_TIMEOUT))
-    local state=
-    while ((SECONDS < deadline)); do
-        state=$(docker exec "$name" systemctl is-system-running 2>/dev/null || true)
-        case $state in
-            running | degraded) return 0 ;;
-        esac
-        sleep 1
-    done
-    die "systemd did not become ready in $name (last state: ${state:-unknown})"
+    # shellcheck disable=SC2034  # read by vm.sh
+    VM_SHARES=()
+    vm_share scripts "$scripts_mount"
+    vm_share diary "$diary_mount"
+    vm_start "$name"
+    vm_mount_shares "$name" "diary=$TARGET_DIARY" "scripts=$TARGET_SCRIPTS"
 }
 
-prepare_container() {
-    local name=$1
+# assert_substrate NAME — the properties the container could not provide.
+assert_substrate() {
+    local name=$1 enforcing=
 
-    # The installers hardcode /home/kek/... paths and expect the owner account to
-    # exist; the container starts empty, so provision just that identity and the
-    # tools the three installers need.
-    if ! docker exec "$name" bash -eu -c '
-        dnf -y install python3 git curl gcc golang tar make shadow-utils nftables >/dev/null 2>&1
-        getent group kek >/dev/null 2>&1 || groupadd -g 1000 kek
-        getent passwd kek >/dev/null 2>&1 || useradd -u 1000 -g kek -d /home/kek -m -s /bin/bash kek
-        # The controller unit runs with SupplementaryGroups=diary-lock-control agent,
-        # so the agent group and identity must exist or the unit cannot start.
-        # The network policy tool execs /usr/bin/nft; Fedora installs it under
-        # /usr/sbin, and the host has the /usr/bin path, so give the container
-        # the same layout rather than changing the product.
-        [[ -e /usr/bin/nft ]] || ln -s /usr/sbin/nft /usr/bin/nft
-        # authelia/install builds with GOSUMDB=off, so a Go older than the pinned
-        # source requires cannot download a toolchain: it fails verification.
-        # Install the same Go line the host uses.
-        GO_VERSION=${L4_GO_VERSION:-1.26.10}
-        case $(uname -m) in
-            aarch64 | arm64) GO_ARCH=arm64 ;;
-            x86_64 | amd64) GO_ARCH=amd64 ;;
-            *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
-        esac
-        if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "go${GO_VERSION} "; then
-            GO_SCHEME=https
-            GO_HOST=go.dev
-            curl -fsSL "${GO_SCHEME}://${GO_HOST}/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz" \
-                -o /tmp/go.tgz
-            rm -rf /usr/local/go
-            tar -C /usr/local -xzf /tmp/go.tgz
-            rm -f /tmp/go.tgz
-            ln -sf /usr/local/go/bin/go /usr/bin/go
-        fi
-        # The first nft call in a fresh container loads nf_tables and can fail;
-        # warm it up so the installer policy start is not the first user.
-        nft list tables >/dev/null 2>&1 || true
-        getent group agent >/dev/null 2>&1 || groupadd --system agent
-        getent passwd agent >/dev/null 2>&1 || useradd --system -u 981 -g agent -d /home/agent -m -s /bin/bash agent
-        python3 -c "import sys; assert sys.version_info >= (3, 11), sys.version"
-    ' >"${SCRATCH}/prepare-${name}.log" 2>&1; then
-        tail -20 "${SCRATCH}/prepare-${name}.log" >&2 || true
-        die "could not provision $name (see ${SCRATCH}/prepare-${name}.log)"
+    enforcing=$(vm_ssh "$name" getenforce 2>/dev/null || true)
+    if [[ $enforcing == Enforcing ]]; then
+        pass "guest SELinux enforcing"
+    else
+        fail_check "guest SELinux is not enforcing (found: ${enforcing:-none})"
     fi
-    pass "container $name provisioned (python3, git, curl, gcc, golang, kek uid 1000)"
+    if vm_ssh "$name" test -b /dev/vda >/dev/null 2>&1; then
+        pass "guest runs a real kernel over virtio disks"
+    else
+        fail_check "guest does not expose a virtio block device"
+    fi
+    if vm_ssh "$name" nft list tables >/dev/null 2>&1; then
+        pass "guest nftables usable"
+    else
+        fail_check "guest nftables is not usable"
+    fi
 }
 
 run_installer() {
@@ -213,7 +179,9 @@ run_installer() {
 
     log "running ${label} ..."
     local status=0
-    timeout "$INSTALL_TIMEOUT" docker exec "$name" "$@" >"$logfile" 2>&1 || status=$?
+    # The timeout runs in the guest: `timeout` cannot wrap a shell function, and
+    # a guest-side timeout also survives losing the ssh connection.
+    vm_ssh "$name" timeout "$INSTALL_TIMEOUT" "$@" >"$logfile" 2>&1 || status=$?
     if ((status == 0)); then
         pass "installer ${label}"
     elif ((status == 124)); then
@@ -225,10 +193,10 @@ run_installer() {
     fi
 }
 
-expect_in_container() {
+expect_in_guest() {
     local name=$1 label=$2
     shift 2
-    if docker exec "$name" "$@" >/dev/null 2>&1; then
+    if vm_ssh "$name" "$@" >/dev/null 2>&1; then
         pass "$label"
     else
         fail_check "$label"
@@ -238,7 +206,7 @@ expect_in_container() {
 expect_status() {
     local name=$1 label=$2 expected=$3 url=$4
     local actual
-    actual=$(docker exec "$name" curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "$url" 2>/dev/null || true)
+    actual=$(vm_ssh "$name" curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "$url" 2>/dev/null || true)
     if [[ $actual == "$expected" ]]; then
         pass "$label (HTTP $actual)"
     else
@@ -247,45 +215,51 @@ expect_status() {
 }
 
 positive_case() {
-    HAPPY_CONTAINER="diary-l4-happy-$$"
+    HAPPY_VM="diary-l4-happy-$$"
     log "== happy path: the three installers, in the documented order"
-    start_container "$HAPPY_CONTAINER" "$APPROVED_SCRIPTS" "$APPROVED_DIARY"
-    pass "systemd booted in $HAPPY_CONTAINER"
-    prepare_container "$HAPPY_CONTAINER"
+    start_guest "$HAPPY_VM" "$APPROVED_SCRIPTS" "$APPROVED_DIARY"
+    pass "guest booted with the approved checkouts mounted read-only"
+    assert_substrate "$HAPPY_VM"
+    # Only denials from the rehearsal window count: the cloud image's own boot
+    # is not what this layer is judging.
+    local avc_since
+    avc_since=$(vm_ssh "$HAPPY_VM" date --iso-8601=seconds)
 
-    run_installer "$HAPPY_CONTAINER" audit \
-        "$CONTAINER_DIARY/systemd/install-audit-root"
+    run_installer "$HAPPY_VM" audit \
+        "$TARGET_DIARY/systemd/install-audit-root"
     # The console installer restarts and checks diary-locked, which belongs to
-    # the controller installer; a fresh container needs it before the console.
-    run_installer "$HAPPY_CONTAINER" controller \
-        "$CONTAINER_DIARY/systemd/install-controller-root"
-    run_installer "$HAPPY_CONTAINER" fresh \
-        "$CONTAINER_DIARY/authelia/install"
+    # the controller installer; a fresh guest needs it before the console.
+    run_installer "$HAPPY_VM" controller \
+        "$TARGET_DIARY/systemd/install-controller-root"
+    run_installer "$HAPPY_VM" fresh \
+        "$TARGET_DIARY/authelia/install"
     # dsh/agent-uid/install normally provides the root-owned approval client;
     # the rehearsal runs only the three installers, so install it the same way.
-    docker exec "$HAPPY_CONTAINER" install -o root -g root -m 0755 \
-        "$CONTAINER_SCRIPTS/scripts/agent_merge_queue.py" /usr/local/libexec/agent-merge-queue \
-        >>"${SCRATCH}/prepare-${HAPPY_CONTAINER}.log" 2>&1 \
-        || die "could not install the approval client in $HAPPY_CONTAINER"
-    run_installer "$HAPPY_CONTAINER" console \
-        "$CONTAINER_DIARY/systemd/install-owner-ui-root"
+    vm_ssh "$HAPPY_VM" install -o root -g root -m 0755 \
+        "$TARGET_SCRIPTS/scripts/agent_merge_queue.py" /usr/local/libexec/agent-merge-queue \
+        >>"${SCRATCH}/approval-client.log" 2>&1 \
+        || die "could not install the approval client in $HAPPY_VM"
+    run_installer "$HAPPY_VM" console \
+        "$TARGET_DIARY/systemd/install-owner-ui-root"
 
-    expect_in_container "$HAPPY_CONTAINER" "audit daemon active" systemctl is-active diary-auditd
-    expect_in_container "$HAPPY_CONTAINER" "controller active and locked" \
+    expect_in_guest "$HAPPY_VM" "audit daemon active" systemctl is-active diary-auditd
+    expect_in_guest "$HAPPY_VM" "controller active and locked" \
         systemctl is-active diary-lockd diary-locked
-    expect_in_container "$HAPPY_CONTAINER" "console host active" systemctl is-active diary-lock-ui
-    expect_status "$HAPPY_CONTAINER" "console health" 200 http://localhost:9093/lock/health
-    expect_status "$HAPPY_CONTAINER" "no unlock route on the console" 404 \
+    expect_in_guest "$HAPPY_VM" "console host active" systemctl is-active diary-lock-ui
+    expect_status "$HAPPY_VM" "console health" 200 http://localhost:9093/lock/health
+    expect_status "$HAPPY_VM" "no unlock route on the console" 404 \
         http://localhost:9093/lock/api/lock
-    expect_in_container "$HAPPY_CONTAINER" "UI enablement file absent" \
+    expect_in_guest "$HAPPY_VM" "UI enablement file absent" \
         test '!' -e /etc/diary/lock-ui-actions-enabled
-    expect_in_container "$HAPPY_CONTAINER" "enforcement arm file absent" \
+    expect_in_guest "$HAPPY_VM" "enforcement arm file absent" \
         test '!' -e /etc/diary/network-policy-enabled
-    expect_in_container "$HAPPY_CONTAINER" "audit preflight passes" \
+    expect_in_guest "$HAPPY_VM" "audit preflight passes" \
         diary-audit preflight
-    expect_in_container "$HAPPY_CONTAINER" "installed client matches approved" \
+    expect_in_guest "$HAPPY_VM" "installed client matches approved" \
         /usr/local/libexec/agent-merge-queue doctor --approved \
-        "$CONTAINER_SCRIPTS/scripts/agent_merge_queue.py"
+        "$TARGET_SCRIPTS/scripts/agent_merge_queue.py"
+    expect_in_guest "$HAPPY_VM" "no SELinux AVC denials during the rehearsal" \
+        bash -c "! journalctl -b --no-pager --quiet --since '$avc_since' -g 'avc:  *denied'"
 }
 
 write_prefix_scripts() {
@@ -308,22 +282,21 @@ write_prefix_scripts() {
 negative_case() {
     local prefix="$SCRATCH/pre-fix-scripts"
 
-    NEGATIVE_CONTAINER="diary-l4-negative-$$"
+    NEGATIVE_VM="diary-l4-negative-$$"
     log "== negative case: a daemon that accepts the field but cannot journal it"
     write_prefix_scripts "$prefix"
     pass "pre-fix daemon fixture built (validator intact, journal mapping removed)"
 
-    start_container "$NEGATIVE_CONTAINER" "$prefix" "$APPROVED_DIARY"
-    pass "systemd booted in $NEGATIVE_CONTAINER"
-    prepare_container "$NEGATIVE_CONTAINER"
+    start_guest "$NEGATIVE_VM" "$prefix" "$APPROVED_DIARY"
+    pass "guest booted with the pre-fix tree mounted read-only"
 
-    run_installer "$NEGATIVE_CONTAINER" pre-fix-audit \
-        "$CONTAINER_DIARY/systemd/install-audit-root"
-    run_installer "$NEGATIVE_CONTAINER" pre-fix-controller \
-        "$CONTAINER_DIARY/systemd/install-controller-root"
+    run_installer "$NEGATIVE_VM" pre-fix-audit \
+        "$TARGET_DIARY/systemd/install-audit-root"
+    run_installer "$NEGATIVE_VM" pre-fix-controller \
+        "$TARGET_DIARY/systemd/install-controller-root"
 
     local logfile="${SCRATCH}/console-refused.log"
-    if docker exec "$NEGATIVE_CONTAINER" "$CONTAINER_DIARY/systemd/install-owner-ui-root" \
+    if vm_ssh "$NEGATIVE_VM" "$TARGET_DIARY/systemd/install-owner-ui-root" \
         >"$logfile" 2>&1; then
         fail_check "console installer refuses a daemon that drops the repository field (it installed anyway)"
     elif grep -q 'does not journal the repository field' "$logfile"; then
@@ -333,7 +306,7 @@ negative_case() {
         fail_check "console installer refused, but not because of the audit preflight (see ${logfile})"
     fi
 
-    if docker exec "$NEGATIVE_CONTAINER" systemctl is-enabled diary-lock-ui >/dev/null 2>&1; then
+    if vm_ssh "$NEGATIVE_VM" systemctl is-enabled diary-lock-ui >/dev/null 2>&1; then
         fail_check "console unit must not be enabled after a refused install"
     else
         pass "console unit not enabled after the refused install"
@@ -360,10 +333,11 @@ main() {
     parse_args "$@"
     require_clean_checkout "$APPROVED_SCRIPTS" "approved scripts checkout"
     require_clean_checkout "$APPROVED_DIARY" "approved diary checkout"
-    check_docker
     SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/diary-l4.XXXXXX")
     log "scratch: $SCRATCH"
-    log "image:   $IMAGE"
+    check_substrate
+    # shellcheck disable=SC2154  # set by vm_init in vm.sh
+    record "SUBSTRATE accel=${vm_accel} cpus=${VM_CPUS} mem=${VM_MEMORY}MiB disk=${VM_DISK_SIZE} release=${VM_RELEASE}"
     positive_case
     negative_case
     summarise
