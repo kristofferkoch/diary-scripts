@@ -259,10 +259,34 @@ class MergeConsole:
         return DecisionResult(action, reviewed_oid, reviewed_base, "merged")
 
 
+DIFF_LINE_CLASSES = {
+    "+++ ": "meta", "--- ": "meta", "@@": "hunk", "+": "add", "-": "del",
+}
+
+
+def render_diff(text: str) -> str:
+    """Colourise a unified diff line by line, escaping every byte of content.
+
+    No third-party highlighter is involved: the console host runs on the system
+    Python, so only the diff structure is rendered (file headers, hunks,
+    additions, removals) and the text stays escaped.
+    """
+    lines = []
+    for line in text.splitlines():
+        kind = "ctx"
+        for prefix, candidate in DIFF_LINE_CLASSES.items():
+            if line.startswith(prefix):
+                kind = candidate
+                break
+        lines.append(f'<span class="dline {kind}">{html.escape(line)}</span>')
+    return "".join(lines)
+
+
 def render_console(
     snapshot: QueueSnapshot | None,
     action_path: str = "/lock/merge/decide",
     csrf_token: str | None = None,
+    notice: str | None = None,
 ) -> str:
     """Render a fixed, escaped HTML fragment for the owner console host.
 
@@ -281,14 +305,18 @@ def render_console(
             for item in snapshot.commits
         )
         disabled = " disabled" if not snapshot.commits and not snapshot.diff else ""
+        note = "" if not notice else (
+            f'<p class="notice" role="status">{html.escape(notice)}</p>'
+        )
         content = f"""
 <section id="merge-review">
+  {note}
   <h2>Queued commits</h2>
   <p>Reviewed queue OID: <code id="queue-oid">{html.escape(snapshot.queue_oid)}</code></p>
   <p>Approved master OID: <code id="base-oid">{html.escape(snapshot.base_oid)}</code></p>
   <ul>{commits}</ul>
   <h2>Real diff against approved master</h2>
-  <pre class="diff">{html.escape(snapshot.diff)}</pre>
+  <pre class="diff">{render_diff(snapshot.diff)}</pre>
   <h2>Advisory local-model report ({html.escape(snapshot.advisory.status)})</h2>
   <pre class="advisory">{html.escape(snapshot.advisory.text)}</pre>
   <p>The report is advisory only. Missing or stale reports do not block owner review or approval.</p>
@@ -314,7 +342,7 @@ def render_console(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'">
 <title>Owner merge review</title>
-<style>body{{font-family:sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;padding:1rem;background:#f4f4f4}}code{{overflow-wrap:anywhere}}form{{display:inline-block;margin-right:1rem}}</style>
+<style>body{{font-family:system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#1b1b1b}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;padding:0;background:#f6f8fa;border:1px solid #d8dee4;border-radius:6px;overflow:hidden}}pre.advisory{{padding:1rem}}code{{overflow-wrap:anywhere;font-size:0.95em}}form{{display:inline-block;margin-right:1rem}}button{{padding:0.5rem 0.9rem;border-radius:4px;border:1px solid #8b949e;background:#f6f8fa;cursor:pointer}}button[value=merge]{{border-color:#1a7f37;background:#e6ffed}}button[value=deny]{{border-color:#cf222e;background:#ffeef0}}button:disabled{{opacity:0.5;cursor:not-allowed}}.notice{{padding:0.6rem 0.8rem;border-left:4px solid #bf8700;background:#fff8c5;border-radius:4px}}.diff{{padding:0.5rem 0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.875rem;line-height:1.45}}.dline{{display:block;padding:0 0.8rem;white-space:pre-wrap}}.dline.add{{background:#e6ffed}}.dline.del{{background:#ffeef0}}.dline.hunk{{background:#eef4ff;color:#0a3069}}.dline.meta{{color:#57606a}}</style>
 </head>
 <body><h1>diary-scripts owner merge review</h1>{content}</body>
 </html>

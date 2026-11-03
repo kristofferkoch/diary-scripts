@@ -239,17 +239,21 @@ def test_decision_requires_same_origin_explicit_form_and_current_token(services:
     status, _ = decide(services, cookies, token, origin="https://evil.example")
     assert status == 403
 
-    status, _ = decide(services, cookies, "not-the-token")
-    assert status == 403
+    # A stale token is a stale form, not an attack: the console re-renders the
+    # same reviewed pair with a fresh token and executes nothing.
+    status, page = decide(services, cookies, "not-the-token")
+    assert status == 200
+    assert b"expired before it was submitted" in page
 
     # A token issued to one owner session must not authorize another.
     other = dict(cookies)
     services.auth_state.add_fresh("other")
     other[SESSION_COOKIE] = "other"
-    status, _ = decide(services, other, token)
-    assert status == 403
+    status, page = decide(services, other, token)
+    assert status == 200
+    assert b"expired before it was submitted" in page
 
-    assert len(services.executor.requests) == calls
+    assert all(request["cmd"] == "snapshot" for request in services.executor.requests[calls:])
 
 
 def test_decision_requires_a_fresh_merge_transaction(services: Services) -> None:
@@ -627,3 +631,21 @@ def test_first_factor_session_is_refused_as_unauthorized(services: Services) -> 
 
     assert status == 403
     assert b"Authorization required" in body
+
+
+def test_stale_review_form_re_renders_instead_of_dead_ending(services: Services) -> None:
+    """A form rendered before a ceremony must not fail as "Refused"."""
+    services.auth_state.add("owner")
+    body = (
+        "action=merge" f"&queue_oid={QUEUE_OID}&base_oid={BASE_OID}&csrf=stale-token"
+    )
+    status, page = http_request(
+        services.ui_server, "POST", "/lock/merge/decide",
+        cookies={SESSION_COOKIE: "owner"},
+        headers={**browser_headers(), "Content-Type": "application/x-www-form-urlencoded"},
+        body=body,
+    )
+
+    assert status == 200
+    assert b"expired before it was submitted" in page
+    assert b'name="csrf" value="' in page

@@ -270,10 +270,14 @@ own page. Nothing is merged until you confirm here again.</p>
 """
 
 
-def render_page(snapshot: console.QueueSnapshot | None, csrf_token: str) -> str:
+def render_page(
+    snapshot: console.QueueSnapshot | None,
+    csrf_token: str,
+    notice: str | None = None,
+) -> str:
     if snapshot is None:
         return render_result("empty")
-    return console.render_console(snapshot, DECISION_PATH, csrf_token)
+    return console.render_console(snapshot, DECISION_PATH, csrf_token, notice)
 
 
 class ConsoleServer(ThreadingHTTPServer):
@@ -372,7 +376,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         )
         return {key: values[0] for key, values in parsed.items() if len(values) == 1}
 
-    def _page(self) -> None:
+    def _page(self, notice: str | None = None) -> None:
         cookie = self.headers.get("Cookie")
         self.server.authelia.verify_owner(cookie, "GET", self.path)
         reply = self.server.executor.request({"cmd": "snapshot"})
@@ -380,7 +384,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             raise DecisionUnavailable("the merge review is unavailable")
         snapshot = _snapshot_from_json(reply.snapshot)
         token = self.server.csrf.issue(session_digest(cookie, self.server.config.session_cookie))
-        self._html(200, render_page(snapshot, token))
+        self._html(200, render_page(snapshot, token, notice))
 
     def _decide(self) -> None:
         cookie = self.headers.get("Cookie")
@@ -395,7 +399,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             raise AuthorizationError("decision requires full reviewed OIDs")
         digest = session_digest(cookie, self.server.config.session_cookie)
         if not self.server.csrf.consume(fields["csrf"], digest):
-            raise AuthorizationError("a current review form is required")
+            # A ceremony signs the Authelia session out and back in, so a form
+            # rendered before it carries a token bound to the old session. That
+            # is a stale form, not an attack: re-render the same reviewed pair
+            # with a fresh token instead of dead-ending on "Refused".
+            self.log_message("refused decision: stale or missing review form")
+            self._page("That review form expired before it was submitted. Check the same pair and confirm again.")
+            return
         try:
             transaction = _transaction_id(cookie)
             self.server.fresh.consume(cookie)
@@ -428,6 +438,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             else:
                 self._json(404, {"error": "not found"})
         except ConsoleUIError as exc:
+            self.log_message("refused %s %s: %s (%s)", self.command, self.path, exc.code, exc)
             self._html(exc.status, render_result(exc.code))
         except owner_ui.AuthorizationError:
             # The owner-UI client raises its own authorization error when the

@@ -362,3 +362,18 @@ def test_advisory_report_never_controls_or_blocks_owner_approval(
 
     assert ui.decide("merge", oid, base).outcome == "merged"
     assert published == [(oid, base)]
+
+
+def test_render_diff_marks_lines_and_escapes_content() -> None:
+    """Diff lines are classified and every byte of content stays escaped."""
+    markup = console.render_diff(
+        "+++ b/tool.py\n@@ -1 +1 @@\n-old <b>\n+new <script>\n context\n"
+    )
+
+    assert 'class="dline meta"' in markup
+    assert 'class="dline hunk"' in markup
+    assert 'class="dline del"' in markup
+    assert 'class="dline add"' in markup
+    assert "&lt;b&gt;" in markup
+    assert "&lt;script&gt;" in markup
+    assert "<script>" not in markup
