@@ -819,10 +819,13 @@ def queue_main(argv: list[str] | None = None) -> int:
     if args.command == "request":
         return agent_request(args.repo, args.branch)
     if args.command == "doctor":
-        approved = (
-            Path(args.approved) if args.approved
-            else default_paths().approved / "scripts" / "agent_merge_queue.py"
-        )
+        if not args.approved:
+            # Do not fall back to default_paths() here: the installed client run
+            # by the installer has no AGENT_MERGE_* environment, and that fallback
+            # imports the mail stack, which the system Python does not have.
+            print("agent-merge: doctor requires --approved <checkout>", file=sys.stderr)
+            return 2
+        approved = Path(args.approved)
         ok, message = installed_client_status(Path(args.installed), approved)
         print(("ok: " if ok else "agent-merge: ") + message, file=sys.stdout if ok else sys.stderr)
         return 0 if ok else 1

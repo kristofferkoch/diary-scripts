@@ -925,3 +925,9 @@ def test_doctor_reports_a_missing_client(tmp_path: Path) -> None:
 
     assert not ok
     assert "missing" in message
+
+
+def test_doctor_requires_an_explicit_approved_checkout(capsys: pytest.CaptureFixture[str]) -> None:
+    """The installed client has no AGENT_MERGE_* env; never fall back to it."""
+    assert amq.queue_main(["doctor"]) == 2
+    assert "requires --approved" in capsys.readouterr().err
