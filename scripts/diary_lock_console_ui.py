@@ -411,11 +411,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     def _require_form_action(self) -> dict[str, str]:
         origin = self.headers.get("Origin")
         site = self.headers.get("Sec-Fetch-Site", "same-origin")
-        # Browsers do not all send Origin on a same-origin form post (Safari
-        # omits it), so the assertion is: if Origin is present it must match,
-        # and the browser must always claim a same-origin navigation. The
-        # single-use session-bound token below is what actually authorizes.
-        if origin is not None and origin != self.server.config.public_origin:
+        # Browsers are inconsistent here: some omit Origin on a same-origin
+        # form post, and Firefox sends the opaque value "null". Neither says
+        # anything about where the request came from, so only a concrete
+        # mismatching origin is refused; the browser's own Sec-Fetch-Site claim
+        # plus the single-use session-bound token below do the real work.
+        if origin not in (None, "null") and origin != self.server.config.public_origin:
             raise AuthorizationError("same-origin browser request required")
         if site not in {"same-origin", "none"}:
             raise AuthorizationError("cross-site request rejected")

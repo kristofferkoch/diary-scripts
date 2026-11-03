@@ -818,3 +818,26 @@ def test_decide_refuses_cross_site_fetch_metadata(services: Services) -> None:
     )
 
     assert status == 403
+
+
+def test_decide_accepts_an_opaque_null_origin(services: Services) -> None:
+    """Firefox sends Origin: null for same-origin form posts; accept it."""
+    cookies = authorized(services)
+    token = page_token(services, cookies)
+    body = urllib.parse.urlencode({
+        "repo": "scripts", "action": "merge",
+        "queue_oid": QUEUE_OID, "base_oid": BASE_OID, "csrf": token,
+    })
+    status, raw = http_request(
+        services.ui_server, "POST", "/lock/merge/decide",
+        cookies=cookies,
+        headers={
+            "Origin": "null",
+            "Sec-Fetch-Site": "same-origin",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body=body,
+    )
+
+    assert status == 200
+    assert b"Merged" in raw
