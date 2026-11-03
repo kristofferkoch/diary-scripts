@@ -30,6 +30,9 @@ for (const step of job.steps) {
   if (step.setCookie) {
     await context.addCookies([step.setCookie]);
   }
+  if (step.wait) {
+    await new Promise((resolve) => setTimeout(resolve, step.wait));
+  }
   if (step.click) {
     await Promise.all([
       page.waitForNavigation({ waitUntil: "load", timeout }).catch(() => null),

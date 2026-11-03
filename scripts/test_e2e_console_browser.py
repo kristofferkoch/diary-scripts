@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 import subprocess
 import sys
 from pathlib import Path
@@ -181,6 +183,7 @@ def test_two_click_ceremony_publishes_once(stack: browser.BrowserStack) -> None:
         stack, session,
         [
             {"goto": stack.origin + "/lock/merge/"},
+            {"wait": 2500},
             {"click": 'button[value="merge"]'},
             {"click": 'form button[type="submit"]'},
             {"click": 'button[value="merge"]'},
@@ -254,3 +257,32 @@ def test_deny_publishes_nothing_and_audits(stack: browser.BrowserStack) -> None:
     event = wait_reason(stack, "owner_denied")
     assert event["DIARY_AUDIT_REPOSITORY"] == "scripts"
     assert event["DIARY_AUDIT_EVENT_ID"] == queued
+
+
+def test_stale_pair_costs_a_re_review_not_a_new_ceremony(
+    stack: browser.BrowserStack,
+) -> None:
+    """D3: the grant must not be spent when the queue moved after the review."""
+    queued = harness.enqueue_change(stack.harness_stack.scripts)
+    base = head(stack.harness_stack.scripts)
+    session = stack.session()
+    transaction = stack.preauthorize("scripts", "merge", queued, base)
+    # The GET renders the reviewed pair; the decision POST changes the queue
+    # first, so the form and the live queue disagree exactly as they would if
+    # the owner left the page open.
+    stack.proxy.before_decide = lambda: harness.enqueue_change(
+        stack.harness_stack.scripts, "later.txt", "later\n",
+    )
+
+    result = run_browser(
+        stack, session,
+        [
+            {"goto": stack.origin + "/lock/merge/"},
+            {"click": 'button[value="merge"]'},
+        ],
+        transaction=transaction,
+    )
+
+    assert "changed after you reviewed" in result["text"]
+    assert stack.grants.consumed == [], "the one-time grant was spent on a refused decision"
+    assert head(stack.harness_stack.scripts) == base

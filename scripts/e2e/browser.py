@@ -25,7 +25,7 @@ import uuid
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from scripts import diary_lock_console_ui as ui
 from scripts import diary_merge_console_service as executor
@@ -266,6 +266,10 @@ class FrontProxy(ThreadingHTTPServer):
         self.console_port = console_port
         self.fresh_port = fresh_port
         self.origin_mode = "passthrough"  # or "null" / "evil"
+        #: Optional callback run once, when a decision POST reaches the front but
+        #: before it is forwarded: lets a test change the queue between the page
+        #: render and the decision deterministically.
+        self.before_decide: Callable[[], None] | None = None
         super().__init__(("127.0.0.1", 0), FrontHandler)
 
 
@@ -285,6 +289,13 @@ class FrontHandler(BaseHTTPRequestHandler):
     def _forward(self) -> None:
         server = self.server
         assert isinstance(server, FrontProxy)
+        if (
+            self.command == "POST"
+            and self.path.split("?", 1)[0] == "/lock/merge/decide"
+            and server.before_decide is not None
+        ):
+            callback, server.before_decide = server.before_decide, None
+            callback()
         length = int(self.headers.get("Content-Length", "0") or 0)
         body = self.rfile.read(length) if length else b""
         headers = {

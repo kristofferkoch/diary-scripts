@@ -491,6 +491,18 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 repo,
             )
             return
+        # Check the reviewed pair before spending the one-time grant. A stale
+        # queue or base must cost a re-review, not a fresh password+passkey.
+        snapshot_reply = self.server.executor.request({"cmd": "snapshot", "repo": repo})
+        if not snapshot_reply.ok or snapshot_reply.snapshot is None:
+            raise DecisionUnavailable("the merge review is unavailable")
+        current = _snapshot_from_json(snapshot_reply.snapshot)
+        if current is None or current.queue_oid != queue_oid or current.base_oid != base_oid:
+            self._page(
+                "The queue changed after you reviewed it. Check the current pair and confirm again.",
+                repo,
+            )
+            return
         try:
             transaction = _transaction_id(cookie)
             self.server.fresh.consume(cookie, repo)

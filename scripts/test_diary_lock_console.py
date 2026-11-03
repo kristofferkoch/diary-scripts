@@ -900,3 +900,41 @@ def test_merge_begin_refuses_a_foreign_origin(services: Services) -> None:
     services.auth_state.add("owner")
 
     assert _merge_begin(services, "https://evil.example") == 403
+
+
+def test_begin_capacity_failure_leaves_the_owner_signed_in(services: Services) -> None:
+    """D5: a full transaction table must not sign the owner out for nothing."""
+    services.auth_state.add("owner")
+    store = services.fresh_server.transactions
+    while True:
+        try:
+            store.create(
+                "owner", 300, purpose="merge", action="merge",
+                queue_oid=QUEUE_OID, base_oid=BASE_OID, repo="scripts",
+            )
+        except fresh.CapacityError:
+            break
+    before = services.auth_state.logout_calls
+
+    status = _merge_begin(services, "https://example.test")
+
+    assert status == 503
+    assert services.auth_state.logout_calls == before, "session was destroyed before capacity was checked"
+
+
+def test_stale_pair_is_refused_before_the_grant_is_consumed(services: Services) -> None:
+    """D3: a queue change costs a re-review, not a new password+passkey."""
+    cookies = authorized(services)
+    token = page_token(services, cookies)
+    services.executor.snapshot = {**services.executor.snapshot, "queue_oid": OTHER_OID}
+
+    status, page = decide(services, cookies, token)
+
+    assert status == 200
+    assert b"changed after you reviewed" in page
+    transaction_id, secret = cookies[fresh.TRANSACTION_COOKIE].split(".", 1)
+    # Still usable: the grant was not spent on the refused decision.
+    details = services.fresh_server.transactions.details(
+        transaction_id, secret, "owner", "fresh",
+    )
+    assert details["purpose"] == "merge"
