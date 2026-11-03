@@ -938,3 +938,31 @@ def test_stale_pair_is_refused_before_the_grant_is_consumed(services: Services) 
         transaction_id, secret, "owner", "fresh",
     )
     assert details["purpose"] == "merge"
+
+
+def test_decision_accepts_the_submit_button_field(services: Services) -> None:
+    """The browser submits name="confirm" with the form; the decision must run."""
+    cookies = authorized(services)
+    token = page_token(services, cookies)
+
+    status, raw = decide(services, cookies, token)
+
+    assert status == 200
+    assert b"Merged" in raw
+
+
+def test_decision_refuses_an_unknown_form_field(services: Services) -> None:
+    cookies = authorized(services)
+    token = page_token(services, cookies)
+    body = urllib.parse.urlencode({
+        "repo": "scripts", "action": "merge", "queue_oid": QUEUE_OID,
+        "base_oid": BASE_OID, "csrf": token, "confirm": "merge", "extra": "1",
+    })
+    status, _ = http_request(
+        services.ui_server, "POST", "/lock/merge/decide",
+        cookies=cookies,
+        headers={**browser_headers(), "Content-Type": "application/x-www-form-urlencoded"},
+        body=body,
+    )
+
+    assert status == 403

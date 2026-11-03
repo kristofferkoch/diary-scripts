@@ -122,6 +122,45 @@ six of the seven scenarios fail; they pass on the fixed module. The one that
 passes either way is `test_foreign_origin_is_refused`, which asserts a refusal
 that the pre-fix code produced for everything.
 
+
+## Red-green rule
+
+An e2e-discovered bug is not fixed until it has both:
+
+1. **a unit-level regression test** at the lowest layer that can reproduce it —
+   no browser, no subprocess where avoidable — shown failing before the fix and
+   passing after; and
+2. **the e2e scenario that found it**, kept as the end-to-end guard.
+
+The browser/e2e test is the guard, not the regression test: it is slow, it needs
+provisioning, and it says "something in this path is broken", not "this function
+is wrong". The unit test is what pins the behaviour.
+
+To demonstrate red, stash only the source change (keep the tests) and run both:
+
+```bash
+git stash push -- scripts/<fixed-module>.py     # fixes away, tests stay
+uv run pytest -q scripts/test_<unit>.py -k <case>        # must fail
+E2E_PLAYWRIGHT_CORE=... E2E_CHROMIUM=... \
+  uv run pytest -q scripts/test_e2e_console_browser.py -k <case>   # must fail
+git stash pop
+```
+
+Today's bugs and the tests that keep them fixed:
+
+| Failure | Unit regression | E2E guard |
+| --- | --- | --- |
+| Audit daemon dropped `repository` in the journal map | `test_decision_repository_reaches_the_journal`, `test_every_accepted_event_field_has_a_journal_mapping` | **L1** `test_audit_daemon_journals_the_decision_repository` |
+| Publication failure reported as "unknown outcome" (D2) | `test_audit_failure_before_publication_reports_nothing_published`, `test_publisher_failure_before_any_change_reports_not_published`, `test_publisher_failure_after_publication_reports_published`, `test_publisher_failure_after_the_queue_moved_reports_unknown`, `test_executor_replies_distinguish_publication_states` | **L1** `test_failed_publication_reports_the_repository_state` |
+| Browser-facing authorization failure returned JSON (D4) | `test_merge_return_failure_renders_html_for_the_browser`, `test_merge_confirmation_page_states_the_expiry` | **L2** `test_expired_ceremony_renders_a_page_not_json` |
+| `Origin` omitted or opaque `null` refused | `test_decide_accepts_a_browser_that_omits_origin`, `test_decide_accepts_an_opaque_null_origin`, `test_merge_begin_accepts_an_opaque_origin` | **L2** `test_opaque_origin_is_accepted` |
+| Submit button's `confirm` field rejected | `test_decision_with_the_submit_button_field_is_accepted` | **L2** `test_rendered_form_submits_the_button_field` |
+| Stale form after the ceremony | `test_stale_review_form_re_renders_instead_of_dead_ending` | **L2** `test_stale_form_re_renders_instead_of_refusing` |
+| Stale verifier socket crash-loop | `test_stale_verify_socket_is_discarded`, `test_live_verify_socket_is_not_discarded` | **L1** restart scenario |
+| Approval fetch required discarded submodule commits | `test_sync_does_not_require_historical_submodule_commits` | none (approval tooling, not the console path) |
+| Preflight read raced journald | `test_preflight_polls_until_the_journal_flushes` | **L4** installer rehearsal |
+| Console imports outside the deployed helper set | `test_console_and_executor_import_from_the_deployed_helper_set` | **L4** installed layout |
+
 ## Still missing
 
 1. **L3**: real Caddy and Authelia, including a virtual-authenticator WebAuthn
