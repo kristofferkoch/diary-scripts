@@ -420,3 +420,43 @@ def test_config_rejects_non_loopback_and_long_lived(tmp_path: Path) -> None:
     path.write_text(path.read_text().replace("http://localhost:9091", "http://example.test"))
     with pytest.raises(fresh.AuthorizationError):
         fresh.load_config(path)
+
+
+def test_stale_verify_socket_is_discarded(tmp_path: Path) -> None:
+    """A socket left behind by a crashed instance must not wedge a restart."""
+    import socket
+
+    path = tmp_path / "verify.sock"
+    stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    stale.bind(str(path))
+    stale.close()
+    assert path.exists()
+
+    fresh.discard_stale_socket(str(path))
+
+    assert not path.exists()
+
+
+def test_live_verify_socket_is_not_discarded(tmp_path: Path) -> None:
+    """A socket someone is still listening on must stop the service, not be stolen."""
+    import socket
+
+    path = tmp_path / "verify.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(path))
+    listener.listen(1)
+    try:
+        with pytest.raises(RuntimeError):
+            fresh.discard_stale_socket(str(path))
+    finally:
+        listener.close()
+
+
+def test_non_socket_verify_path_is_refused(tmp_path: Path) -> None:
+    """Never delete something that is not a socket."""
+    path = tmp_path / "verify.sock"
+    path.write_text("not a socket")
+
+    with pytest.raises(RuntimeError):
+        fresh.discard_stale_socket(str(path))
+    assert path.read_text() == "not a socket"
