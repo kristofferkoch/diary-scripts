@@ -174,6 +174,9 @@ prepare_container() {
         # /usr/sbin, and the host has the /usr/bin path, so give the container
         # the same layout rather than changing the product.
         [[ -e /usr/bin/nft ]] || ln -s /usr/sbin/nft /usr/bin/nft
+        # The first nft call in a fresh container loads nf_tables and can fail;
+        # warm it up so the installer policy start is not the first user.
+        nft list tables >/dev/null 2>&1 || true
         getent group agent >/dev/null 2>&1 || groupadd --system agent
         getent passwd agent >/dev/null 2>&1 || useradd --system -u 981 -g agent -d /home/agent -m -s /bin/bash agent
         python3 -c "import sys; assert sys.version_info >= (3, 11), sys.version"
@@ -239,6 +242,12 @@ positive_case() {
         "$CONTAINER_DIARY/systemd/install-controller-root"
     run_installer "$HAPPY_CONTAINER" fresh \
         "$CONTAINER_DIARY/authelia/install"
+    # dsh/agent-uid/install normally provides the root-owned approval client;
+    # the rehearsal runs only the three installers, so install it the same way.
+    docker exec "$HAPPY_CONTAINER" install -o root -g root -m 0755 \
+        "$CONTAINER_SCRIPTS/scripts/agent_merge_queue.py" /usr/local/libexec/agent-merge-queue \
+        >>"${SCRATCH}/prepare-${HAPPY_CONTAINER}.log" 2>&1 \
+        || die "could not install the approval client in $HAPPY_CONTAINER"
     run_installer "$HAPPY_CONTAINER" console \
         "$CONTAINER_DIARY/systemd/install-owner-ui-root"
 
