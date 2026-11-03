@@ -170,6 +170,10 @@ prepare_container() {
         getent passwd kek >/dev/null 2>&1 || useradd -u 1000 -g kek -d /home/kek -m -s /bin/bash kek
         # The controller unit runs with SupplementaryGroups=diary-lock-control agent,
         # so the agent group and identity must exist or the unit cannot start.
+        # The network policy tool execs /usr/bin/nft; Fedora installs it under
+        # /usr/sbin, and the host has the /usr/bin path, so give the container
+        # the same layout rather than changing the product.
+        [[ -e /usr/bin/nft ]] || ln -s /usr/sbin/nft /usr/bin/nft
         getent group agent >/dev/null 2>&1 || groupadd --system agent
         getent passwd agent >/dev/null 2>&1 || useradd --system -u 981 -g agent -d /home/agent -m -s /bin/bash agent
         python3 -c "import sys; assert sys.version_info >= (3, 11), sys.version"
