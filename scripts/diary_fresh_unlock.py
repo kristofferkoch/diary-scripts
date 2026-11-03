@@ -657,10 +657,11 @@ class FreshUnlockHandler(BaseHTTPRequestHandler):
     def _begin(self) -> None:
         self._require_same_origin("X-Diary-Unlock-Begin")
         self.server.begin_rate.check()
-        self.server.authelia.logout(self.headers.get("Cookie"))
+        # Reserve the transaction first; logging out is only safe once it exists.
         transaction_id, secret = self.server.transactions.create(
             self.server.config.owner_username, self.server.config.transaction_ttl,
         )
+        self.server.authelia.logout(self.headers.get("Cookie"))
         return_url = f"{self.server.config.public_origin}/lock/unlock/return"
         location = f"{self.server.config.public_origin}/authelia/?{urllib.parse.urlencode({'rd': return_url})}"
         self.send_response(303)
@@ -731,11 +732,13 @@ class FreshUnlockHandler(BaseHTTPRequestHandler):
         # and block the owner's only merge path.
         self.server.authelia.verify_owner(self.headers.get("Cookie"), "POST", self.path)
         self.server.begin_rate.check()
-        self.server.authelia.logout(self.headers.get("Cookie"))
+        # Reserve the transaction before destroying the session: a full table or
+        # a storage error must not leave the owner signed out with nothing.
         transaction_id, secret = self.server.transactions.create(
             self.server.config.owner_username, self.server.config.transaction_ttl,
             purpose="merge", action=action, queue_oid=queue_oid, base_oid=base_oid, repo=repo,
         )
+        self.server.authelia.logout(self.headers.get("Cookie"))
         return_url = f"{self.server.config.public_origin}/lock/merge/return"
         location = f"{self.server.config.public_origin}/authelia/?{urllib.parse.urlencode({'rd': return_url})}"
         self.send_response(303)
