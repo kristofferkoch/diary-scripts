@@ -265,6 +265,7 @@ class FrontProxy(ThreadingHTTPServer):
     def __init__(self, console_port: int, fresh_port: int) -> None:
         self.console_port = console_port
         self.fresh_port = fresh_port
+        self.return_port: int | None = None
         self.origin_mode = "passthrough"  # or "null" / "evil"
         #: Optional callback run once, when a decision POST reaches the front but
         #: before it is forwarded: lets a test change the queue between the page
@@ -282,8 +283,13 @@ class FrontHandler(BaseHTTPRequestHandler):
     def _target_port(self) -> int:
         server = self.server
         assert isinstance(server, FrontProxy)
-        if self.path.split("?", 1)[0].startswith("/lock/merge/begin"):
+        path = self.path.split("?", 1)[0]
+        if path.startswith("/lock/merge/begin"):
             return server.fresh_port
+        if path == "/lock/merge/return" and server.return_port:
+            # Production routes the confirmation page to the fresh-authorization
+            # service, not the console; a test may attach the real service here.
+            return server.return_port
         return server.console_port
 
     def _forward(self) -> None:

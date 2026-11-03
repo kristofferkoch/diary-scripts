@@ -510,3 +510,61 @@ def test_existing_rows_gain_the_scripts_repository_on_migration(tmp_path: Path) 
     assert reopened.verify_consumed(
         transaction_id, "scripts", "merge", "a" * 40, "b" * 40,
     ) is not None
+
+
+# ------------------------------------------- browser-facing failures (D4)
+
+
+def test_merge_return_failure_renders_html_for_the_browser(
+    service: tuple[fresh.FreshUnlockServer, FakeAutheliaState],
+) -> None:
+    """A missing transaction is a page for the owner, not a JSON API error."""
+    server, _ = service
+
+    status, headers, _, body = request(server, "GET", "/lock/merge/return")
+
+    assert status == 403
+    assert headers["Content-Type"].startswith("text/html")
+    assert b'href="/lock/merge/"' in body
+    assert b"Nothing was merged" in body
+    assert b"fresh authorization required" not in body
+
+
+def test_merge_confirmation_page_states_the_expiry(
+    service: tuple[fresh.FreshUnlockServer, FakeAutheliaState],
+) -> None:
+    server, state = service
+    state.add("old")
+    payload = json.dumps({
+        "action": "merge", "queue_oid": "a" * 40, "base_oid": "b" * 40, "repo": "scripts",
+    })
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=6)
+    connection.request(
+        "POST", "/lock/merge/begin", body=payload,
+        headers={
+            "X-Diary-Merge-Begin": "yes",
+            "Content-Type": "application/json",
+            "Origin": "https://example.test",
+            "Sec-Fetch-Site": "same-origin",
+            "Cookie": "diary_lock_authelia_session=old",
+        },
+    )
+    response = connection.getresponse()
+    response.read()
+    assert response.status == 303
+    transaction = next(
+        value for name, value in response.getheaders()
+        if name.lower() == "set-cookie" and value.startswith(f"{fresh.TRANSACTION_COOKIE}=")
+    )
+    value = transaction.split("=", 1)[1].split(";", 1)[0]
+    connection.close()
+
+    state.add_fresh("new")
+    status, _, _, page = request(
+        server, "GET", "/lock/merge/return",
+        {"diary_lock_authelia_session": "new", fresh.TRANSACTION_COOKIE: value},
+    )
+
+    assert status == 200
+    assert b"expires on its own after" in page
+    assert b"5 minutes" in page

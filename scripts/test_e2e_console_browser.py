@@ -286,3 +286,37 @@ def test_stale_pair_costs_a_re_review_not_a_new_ceremony(
     assert "changed after you reviewed" in result["text"]
     assert stack.grants.consumed == [], "the one-time grant was spent on a refused decision"
     assert head(stack.harness_stack.scripts) == base
+
+
+def test_expired_ceremony_renders_a_page_not_json(
+    stack: browser.BrowserStack, tmp_path: Path,
+) -> None:
+    """The fresh service answers the browser with a page and a way back."""
+    from scripts import diary_fresh_unlock as fresh
+
+    config = fresh.Config(
+        owner_username=browser.OWNER,
+        public_origin=stack.origin,
+        authelia_backend=stack.authelia.url,
+        session_cookie=SESSION,
+        transaction_ttl=300,
+    )
+    server = fresh.FreshUnlockServer(
+        ("127.0.0.1", 0), config, stack.scratch / "fresh-return.sqlite3",
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        stack.proxy.return_port = server.server_port
+        session = stack.session()
+        result = run_browser(
+            stack, session, [{"goto": stack.origin + "/lock/merge/return"}],
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert "Authorization not accepted" in result["text"]
+    assert "Nothing was merged" in result["text"]
+    assert "Return to the review" in result["text"]

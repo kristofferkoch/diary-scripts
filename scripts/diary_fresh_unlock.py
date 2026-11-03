@@ -475,7 +475,38 @@ class AutheliaClient:
         return SessionProof(session_hash=_digest(session))
 
 
-def _confirmation_page(action: str, queue_oid: str, base_oid: str, repo: str) -> str:
+BROWSER_ENDPOINTS = frozenset({
+    ("GET", "/lock/merge/return"),
+    ("POST", "/lock/merge/begin"),
+    ("GET", "/lock/unlock/return"),
+    ("POST", "/lock/unlock/begin"),
+})
+
+
+def render_browser_error(message: str, back_path: str, title: str = "Authorization not accepted") -> str:
+    """Small HTML page for a browser-facing failure; JSON is for fetch callers."""
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'">
+<title>{html.escape(title)}</title>
+<style>body{{font-family:system-ui,sans-serif;max-width:40rem;margin:3rem auto;padding:0 1rem}}code{{overflow-wrap:anywhere}}.notice{{padding:0.8rem;border-left:4px solid #bf8700;background:#fff8c5;border-radius:4px}}</style>
+</head>
+<body>
+<h1>{html.escape(title)}</h1>
+<p class="notice">{html.escape(message)}</p>
+<p>Nothing was merged, denied, unlocked, or extended.</p>
+<p><a href="{html.escape(back_path, quote=True)}">Return to the review</a></p>
+</body>
+</html>
+"""
+
+
+def _confirmation_page(
+    action: str, queue_oid: str, base_oid: str, repo: str, ttl_seconds: int,
+) -> str:
     """Show the decision the ceremony was bound to, on a page the UI cannot forge.
 
     The console is an untrusted convenience layer; this page is served by the
@@ -484,6 +515,7 @@ def _confirmation_page(action: str, queue_oid: str, base_oid: str, repo: str) ->
     the console chose to display.
     """
     verb = "Merge and publish" if action == "merge" else "Deny (record only, no publication)"
+    minutes = max(1, int(ttl_seconds) // 60)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -504,7 +536,8 @@ the root-owned authorization service, which bound the ceremony to exactly:</p>
 <dt>Approved base OID</dt><dd><code>{html.escape(base_oid)}</code></dd>
 </dl>
 <p>If that is not the decision you reviewed, close this page: nothing is merged
-or denied until the console confirms, and the grant expires on its own.</p>
+or denied until the console confirms, and the grant expires on its own after
+{minutes} minutes.</p>
 <p><a href="/lock/merge/">Continue to the merge review</a></p>
 </body>
 </html>
@@ -793,7 +826,8 @@ class FreshUnlockHandler(BaseHTTPRequestHandler):
         self._html(
             200,
             _confirmation_page(
-                details["action"], details["queue_oid"], details["base_oid"], details["repo"],
+                details["action"], details["queue_oid"], details["base_oid"],
+                details["repo"], self.server.config.transaction_ttl,
             ),
         )
 
@@ -844,7 +878,15 @@ class FreshUnlockHandler(BaseHTTPRequestHandler):
         except CapacityError:
             self._json(503, {"error": "transaction capacity exceeded"})
         except AuthorizationError:
-            self._json(403, {"error": "fresh authorization required"})
+            if (method, self.path) in BROWSER_ENDPOINTS:
+                back = "/lock/merge/" if self.path.startswith("/lock/merge") else "/lock/"
+                self._html(403, render_browser_error(
+                    "This authorization attempt was not accepted: it expired, was "
+                    "already used, or the sign-in did not complete.",
+                    back,
+                ))
+            else:
+                self._json(403, {"error": "fresh authorization required"})
 
     def do_GET(self) -> None:
         self._handle("GET")
