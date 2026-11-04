@@ -34,6 +34,7 @@ source "$(dirname "$0")/vm.sh"
 
 APPROVED_DIARY=
 APPROVED_SCRIPTS=
+CASES=both
 SCRATCH=
 HAPPY_VM=
 NEGATIVE_VM=
@@ -49,6 +50,9 @@ Usage: installer_rehearsal.sh --approved-diary DIR --approved-scripts DIR [optio
   --accel MODE             auto (default), kvm, or tcg; auto uses kvm when this
                            host exposes /dev/kvm
   --cache-dir DIR          guest image cache (default: $XDG_CACHE_HOME/diary-e2e)
+  --case WHICH             both (default), happy, or negative; the negative case
+                           needs no Authelia build, so it is the cheap one to run
+                           while debugging
   --keep                   keep the guest disks, console logs and scratch directory
   -h, --help               this text
 
@@ -104,6 +108,14 @@ parse_args() {
             --approved-diary) APPROVED_DIARY=${2:?}; shift 2 ;;
             --approved-scripts) APPROVED_SCRIPTS=${2:?}; shift 2 ;;
             --accel) DIARY_E2E_ACCEL=${2:?}; shift 2 ;;
+            --case)
+                CASES=${2:?}
+                case $CASES in
+                    both | happy | negative) ;;
+                    *) die "--case must be both, happy or negative: $CASES" ;;
+                esac
+                shift 2
+                ;;
             --cache-dir) DIARY_E2E_CACHE=${2:?}; shift 2 ;;
             --keep) VM_KEEP=1; shift ;;
             -h | --help) usage; exit 0 ;;
@@ -278,11 +290,12 @@ positive_case() {
 write_prefix_scripts() {
     local target=$1
 
-    # --no-preserve=context: the fixture is built on this host and copied into a
-    # guest by mount, so preserving the host's SELinux context is both unneeded
-    # and denied to an unconfined caller.
-    cp -a --no-preserve=context "$APPROVED_SCRIPTS" "$target"
-    rm -rf -- "$target/.git"
+    # rsync rather than cp: the approved tree carries setgid worktree
+    # directories, and cp cannot recreate that mode without privileges. The
+    # fixture only needs content — no .git, no ownership, no SELinux context.
+    install -d -- "$target"
+    rsync -rlt --no-owner --no-group --no-perms --exclude=.git \
+        "$APPROVED_SCRIPTS"/ "$target"/
     # Keep the daemon's validator and the preflight subcommand, remove only the
     # journal field mapping: this is the production failure the functional
     # preflight exists to catch.
@@ -356,8 +369,11 @@ main() {
     check_substrate
     # shellcheck disable=SC2154  # set by vm_init in vm.sh
     record "SUBSTRATE accel=${vm_accel} cpus=${VM_CPUS} mem=${VM_MEMORY}MiB disk=${VM_DISK_SIZE} release=${VM_RELEASE}"
-    positive_case
-    negative_case
+    case $CASES in
+        happy) positive_case ;;
+        negative) negative_case ;;
+        both) positive_case; negative_case ;;
+    esac
     summarise
 }
 

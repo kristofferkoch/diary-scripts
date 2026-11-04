@@ -99,7 +99,7 @@ vm_init() {
     VM_KEY=$VM_CACHE/id_ed25519
 
     local missing=() tool
-    for tool in qemu-system-aarch64 qemu-img cloud-localds ssh ssh-keygen curl sha256sum; do
+    for tool in qemu-system-aarch64 qemu-img cloud-localds ssh ssh-keygen curl sha256sum rsync; do
         command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
     done
     ((${#missing[@]} == 0)) \
