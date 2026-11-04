@@ -187,13 +187,15 @@ def test_shell_installer_requires_root_config_and_uses_approved_units(
     ):
         path.mkdir(parents=True, exist_ok=True)
     collector_units = ("diary-collect@.service",)
-    for name in ("diary-sync-broker.service", "diary-sync-runtime.service", *collector_units):
+    rebind_units = ("diary-sync-rebind.path", "diary-sync-rebind.service")
+    for name in ("diary-sync-broker.service", "diary-sync-runtime.service",
+                 *collector_units, *rebind_units):
         (integration / "sync" / name).write_text("unreviewed\n")
         (approved_diary / "sync" / name).write_text("reviewed\n")
     for name in (
-        "diary_sync_broker.py", "diary_sync_install.py", "legacy_state_install.py",
-        "legacy_state_quiesce.py", "safe_io.py", "event_spool.py", "event_export.py",
-        "public_hosts_config.py",
+        "diary_sync_broker.py", "broker_audit.py", "diary_sync_install.py",
+        "legacy_state_install.py", "legacy_state_quiesce.py", "safe_io.py",
+        "event_spool.py", "event_export.py", "public_hosts_config.py",
     ):
         (approved_scripts / "scripts" / name).write_text("")
     (approved_scripts / "mail_reader/hosts_config.py").write_text("")
@@ -280,11 +282,21 @@ printf '%s\n' "$SYNC_INSTALL_TEST_CONFIG_UID"
         f"{approved_diary}/sync/diary-sync-broker.service "
         f"{approved_diary}/sync/diary-collect@.service"
     ) in operations
-    for name in ("diary-sync-runtime.service", "diary-sync-broker.service", *collector_units):
+    for name in ("diary-sync-runtime.service", "diary-sync-broker.service",
+                 *collector_units, *rebind_units):
         assert (
             "install -o root -g root -m 0644 "
             f"{approved_diary}/sync/{name} /etc/systemd/system/{name}"
         ) in operations
+    # The user-manager rebind pair is verified in its own call and enabled as a
+    # path unit; the oneshot itself must never be enabled.
+    assert (
+        "systemd-analyze verify "
+        f"{approved_diary}/sync/diary-sync-rebind.path "
+        f"{approved_diary}/sync/diary-sync-rebind.service"
+    ) in operations
+    assert "systemctl enable --now diary-sync-rebind.path" in operations
+    assert not any("enable diary-sync-rebind.service" in line for line in operations)
     assert f"chown root:kek {trusted_config}" in operations
     assert f"chmod 0640 {trusted_config}" in operations
     assert "install -d -o kek -g diary-pipeline -m 2750 /var/lib/diary/events" in operations
