@@ -7,10 +7,11 @@ import os
 import stat
 import threading
 import urllib.parse
+from collections.abc import Generator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import pytest
 
@@ -75,7 +76,7 @@ def model_config(endpoint: str, model: str = "local") -> triage.PipelineConfig:
 @contextmanager
 def model_server(
     response: dict[str, Any], *, redirect_to: str | None = None, status: int = 200
-) -> Iterator[tuple[str, list[dict[str, Any]]]]:
+) -> Generator[tuple[str, list[dict[str, Any]]]]:
     requests: list[dict[str, Any]] = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -170,9 +171,8 @@ def test_pipeline02_provisioned_0750_state_directory_is_accepted(tmp_path: Path)
         pass
     assert stat.S_IMODE(state_dir.stat().st_mode) == 0o750
     state_dir.chmod(0o700)
-    with pytest.raises(triage.StateError):
-        with triage.TriageStore(state_dir).lock():
-            pass
+    with pytest.raises(triage.StateError), triage.TriageStore(state_dir).lock():
+        pass
 
 
 @pytest.mark.parametrize(
@@ -245,10 +245,12 @@ def test_redirect_is_terminal_review_and_target_receives_no_request(tmp_path: Pa
     event = make_event()
     spool = tmp_path / "events"
     write_event(spool, event)
-    with model_server(completion(valid_result(event["event_id"]))) as (target, target_requests):
-        with model_server({}, redirect_to=target) as (redirect, redirect_requests):
-            first = triage.run_once(spool, tmp_path / "state", config=model_config(redirect))
-            second = triage.run_once(spool, tmp_path / "state", config=model_config(redirect))
+    with (
+        model_server(completion(valid_result(event["event_id"]))) as (target, target_requests),
+        model_server({}, redirect_to=target) as (redirect, redirect_requests),
+    ):
+        first = triage.run_once(spool, tmp_path / "state", config=model_config(redirect))
+        second = triage.run_once(spool, tmp_path / "state", config=model_config(redirect))
     assert first["review"] == 1
     assert second["unchanged"] == 1
     assert len(redirect_requests) == 1
@@ -512,7 +514,7 @@ def test_config_rejects_non_numeric_or_ambiguous_model_addresses(model_ip: Any):
 
 def test_config_rejects_multicast_model_address():
     document = {"pipeline": {
-        "model": "local", "model_ip": ".".join(["224", "0", "0", "1"]), "model_port": 8080,
+        "model": "local", "model_ip": ".".join(["224", "0", "0", "1"]), "model_port": 8080,  # noqa: FLY002
     }}
     with pytest.raises(triage.ConfigError):
         triage._parse_document(document)

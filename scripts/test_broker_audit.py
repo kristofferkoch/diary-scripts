@@ -9,9 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts import broker_audit
-from scripts import diary_audit
-
+from scripts import broker_audit, diary_audit
 
 CALLER = {"pid": 123, "uid": 1001, "gid": 1001}
 

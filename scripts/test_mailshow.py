@@ -1,6 +1,7 @@
 """Tests for mailshow.py. Run with `uv run pytest scripts/`."""
 from __future__ import annotations
 
+from datetime import UTC
 from pathlib import Path
 
 import pytest
@@ -115,9 +116,9 @@ def test_window_query_without_bounds_is_just_inbox():
 
 
 def test_window_query_is_half_open():
-    from datetime import datetime, timezone
-    since = datetime(2026, 5, 17, 17, 0, tzinfo=timezone.utc)
-    until = datetime(2026, 5, 18, 9, 0, tzinfo=timezone.utc)
+    from datetime import datetime
+    since = datetime(2026, 5, 17, 17, 0, tzinfo=UTC)
+    until = datetime(2026, 5, 18, 9, 0, tzinfo=UTC)
     q = mailshow.window_query(since, until, None)
     # +1 to skip the message at the lower bound (notmuch date:@N.. is inclusive).
     assert q == (f"tag:inbox and date:@{int(since.timestamp()) + 1}"
@@ -125,8 +126,8 @@ def test_window_query_is_half_open():
 
 
 def test_window_query_ands_the_extra_query():
-    from datetime import datetime, timezone
-    since = datetime(2026, 5, 17, 17, 0, tzinfo=timezone.utc)
+    from datetime import datetime
+    since = datetime(2026, 5, 17, 17, 0, tzinfo=UTC)
     q = mailshow.window_query(since, None, "from:astrid")
     assert q == f"(tag:inbox and date:@{int(since.timestamp()) + 1}..) and (from:astrid)"
 

@@ -26,8 +26,9 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, cast
 
 SCHEMA_VERSION = 1
 STATE_VERSION = 2
@@ -551,7 +552,7 @@ def parse_time(value: object, now: dt.datetime | None = None) -> dt.datetime:
             raise AuditError("report range is too large")
         return current - dt.timedelta(seconds=seconds)
     try:
-        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = dt.datetime.fromisoformat(value)
     except ValueError as exc:
         raise AuditError("report time must be now, a duration such as 24h, or ISO-8601") from exc
     if parsed.tzinfo is None:
@@ -584,6 +585,7 @@ def read_journal(namespace: str, since: dt.datetime, until: dt.datetime, limit: 
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            check=False,
             timeout=30,
             env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
         )
@@ -624,6 +626,7 @@ def read_journal_emission(namespace: str, emission_id: str, since: dt.datetime) 
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            check=False,
             timeout=5,
             env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
         )
@@ -835,9 +838,10 @@ class AuditRequestHandler(socketserver.StreamRequestHandler):
                 request = json.loads(line)
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise AuditError("audit request is not valid JSON") from exc
-            if server.read_only(peer):
-                if not isinstance(request, dict) or request.get("cmd") not in {"baseline", "review"}:
-                    raise AuditError("read-only caller may only request audit reports")
+            if server.read_only(peer) and (
+                not isinstance(request, dict) or request.get("cmd") not in {"baseline", "review"}
+            ):
+                raise AuditError("read-only caller may only request audit reports")
             reply = server.service.handle(request, peer)
         except (AuditError, OSError) as exc:
             reply = {"ok": False, "error": str(exc)}
@@ -939,8 +943,8 @@ def request(socket_path: str, value: dict, timeout: float = 40.0) -> dict:
 
 def format_report(report: dict) -> str:
     lines = [
-        f"{report['report']} events={report['event_count']} records={report['record_count']} "
-        f"since={report['since']} until={report['until']} truncated={str(report['truncated']).lower()}"
+        (f"{report['report']} events={report['event_count']} records={report['record_count']} "
+        f"since={report['since']} until={report['until']} truncated={str(report['truncated']).lower()}")
     ]
     for group in report["groups"]:
         dimensions = " ".join(

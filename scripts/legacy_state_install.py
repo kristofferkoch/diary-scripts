@@ -1,13 +1,14 @@
 """Prepare and migrate legacy collector state into its fixed runtime root."""
 from __future__ import annotations
 
+import grp
 import json
 import os
 import pwd
-import grp
 import stat
+from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterator
+from typing import Any
 
 from scripts.diary_sync_install import _secure_dir, _secure_state
 from scripts.safe_io import DIR_FLAGS, open_dir

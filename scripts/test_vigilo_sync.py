@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import pytest
 import httpx
+import pytest
 
 from scripts import vigilo_sync as vs
 from scripts.vigilo_api import ConfigError, TokenStore, VigiloApi
@@ -134,7 +134,7 @@ def test_second_run_without_changes_emits_nothing(serve, workspace):
     # Past the poll floor, otherwise the run is skipped for being too soon.
     state = json.loads(workspace["state"].read_text())
     state["last_successful_run"] = (
-        datetime.now(timezone.utc) - timedelta(hours=1)
+        datetime.now(UTC) - timedelta(hours=1)
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
     workspace["state"].write_text(json.dumps(state))
     assert vs.main(["--once"]) == 0
@@ -147,7 +147,7 @@ def test_a_reply_re_emits_the_thread_as_message_update(serve, workspace):
     vs.main(["--once"])
     state = json.loads(workspace["state"].read_text())
     state["last_successful_run"] = (
-        datetime.now(timezone.utc) - timedelta(hours=1)
+        datetime.now(UTC) - timedelta(hours=1)
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
     workspace["state"].write_text(json.dumps(state))
 
@@ -164,7 +164,7 @@ def test_a_thread_without_any_change_signal_is_emitted_once(serve, workspace):
     vs.main(["--once"])
     state = json.loads(workspace["state"].read_text())
     state["last_successful_run"] = (
-        datetime.now(timezone.utc) - timedelta(hours=1)
+        datetime.now(UTC) - timedelta(hours=1)
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
     workspace["state"].write_text(json.dumps(state))
     vs.main(["--once"])
@@ -384,7 +384,7 @@ def test_web_kinds_stay_skipped_once_known_unavailable(serve, workspace, capsys)
     vs.main(["--once"])
     state = json.loads(state_path.read_text())
     state["last_successful_run"] = (
-        datetime.now(timezone.utc) - timedelta(hours=1)
+        datetime.now(UTC) - timedelta(hours=1)
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
     state_path.write_text(json.dumps(state))
     capsys.readouterr()
@@ -405,7 +405,7 @@ def test_news_that_already_rolled_over_is_not_repeated(serve, workspace):
     vs.main(["--once"])
     state = json.loads(workspace["state"].read_text())
     state["last_successful_run"] = (
-        datetime.now(timezone.utc) - timedelta(hours=1)
+        datetime.now(UTC) - timedelta(hours=1)
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
     workspace["state"].write_text(json.dumps(state))
     vs.main(["--once"])
@@ -525,7 +525,7 @@ def _ran_cleanly(workspace: dict[str, Path]) -> None:
     """Leave state as a finished run would, so the next --once passes the floor."""
     state = json.loads(workspace["state"].read_text())
     state["last_successful_run"] = (
-        datetime.now(timezone.utc) - timedelta(hours=1)
+        datetime.now(UTC) - timedelta(hours=1)
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
     workspace["state"].write_text(json.dumps(state))
 
@@ -909,7 +909,7 @@ def test_safe_filename_defuses_a_traversal():
 def test_recently_ran_reads_the_cursor_leniently():
     assert vs.recently_ran({}) is False
     assert vs.recently_ran({"last_successful_run": "not a date"}) is False
-    fresh = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    fresh = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     assert vs.recently_ran({"last_successful_run": fresh}) is True
-    old = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    old = (datetime.now(UTC) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     assert vs.recently_ran({"last_successful_run": old}) is False

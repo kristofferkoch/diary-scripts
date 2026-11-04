@@ -462,7 +462,7 @@ def test_non_socket_verify_path_is_refused(tmp_path: Path) -> None:
     assert path.read_text() == "not a socket"
 
 
-def _consumed_merge_grant(store: "fresh.TransactionStore", repo: str) -> str:
+def _consumed_merge_grant(store: fresh.TransactionStore, repo: str) -> str:
     transaction_id, secret = store.create(
         "owner", 300, purpose="merge", action="merge",
         queue_oid="a" * 40, base_oid="b" * 40, repo=repo,

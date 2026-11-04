@@ -24,7 +24,6 @@ import psycopg
 from . import summarize
 from .thread_id import ThreadId
 
-
 # Display order. Anything outside this list is appended at the end.
 KIND_ORDER = ("person", "org", "place", "money", "identifier", "contact")
 HIDDEN_KINDS = frozenset({"url"})  # noisy as chips; reachable via the body

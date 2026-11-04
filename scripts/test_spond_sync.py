@@ -96,7 +96,7 @@ def test_rsvp_change_reemits_seen_event():
 def test_legacy_seen_event_ids_is_migrated():
     """Old id-only state is dropped and re-baselined under the new key."""
     state: dict[str, Any] = {"seen_event_ids": ["ev1"]}
-    new, out = _run_fetch([_event("acceptedIds")], state, HANS)
+    new, _out = _run_fetch([_event("acceptedIds")], state, HANS)
     assert new == 1                          # re-emitted once to re-baseline
     assert "seen_event_ids" not in state     # legacy key gone
     activity = state["seen_event_activity"]

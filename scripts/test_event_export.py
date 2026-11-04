@@ -1,7 +1,6 @@
 """Tests for direct collector export and durable logical-ID notmuch mail events."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest

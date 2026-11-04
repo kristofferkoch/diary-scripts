@@ -1,7 +1,6 @@
 """Isolated review, authorization, replay, expiry, and attendance UI tests."""
 from __future__ import annotations
 
-import copy
 import hashlib
 import http.client
 import json
@@ -11,7 +10,6 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -19,7 +17,11 @@ import pytest
 
 from scripts import diary_fresh_unlock as fresh
 from scripts import diary_lock_ui as ui
-from scripts.test_diary_fresh_unlock import FakeAutheliaHandler, FakeAutheliaState, begin
+from scripts.test_diary_fresh_unlock import (
+    FakeAutheliaHandler,
+    FakeAutheliaState,
+    begin,
+)
 
 SESSION_COOKIE = "diary_lock_authelia_session"
 FIRST_GROUP = "a" * 64

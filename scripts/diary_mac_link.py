@@ -14,8 +14,9 @@ import sys
 import tempfile
 import tomllib
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 CONFIG_PATH = Path("/etc/diary/mac-link.toml")
 LEGACY_PATH = Path("/etc/diary/mac-link-legacy.nft")
@@ -70,7 +71,7 @@ class Layout:
     pipeline_dropin: Path = Path("/etc/systemd/system/diary-pipeline.service.d/50-mac-link.conf")
 
     @classmethod
-    def under(cls, root: Path) -> "Layout":
+    def under(cls, root: Path) -> Layout:
         return cls(
             config=root / "etc/diary/mac-link.toml",
             legacy=root / "etc/diary/mac-link-legacy.nft",
@@ -436,7 +437,7 @@ class Migration:
         config: Config,
         pipeline_uid: int,
         *,
-        layout: Layout = Layout(),
+        layout: Layout | None = None,
         runner: Runner = subprocess.run,
         isolated: bool = False,
     ) -> None:
@@ -444,7 +445,7 @@ class Migration:
             raise MacLinkError("pipeline UID is outside the nftables UID range")
         self.config = config
         self.uid = pipeline_uid
-        self.layout = layout
+        self.layout = Layout() if layout is None else layout
         self.run = runner
         self.isolated = isolated
 

@@ -2,12 +2,8 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import UTC, datetime
 
-import pytest
-
-from mail_reader import config as config_module
 from scripts import spondshow
 from scripts.spondshow import (
     iter_records,
@@ -15,7 +11,6 @@ from scripts.spondshow import (
     render_header,
     rsvp_status,
 )
-
 
 # ---------- render_header: pin Spond field names ----------
 # These pin the actual field paths in Spond API responses (as of 2026-05).
@@ -226,7 +221,7 @@ def test_iter_records_since_filter_drops_older(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setattr(spondshow, "JSONL_DIR", jdir)
-    since = datetime(2026, 5, 25, tzinfo=timezone.utc)
+    since = datetime(2026, 5, 25, tzinfo=UTC)
     ids = [r["data"]["id"] for r in iter_records(since, None, None)]
     assert ids == ["NEW"]
 
@@ -250,8 +245,8 @@ def test_iter_records_until_is_inclusive_and_since_is_strict(tmp_path, monkeypat
     (jdir / "2026-05-26.jsonl").write_text(
         "".join(json.dumps(r) + "\n" for r in recs), encoding="utf-8")
     monkeypatch.setattr(spondshow, "JSONL_DIR", jdir)
-    lo = datetime(2026, 5, 26, 10, 0, 0, tzinfo=timezone.utc)
-    hi = datetime(2026, 5, 26, 10, 0, 1, tzinfo=timezone.utc)
+    lo = datetime(2026, 5, 26, 10, 0, 0, tzinfo=UTC)
+    hi = datetime(2026, 5, 26, 10, 0, 1, tzinfo=UTC)
     assert [r["data"]["id"] for r in iter_records(lo, hi, None)] == ["C"]
 
 

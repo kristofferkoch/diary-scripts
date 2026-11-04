@@ -48,9 +48,9 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Generator, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 import httpx
@@ -460,7 +460,7 @@ def refresh_tokens(
 
 
 @contextlib.contextmanager
-def file_lock(path: Path, *, timeout: float = 90.0, stale_after: float = 90.0) -> Iterator[None]:
+def file_lock(path: Path, *, timeout: float = 90.0, stale_after: float = 90.0) -> Generator[None]:
     """``O_CREAT|O_EXCL`` lock — works across processes, not just threads.
 
     Serialises load → refresh → save on the token file. A crashed holder
@@ -652,10 +652,10 @@ class SkolemeldingApi:
     def close(self) -> None:
         self._client.close()
 
-    def __enter__(self) -> "SkolemeldingApi":
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, *exc: Any) -> None:
+    def __exit__(self, *exc: object) -> None:
         self.close()
 
     # -- plumbing --
@@ -841,7 +841,7 @@ def _print_page(data: Mapping[str, Any], page: int) -> None:
     for message in data["Result"]:
         seen = "seen" if message.get("IsMessageSeen") else "UNREAD"
         print(
-            f"{str(message.get('Id')):>10}  {message.get('Timestamp', '')}  "
+            f"{message.get('Id')!s:>10}  {message.get('Timestamp', '')}  "
             f"{seen:6}  {message.get('From', '')} — {message.get('Header', '')}"
         )
     print(f"(page {page}, {data.get('TotalMatching')} total)", file=sys.stderr)

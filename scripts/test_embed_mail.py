@@ -26,7 +26,6 @@ from scripts.embed_mail import (
     tier_query,
 )
 
-
 # ---------- helpers ----------
 
 def _msg(headers: dict[str, list[str]], body: str = "body") -> email.message.Message:
@@ -413,7 +412,7 @@ class TestIterAttachments:
         raw = _multipart_msg([("logo.png", "image/png", b"\x89PNG\r\n\x1a\n")])
         atts = list(iter_attachments(raw))
         assert len(atts) == 1
-        fn, mime, data, text = atts[0]
+        _fn, mime, _data, text = atts[0]
         assert mime == "image/png"
         assert text == ""   # unsupported → empty, but row still yielded
 
@@ -632,6 +631,7 @@ class TestEmbedBatch:
         """qwen3 retrieval requires Instruct/Query on the query side —
         without it junk micro-chunks outrank relevant content (2026-08-03)."""
         import json
+
         from scripts import embed_mail
         captured: dict = {}
         monkeypatch.setattr(
@@ -647,6 +647,7 @@ class TestEmbedBatch:
         """Oversized batched calls corrupt llama-server (2026-08-03): texts
         must be split by total chars, not just count."""
         import json
+
         from scripts import embed_mail
         monkeypatch.setattr(embed_mail, "BATCH_CHARS", 100)
         monkeypatch.setattr(embed_mail, "BATCH_CHUNKS", 32)
@@ -688,7 +689,7 @@ def _first_message_with_attachment_of(mime: str) -> bytes | None:
     proc = subprocess.run(
         ["notmuch", "search", "--limit=2000",
          "--output=messages", "attachment"],
-        capture_output=True, text=True)
+        capture_output=True, text=True, check=False)
     if proc.returncode:
         return None
     for line in proc.stdout.splitlines():
@@ -722,7 +723,7 @@ class TestRealMailSamples:
         pdfs = [a for a in iter_attachments(raw)
                 if a[1] == "application/pdf"]
         assert pdfs, "iter_attachments should surface the PDF"
-        fn, mime, data, text = pdfs[0]
+        _fn, _mime, data, _text = pdfs[0]
         assert data.startswith(b"%PDF"), f"data not a PDF: {data[:8]!r}"
         # PDFs occasionally extract to nothing (e.g. scanned image PDFs);
         # only assert structure, not text presence.
@@ -748,7 +749,7 @@ class TestRealMailSamples:
         atts = [a for a in iter_attachments(raw)
                 if a[1].endswith("wordprocessingml.document")]
         assert atts
-        fn, mime, data, text = atts[0]
+        fn, _mime, data, text = atts[0]
         assert data[:2] == b"PK"   # zip magic
         # Real docs almost always have *some* extracted text
         assert len(text) > 0, f"empty extraction from {fn}"

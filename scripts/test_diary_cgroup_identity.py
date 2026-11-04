@@ -167,14 +167,14 @@ def test_descendant_control_group_must_be_canonical(
 
 
 def test_descendant_control_group_must_exist(tmp_path: Path) -> None:
-    checker, commands = identity(tmp_path)
+    checker, _commands = identity(tmp_path)
     (tmp_path / "agent.slice/dsh-web.service").rmdir()
     with pytest.raises(lock.LockError, match="cannot stat cgroup"):
         checker.verify()
 
 
 def test_missing_or_malformed_kernel_state_is_uncertainty(tmp_path: Path) -> None:
-    checker, commands = identity(tmp_path)
+    checker, _commands = identity(tmp_path)
     (tmp_path / "agent.slice").rename(tmp_path / "missing.slice")
     with pytest.raises(lock.LockError, match="cannot stat cgroup"):
         checker.verify()

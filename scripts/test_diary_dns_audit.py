@@ -15,7 +15,6 @@ from scripts import diary_dns_audit as dns
 from scripts import diary_dns_policy as policy
 from scripts import diary_network_audit as network
 
-
 UID = 1001
 GID = 1002
 GROUP = 30

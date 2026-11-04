@@ -11,9 +11,10 @@ from __future__ import annotations
 import html
 import json
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Literal, Protocol
+from typing import Literal, Protocol
 
 from scripts import agent_merge_queue as queue
 from scripts import agent_merge_review as review
@@ -64,7 +65,7 @@ class OwnerGrant:
 
 
 class DecisionAuditor(Protocol):
-    def record(self, record: "DecisionRecord") -> None:
+    def record(self, record: DecisionRecord) -> None:
         """Durably record one decision before reporting success."""
 
 
@@ -320,7 +321,7 @@ class MergeConsole:
             if head == reviewed_oid:
                 return "not_published"
             return "unknown"
-        except Exception:
+        except Exception:  # noqa: BLE001 — publication state is unknowable after query failure
             return "unknown"
 
     def _record_best_effort(
@@ -328,7 +329,7 @@ class MergeConsole:
     ) -> None:
         try:
             self._record(action, oid, base, outcome)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 — preserve the original publication error
             # Reporting the repository state must not be masked by a second
             # audit failure.
             pass

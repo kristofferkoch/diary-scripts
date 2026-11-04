@@ -49,9 +49,7 @@ def test_first_factor_only_is_still_denied(stack: edge.EdgeStack) -> None:
 
 
 def test_session_cookie_attributes(stack: edge.EdgeStack) -> None:
-    body = '{"username": "%s", "password": "%s", "keepMeLoggedIn": false}' % (
-        edge.OWNER, edge.PASSWORD,
-    )
+    body = f'{{"username": "{edge.OWNER}", "password": "{edge.PASSWORD}", "keepMeLoggedIn": false}}'
     status, headers, _ = stack.request(
         "POST", "/authelia/api/firstfactor", body=body.encode(),
         headers={"Content-Type": "application/json", "Origin": stack.origin},

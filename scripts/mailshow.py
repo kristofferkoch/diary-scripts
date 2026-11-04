@@ -50,7 +50,7 @@ def window_query(since: datetime | None, until: datetime | None,
         return f"({base}) and ({extra})"
     return base
 
-from scripts.embed_mail import iter_attachments  # noqa: E402
+from scripts.embed_mail import iter_attachments
 
 
 def notmuch_search_ids(query: str, limit: int | None) -> list[str]:

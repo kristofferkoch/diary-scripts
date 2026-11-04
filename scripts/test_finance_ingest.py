@@ -25,7 +25,6 @@ from scripts.finance_ingest import (
     render_summary,
 )
 
-
 # ----- parse_no_decimal -----
 
 def test_parse_no_decimal_basic():
@@ -42,19 +41,19 @@ def test_parse_no_decimal_nbsp():
     assert parse_no_decimal("1\xa0234,56") == Decimal("1234.56")
 
 def test_parse_no_decimal_no_decimal():
-    assert parse_no_decimal("100") == Decimal("100")
+    assert parse_no_decimal("100") == Decimal(100)
 
 
 # ----- format_no -----
 
 def test_format_no_thousands():
-    assert format_no(Decimal("12345")) == "12 345"
+    assert format_no(Decimal(12345)) == "12 345"
 
 def test_format_no_negative():
-    assert format_no(Decimal("-1234567")) == "-1 234 567"
+    assert format_no(Decimal(-1234567)) == "-1 234 567"
 
 def test_format_no_small():
-    assert format_no(Decimal("12")) == "12"
+    assert format_no(Decimal(12)) == "12"
 
 def test_format_no_decimals():
     assert format_no(Decimal("1234.56"), places=2) == "1 234,56"
@@ -95,7 +94,7 @@ def test_parse_csv_rejects_wrong_columns():
 def test_parse_csv_handles_empty_fields():
     txns = parse_csv_text(SAMPLE_CSV)
     # The lønn row has no Fra konto (it's an inflow)
-    lonn = [t for t in txns if t.belop > 0][0]
+    lonn = next(t for t in txns if t.belop > 0)
     assert lonn.fra_konto == ""
     assert lonn.tekst == "Fra: EXAMPLECORP AS"
 
@@ -239,7 +238,7 @@ def test_merchant_outflows_top_k_caps_results():
 
 def test_merchant_outflows_counts_months():
     txns = parse_csv_text(SAMPLE_CSV)
-    rows = dict((r[0], r) for r in merchant_outflows(txns))
+    rows = {r[0]: r for r in merchant_outflows(txns)}
     # NORDEA appears in both Apr and May
     assert len(rows["NORDEA LIV AS"][2]) == 2
     # Apple only in May

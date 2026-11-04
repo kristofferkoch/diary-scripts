@@ -13,13 +13,11 @@ import http.client
 import json
 import os
 import secrets
-import shutil
 import socket
 import ssl
 import subprocess
 import threading
 import time
-import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -58,12 +56,13 @@ class _SNIConnection(http.client.HTTPSConnection):
     """
 
     def __init__(self, host: str, port: int, sni: str, **kwargs) -> None:
+        self._sni_context = kwargs.get("context") or ssl.create_default_context()
         super().__init__(host, port, **kwargs)
         self._sni = sni
 
     def connect(self) -> None:
         self.sock = socket.create_connection((self.host, self.port), self.timeout)
-        self.sock = self._context.wrap_socket(self.sock, server_hostname=self._sni)
+        self.sock = self._sni_context.wrap_socket(self.sock, server_hostname=self._sni)
 
 
 def _wait_http(
@@ -324,7 +323,7 @@ def run_driver(stack: EdgeStack, transaction: str = "") -> dict:
     }
     proc = subprocess.run(
         ["node", str(driver), stack.origin, HOST, transaction or "-"],
-        capture_output=True, text=True, env=env, timeout=180,
+        capture_output=True, text=True, check=False, env=env, timeout=180,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"browser driver failed: {proc.stderr.strip()[-800:]}")

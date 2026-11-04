@@ -86,11 +86,11 @@ def no_weekday(d: date) -> str:
 
 
 def upcoming_by_day(
-    events: list["CalEvent"],
+    events: list[CalEvent],
     *,
     today: date,
     horizon_days: int = 14,
-) -> list[tuple[date, list["CalEvent"]]]:
+) -> list[tuple[date, list[CalEvent]]]:
     """Group events occurring in [today, today+horizon_days) by their date.
 
     A multi-day event (e.g. Norway Cup spanning Fri–Sat) is attached to
@@ -142,7 +142,7 @@ def render_markdown(path: Path) -> str:
     )
 
 
-def group_by_month(events: list["CalEvent"]) -> list[tuple[str, list["CalEvent"]]]:
+def group_by_month(events: list[CalEvent]) -> list[tuple[str, list[CalEvent]]]:
     """Group events into [(month-heading, events-in-month), ...] preserving order.
 
     >>> from datetime import date

@@ -40,7 +40,7 @@ def test_console_and_executor_import_from_the_deployed_helper_set(tmp_path: Path
     proc = subprocess.run(
         [sys.executable, "-S", "-c",
          "import scripts.diary_lock_console_ui, scripts.diary_merge_console_service"],
-        cwd=tmp_path, env=env, capture_output=True, text=True,
+        cwd=tmp_path, env=env, capture_output=True, text=True, check=False,
     )
 
     assert proc.returncode == 0, proc.stderr

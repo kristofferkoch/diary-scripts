@@ -48,7 +48,6 @@ import httpx
 
 from mail_reader.config import immich_url
 
-
 API_KEY_ARGV = ("pass", "show", "immich/api-key")
 
 

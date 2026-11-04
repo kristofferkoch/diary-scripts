@@ -1,7 +1,6 @@
 """Isolated tests for AUD-05 coverage, classification, and review evidence."""
 from __future__ import annotations
 
-import copy
 import datetime as dt
 import grp
 import json

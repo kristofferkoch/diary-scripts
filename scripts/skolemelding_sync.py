@@ -59,13 +59,13 @@ import json
 import mimetypes
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 from urllib.parse import urlsplit
 
 from mail_reader.config import cfg, legacy_state_root
-
 from scripts.attachment_store import find_attachment, write_attachment
 from scripts.embed_mail import html_to_text
 from scripts.safe_io import append_text, ensure_dir
@@ -91,7 +91,7 @@ _UNSAFE = re.compile(r"[^\w.()\[\]-]+")
 
 
 def utcnow_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def safe_filename(name: str, index: int) -> str:
@@ -322,12 +322,11 @@ def iter_inbox(api: SkolemeldingApi, known_ids: set[str]) -> Iterator[dict[str, 
             return
         if check_remaining and not remaining:
             return
-    else:
-        print(
-            f"!! skolemelding: hit the {MAX_PAGES}-page safety cap — "
-            "older messages were not scanned this run",
-            file=sys.stderr,
-        )
+    print(
+        f"!! skolemelding: hit the {MAX_PAGES}-page safety cap — "
+        "older messages were not scanned this run",
+        file=sys.stderr,
+    )
 
 
 def _download_attachments(
@@ -444,7 +443,7 @@ def run_once(state: dict[str, Any]) -> tuple[int, list[dict[str, Any]], dict[str
 
 def today_jsonl() -> Path:
     ensure_dir(OUT_DIR)
-    return OUT_DIR / f"{datetime.now(timezone.utc):%Y-%m-%d}.jsonl"
+    return OUT_DIR / f"{datetime.now(UTC):%Y-%m-%d}.jsonl"
 
 
 def append_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
@@ -469,10 +468,10 @@ def recently_ran(state: dict[str, Any]) -> bool:
         raw = str(last).replace("Z", "+00:00")
         then = datetime.fromisoformat(raw)
         if then.tzinfo is None:
-            then = then.replace(tzinfo=timezone.utc)
+            then = then.replace(tzinfo=UTC)
     except ValueError:
         return False
-    age = datetime.now(timezone.utc) - then
+    age = datetime.now(UTC) - then
     return timedelta(0) <= age < timedelta(seconds=floor)
 
 

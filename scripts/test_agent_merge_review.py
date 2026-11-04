@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 import json
-import os
 import stat
 import subprocess
 import threading
+from collections.abc import Generator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Iterator
 
 import pytest
 
 from scripts import agent_merge_review as review
+from scripts.agent_merge_pii import DEFAULT_FAKE_IDENTITIES
 
 
 def git(repo: Path, *args: str) -> str:
@@ -65,7 +65,7 @@ def completion(summary: str = "Looks reasonable", findings: list[dict] | None = 
 @contextmanager
 def model_server(
     response: dict | None = None, redirect_to: str | None = None
-) -> Iterator[tuple[str, list[dict]]]:
+) -> Generator[tuple[str, list[dict]]]:
     requests: list[dict] = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -99,11 +99,13 @@ def model_server(
 
 
 def test_model_request_does_not_follow_redirects():
-    with model_server() as (target, target_requests):
-        with model_server(redirect_to=target) as (redirect, _):
-            settings = review.ReviewConfig("local", (), 120_000)
-            with pytest.raises(review.ReviewError):
-                review.call_model(redirect, settings, "{}")
+    with (
+        model_server() as (target, target_requests),
+        model_server(redirect_to=target) as (redirect, _),
+    ):
+        settings = review.ReviewConfig("local", (), 120_000)
+        with pytest.raises(review.ReviewError):
+            review.call_model(redirect, settings, "{}")
     assert target_requests == []
 
 
@@ -129,7 +131,7 @@ def test_prescan_reports_unapproved_values_without_mutating_input():
         current.diff,
         current.messages,
         current.paths,
-        (*review.DEFAULT_FAKE_IDENTITIES, "Fake Person", ".example"),
+        (*DEFAULT_FAKE_IDENTITIES, "Fake Person", ".example"),
     )
     assert (current.diff, current.messages) == original
     assert "person@example.test" in current.diff

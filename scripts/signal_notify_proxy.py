@@ -192,7 +192,7 @@ class LockedSignalBoundary:
             if not isinstance(state, str) or state not in diary_lock.STATES:
                 return "UNKNOWN"
             return state
-        except Exception:
+        except Exception:  # noqa: BLE001 — fail closed when a trusted helper is unavailable
             return "UNKNOWN"
 
     def _trusted_pipeline_uid(self) -> int | None:
@@ -226,7 +226,7 @@ class LockedSignalBoundary:
             event["event_id"] = event_id
         try:
             self.audit_request(self.audit_socket, event)
-        except Exception:
+        except Exception:  # noqa: BLE001 — fail closed when a trusted helper is unavailable
             return "audit unavailable; send denied"
         return ""
 
@@ -350,7 +350,7 @@ class LockedSignalBoundary:
 def attachment_id(request: dict) -> str:
     params = request.get("params")
     if not isinstance(params, dict) or not isinstance(params.get("id"), str):
-        raise ValueError("getAttachment requires a string params.id")
+        raise ValueError("getAttachment requires a string params.id")  # noqa: TRY004 — JSON-RPC validation contract
     return validate_attachment_id(params["id"])
 
 

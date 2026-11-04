@@ -51,14 +51,12 @@ import os
 import sys
 import time
 import urllib.request
-from pathlib import Path
 from typing import Any, TypedDict
 
 import psycopg
 from PIL import Image
 
 from mail_reader.config import cfg, vlm_url
-
 from scripts.embed_mail import (
     BATCH_CHUNKS,
     chunk_text,
@@ -217,7 +215,7 @@ def _record_index(source: str) -> dict[str, dict[str, Any]]:
     for rec in iter_records(source, verbose=False):
         try:
             payload = BUILDERS[source](rec)
-        except Exception:
+        except Exception:  # noqa: BLE001, S112 — skip malformed image records
             continue
         if payload is not None:
             index[payload["mid"]] = rec
@@ -467,13 +465,13 @@ def _store(conn: psycopg.Connection, batch: list[Prepared],
                     "WHERE id = %s",
                     (len(prep["description"]), VLM_MODEL, row["att_id"]))
             done += 1
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — isolate bad images and embedding failures
             failed += 1
             print(f"  !! {row['mid']} {row['filename']} (write): {e}",
                   file=sys.stderr)
             try:
                 _mark_failure(conn, row)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 — failure marking is best effort
                 pass
     return done, failed
 
@@ -512,7 +510,7 @@ def process(conn: psycopg.Connection, sources: tuple[str, ...], limit: int,
             d, f = flush(conn, pending, verbose)
             done += d
             failed += f
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — isolate bad images and embedding failures
             # Embed endpoint down etc: count attempts so a persistent
             # outage doesn't re-describe the same images every run.
             failed += len(pending)
@@ -521,7 +519,7 @@ def process(conn: psycopg.Connection, sources: tuple[str, ...], limit: int,
             for prep in pending:
                 try:
                     _mark_failure(conn, prep["row"])
-                except Exception:
+                except Exception:  # noqa: BLE001, S110 — failure marking is best effort
                     pass
         pending = []
         pending_chunks = 0
@@ -552,12 +550,12 @@ def process(conn: psycopg.Connection, sources: tuple[str, ...], limit: int,
                 print(f"  {n}/{len(rows)} {row['source']} {row['filename']} "
                       f"— skipped:no-blob ({e})", file=sys.stderr)
             continue
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — isolate bad images and embedding failures
             failed += 1
             print(f"  !! {row['mid']} {row['filename']}: {e}", file=sys.stderr)
             try:
                 _mark_failure(conn, row)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 — failure marking is best effort
                 pass
             continue
         text = f"Vedlegg {row['filename']} (bilde): {description}"

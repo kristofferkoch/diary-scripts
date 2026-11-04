@@ -91,7 +91,7 @@ def _valid_endpoint(key: str, value: str) -> bool:
 
 def validate_hosts(value: Any) -> dict[str, str]:
     if not isinstance(value, dict):
-        raise ValueError("hosts must be a TOML table")
+        raise TypeError("hosts must be a TOML table")
     keys = set(value)
     if not REQUIRED_HOST_KEYS <= keys or not keys <= ALLOWED_HOST_KEYS:
         raise ValueError("hosts table has missing or unapproved keys")

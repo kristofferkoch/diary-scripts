@@ -79,6 +79,7 @@ printf '\n' >> "$BOOTSTRAP_TEST_LOG"
         env=env,
         capture_output=True,
         text=True,
+        check=False,
         timeout=30,
     )
 

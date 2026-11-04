@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import pathlib
 
-import pytest
-
 from scripts import notmuch_sync_tags as sut
 
 

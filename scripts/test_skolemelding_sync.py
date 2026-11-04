@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -107,7 +107,7 @@ def age_state(workspace: dict[str, Path]) -> None:
     """Push last_successful_run past the poll floor so the next run proceeds."""
     state = json.loads(workspace["state"].read_text())
     state["last_successful_run"] = (
-        datetime.now(timezone.utc) - timedelta(hours=1)
+        datetime.now(UTC) - timedelta(hours=1)
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
     workspace["state"].write_text(json.dumps(state))
 
@@ -467,7 +467,7 @@ def test_attachment_name_from_portal_path():
 def test_recently_ran_reads_last_successful_run_leniently():
     assert ss.recently_ran({}) is False
     assert ss.recently_ran({"last_successful_run": "not a date"}) is False
-    fresh = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    fresh = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     assert ss.recently_ran({"last_successful_run": fresh}) is True
-    old = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    old = (datetime.now(UTC) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     assert ss.recently_ran({"last_successful_run": old}) is False

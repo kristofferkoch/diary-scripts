@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -312,5 +312,5 @@ def test_malformed_trusted_skolemelding_seen_markers_are_ignored(state_dir: Path
 
 @pytest.mark.parametrize("module", [vigilo_sync, skolemelding_sync])
 def test_future_last_successful_run_never_skips_collection(module):
-    future = (datetime.now(timezone.utc) + timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    future = (datetime.now(UTC) + timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ")
     assert module.recently_ran({"last_successful_run": future}) is False

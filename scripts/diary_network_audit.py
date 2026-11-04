@@ -575,7 +575,7 @@ def serve(
                 last_watchdog = now
             try:
                 data = sock.recv(MAX_NETLINK_DATAGRAM)
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except OSError as exc:
                 if exc.errno == errno.ENOBUFS:

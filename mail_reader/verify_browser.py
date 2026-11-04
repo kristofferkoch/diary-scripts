@@ -31,12 +31,12 @@ import argparse
 import shutil
 import sys
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page, sync_playwright
-
 
 DEFAULT_BASE = "https://server.example.ts.net/mail"
 # System chromium-headless on Fedora — playwright's bundled chromium
@@ -179,7 +179,7 @@ def check_tankekart_modes(page: Page, out: Path) -> Result:
 
     try:
         page.wait_for_selector(".tankekart-modes", timeout=20000)
-    except Exception as e:
+    except PlaywrightError as e:
         r.error = f"tankekart never loaded (.tankekart-modes not visible in 20s): {e}"
         _shot(page, out, "05_tankekart_timeout", r)
         return r
@@ -236,7 +236,7 @@ def check_tankekart_modes(page: Page, out: Path) -> Result:
 
     try:
         active_after = switch_to("Funn", "emergent")
-    except Exception as e:
+    except PlaywrightError as e:
         r.error = f"Funn switch failed: {e}"
         _shot(page, out, "08_emergent_fail", r)
         return r
@@ -298,7 +298,7 @@ def main() -> int:
     global BASE_URL
     base = args.base.rstrip("/")
     BASE_URL = base
-    print(f"# mail_reader browser verify")
+    print("# mail_reader browser verify")
     print(f"# base: {base}")
     print(f"# shots: {args.out}")
     print()
@@ -320,7 +320,7 @@ def main() -> int:
         for run in checks:
             try:
                 r = run()
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — report each independent browser check
                 r = Result(name="(uncaught)", ok=False,
                            error=f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
             results.append(r)

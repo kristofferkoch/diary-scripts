@@ -48,7 +48,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -72,7 +72,7 @@ RSVP_ID_KEYS = (
 
 
 def utcnow_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 LEGACY_STATE_PATH = STATE_PATH
@@ -135,7 +135,7 @@ def get_password() -> str:
 
 
 def today_jsonl() -> Path:
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     ensure_dir(OUT_DIR)
     return OUT_DIR / f"{today}.jsonl"
 

@@ -55,7 +55,7 @@ import json
 import os
 import socket
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -71,7 +71,7 @@ def default_socket() -> str:
 
 
 def utcnow_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def ms_to_iso(ts: int) -> str:
@@ -82,7 +82,7 @@ def ms_to_iso(ts: int) -> str:
     >>> ms_to_iso(0)
     '1970-01-01T00:00:00Z'
     """
-    return datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime(
+    return datetime.fromtimestamp(ts / 1000, tz=UTC).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
 

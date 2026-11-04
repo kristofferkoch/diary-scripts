@@ -62,7 +62,7 @@ class Scratch:
     root: Path
 
     @classmethod
-    def create(cls, base: Path) -> "Scratch":
+    def create(cls, base: Path) -> Scratch:
         root = (base / "e2e").resolve()
         root.mkdir(parents=True, exist_ok=False)
         # The audit daemon refuses a state or socket directory that is group or
@@ -324,7 +324,7 @@ class Stack:
     def decide(
         self, repo: str, action: str, queue_oid: str, base_oid: str,
         transaction: str = "e2e-transaction",
-        publisher: queue.QueuePaths | None = None,  # type: ignore[valid-type]
+        publisher: console.Publisher | None = None,
     ) -> dict[str, Any]:
         from scripts import diary_merge_console_service as executor
 
@@ -345,7 +345,7 @@ class Stack:
                 publisher=publisher or publish_without_venv,
                 lock_state="locked",
             )
-        except Exception as exc:  # mirrored to the socket reply the console sees
+        except Exception as exc:  # noqa: BLE001 — mirrored to the socket reply the console sees
             return executor.error_reply(exc)
 
     def close(self) -> None:

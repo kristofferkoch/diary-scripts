@@ -34,6 +34,7 @@ os.environ["DIARY_LEGACY_STATE_DIR"] = str(
 # embed_images. Pin fixed config paths to sanitized fixtures, never real
 # deployment files. Tests for missing/malformed configs monkeypatch these paths.
 from mail_reader import config as diary_config
+
 diary_config.HOSTS_CONFIG_PATH = Path(__file__).resolve().parent / "fixtures" / "hosts.toml"
 diary_config.TRUSTED_CONFIG_PATH = Path("/nonexistent-diary-trusted-for-tests.toml")
 diary_config.reload()

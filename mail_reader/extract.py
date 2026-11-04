@@ -25,7 +25,6 @@ from typing import Any, TypedDict
 
 import psycopg
 
-
 ENTITY_KINDS = frozenset({
     "person", "org", "place", "money", "identifier", "contact", "url",
 })

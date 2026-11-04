@@ -141,7 +141,7 @@ def run_command(argv: list[str] | tuple[str, ...],
     started = time.monotonic()
     try:
         proc = subprocess.run(list(argv), capture_output=True, text=True,
-                              timeout=timeout)
+                              check=False, timeout=timeout)
         return {
             "ok": proc.returncode == 0,
             "exit_code": proc.returncode,

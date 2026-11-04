@@ -52,10 +52,10 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Generator, Mapping
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 import httpx
@@ -347,7 +347,7 @@ def jwt_sub(access_token: str) -> str:
 
 
 @contextlib.contextmanager
-def file_lock(path: Path, *, timeout: float = 90.0, stale_after: float = 300.0) -> Iterator[None]:
+def file_lock(path: Path, *, timeout: float = 90.0, stale_after: float = 300.0) -> Generator[None]:
     """``O_CREAT|O_EXCL`` lock — works across processes, not just threads.
 
     Serialises load → refresh → save on the token file. A crashed holder
@@ -632,10 +632,10 @@ class VigiloApi:
         self._app.close()
         self._web.close()
 
-    def __enter__(self) -> "VigiloApi":
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, *exc: Any) -> None:
+    def __exit__(self, *exc: object) -> None:
         self.close()
 
     @property
@@ -983,8 +983,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         params = json.loads(args.params)
         if not isinstance(params, dict):
-            raise ValueError("params must be a JSON object")
-    except ValueError as e:
+            raise TypeError("params must be a JSON object")
+    except (TypeError, ValueError) as e:
         ap.error(f"invalid params JSON: {e}")
         return 2
 

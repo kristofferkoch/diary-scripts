@@ -14,10 +14,11 @@ import re
 import sqlite3
 import time
 import unicodedata
+from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from scripts.event_spool import EVENT_ID_RE
 

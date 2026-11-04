@@ -16,22 +16,19 @@ from __future__ import annotations
 
 import http.client
 import json
-import os
-import socket
 import socketserver
 import threading
 import urllib.parse
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from scripts import diary_lock_console_ui as ui
 from scripts import diary_merge_console_service as executor
-from scripts import agent_merge_queue as queue
 from scripts.e2e import harness
-
 
 LOOPBACK_HOST = "127.0.0.1"
 
@@ -58,7 +55,7 @@ class FakeAuthelia:
         state = self
 
         class Handler(BaseHTTPRequestHandler):
-            def log_message(self, *args: Any) -> None:  # keep pytest output clean
+            def log_message(self, format: str, *args: Any) -> None:  # keep pytest output clean
                 pass
 
             def do_GET(self) -> None:
@@ -151,7 +148,7 @@ class FakeFresh:
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
 
-            def log_message(self, *args: Any) -> None:
+            def log_message(self, format: str, *args: Any) -> None:
                 pass
 
             def _body(self) -> bytes:
@@ -249,7 +246,7 @@ class ExecutorHandler(socketserver.StreamRequestHandler):
                     publisher=harness.publish_without_venv,
                     lock_state="locked",
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — mirror executor failures to the test socket
                 reply = executor.error_reply(exc)
         self.wfile.write(json.dumps(reply).encode("ascii") + b"\n")
 
@@ -277,7 +274,7 @@ class FrontProxy(ThreadingHTTPServer):
 class FrontHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
-    def log_message(self, *args: Any) -> None:
+    def log_message(self, format: str, *args: Any) -> None:
         pass
 
     def _target_port(self) -> int:

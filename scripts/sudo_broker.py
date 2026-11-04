@@ -53,7 +53,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Callable
+from collections.abc import Callable
 
 if __package__:
     from scripts import broker_audit
@@ -393,7 +393,7 @@ def approve(
             prompt_line = "└─ approve? [y/N] "
             auto = AUTO_ACCEPT_ALL and not require_confirmation
             with _term_lock:
-                print("", flush=True)
+                print(flush=True)
                 print("┌─ sudo-broker " + "─" * 58, flush=True)
                 print(f"│ from : {name} (uid {uid}, pid {pid})", flush=True)
                 print(f"│ cwd  : {sanitize(cwd, 512)}", flush=True)
@@ -446,7 +446,7 @@ def approve(
 def execute(conn: socket.socket, cmd: str, cwd: str, target: pwd.struct_passwd) -> None:
     workdir = cwd if cwd and os.path.isdir(cwd) else "/"
     try:
-        proc = subprocess.Popen(  # noqa: S603 - the human approved this exact string
+        proc = subprocess.Popen(
             ["/bin/bash", "-c", cmd],
             cwd=workdir,
             stdin=subprocess.DEVNULL,

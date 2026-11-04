@@ -18,10 +18,9 @@ from __future__ import annotations
 
 import json
 import os
-import threading
-import time
 import subprocess
-import sys
+import threading
+from collections.abc import Generator
 from pathlib import Path
 
 import pytest
@@ -44,7 +43,7 @@ def _provisioned() -> tuple[str, str]:
 
 
 @pytest.fixture
-def stack(tmp_path: Path) -> browser.BrowserStack:
+def stack(tmp_path: Path) -> Generator[browser.BrowserStack]:
     built = browser.start(tmp_path)
     try:
         yield built
@@ -56,7 +55,7 @@ def stack(tmp_path: Path) -> browser.BrowserStack:
 def run_browser(
     stack: browser.BrowserStack,
     session: str,
-    steps: list[dict[str, str]],
+    steps: list[dict[str, object]],
     *,
     transaction: str | None = None,
 ) -> dict[str, str]:
@@ -91,7 +90,7 @@ def run_browser(
         (xdg / name).mkdir(parents=True, exist_ok=True)
     proc = subprocess.run(
         ["node", str(DRIVER), json.dumps(job)],
-        capture_output=True, text=True, env=env, timeout=120,
+        capture_output=True, text=True, check=False, env=env, timeout=120,
     )
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout.strip().splitlines()[-1])
@@ -270,9 +269,10 @@ def test_stale_pair_costs_a_re_review_not_a_new_ceremony(
     # The GET renders the reviewed pair; the decision POST changes the queue
     # first, so the form and the live queue disagree exactly as they would if
     # the owner left the page open.
-    stack.proxy.before_decide = lambda: harness.enqueue_change(
-        stack.harness_stack.scripts, "later.txt", "later\n",
-    )
+    def change_queue() -> None:
+        harness.enqueue_change(stack.harness_stack.scripts, "later.txt", "later\n")
+
+    stack.proxy.before_decide = change_queue
 
     result = run_browser(
         stack, session,

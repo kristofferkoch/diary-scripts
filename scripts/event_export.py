@@ -7,11 +7,17 @@ import json
 import os
 import stat
 import subprocess
+from collections.abc import Callable, Iterable
 from email.policy import default as email_default
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any
 
-from scripts.event_spool import EVENT_ID_RE, EventSpool, EventValidationError, build_event
+from scripts.event_spool import (
+    EVENT_ID_RE,
+    EventSpool,
+    EventValidationError,
+    build_event,
+)
 from scripts.mailshow import html_to_text
 from scripts.safe_io import atomic_write_text
 

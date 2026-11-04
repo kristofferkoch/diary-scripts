@@ -251,7 +251,7 @@ def test_binary_attachment_says_so(workspace: dict[str, Path]):
 
 
 def test_extract_text_dispatch():
-    assert vw.extract_text("hei".encode(), "text/plain", "a.txt") == "hei"
+    assert vw.extract_text(b"hei", "text/plain", "a.txt") == "hei"
     assert vw.extract_text(b"\x00\x01", "application/octet-stream", "a.bin") is None
     calls: list[str] = []
     monkey = pytest.MonkeyPatch()

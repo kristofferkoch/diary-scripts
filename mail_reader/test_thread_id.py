@@ -71,8 +71,8 @@ def test_equality_to_int_raises_type_error():
 def test_equality_to_none_is_false_no_raise():
     """`tid == None` is allowed (idiomatic optional check) — returns
     False without raising. Same for `!=`."""
-    assert (ThreadId("XXX") == None) is False  # noqa: E711
-    assert (ThreadId("XXX") != None) is True   # noqa: E711
+    assert (ThreadId("XXX") == None) is False
+    assert (ThreadId("XXX") != None) is True
 
 
 def test_membership_in_str_set_is_false_not_raise():

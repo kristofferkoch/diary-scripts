@@ -86,7 +86,7 @@ def _load_important() -> list[re.Pattern[str]]:
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        out.append(re.compile(line, re.I))
+        out.append(re.compile(line, re.IGNORECASE))
     return out
 
 

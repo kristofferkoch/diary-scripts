@@ -6,12 +6,12 @@ import grp
 import hashlib
 import json
 import os
-import pwd
 import socket
 import stat
 import threading
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -451,9 +451,11 @@ def test_post_send_crash_reuses_emission_and_reports_do_not_overcount(tmp_path: 
             raise OSError("simulated crash after journal accept")
         save()
 
-    with patch.object(svc.store, "_save_locked", side_effect=fail_post_send_save):
-        with pytest.raises(OSError, match="after journal accept"):
-            svc.write(event(), peer())
+    with (
+        patch.object(svc.store, "_save_locked", side_effect=fail_post_send_save),
+        pytest.raises(OSError, match="after journal accept"),
+    ):
+        svc.write(event(), peer())
     first = fields(sink.recv(65_535))
 
     restarted = service(tmp_path, tmp_path / "journal.sock", clock=lambda: now[0])
@@ -533,9 +535,11 @@ def test_process_revocation_check_fails_closed_on_unreadable_identity(tmp_path: 
     process = tmp_path / "proc" / "101"
     process.mkdir(parents=True)
     (process / "status").write_text("Name:\tmissing identity\n", encoding="ascii")
-    with patch.object(audit.grp, "getgrnam", return_value=SimpleNamespace(gr_gid=900)):
-        with pytest.raises(audit.AuditError, match="unreadable process identity"):
-            audit.journal_group_conflicts("diary-audit-journal", str(tmp_path / "proc"))
+    with (
+        patch.object(audit.grp, "getgrnam", return_value=SimpleNamespace(gr_gid=900)),
+        pytest.raises(audit.AuditError, match="unreadable process identity"),
+    ):
+        audit.journal_group_conflicts("diary-audit-journal", str(tmp_path / "proc"))
 
 
 def test_state_cardinality_is_bounded_without_dropping_active_counters(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
