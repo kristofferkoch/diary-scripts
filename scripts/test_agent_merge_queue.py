@@ -891,6 +891,117 @@ def test_sync_does_not_require_historical_submodule_commits(
     assert run("git", "ls-tree", "HEAD", "diary-scripts", cwd=paths.integration).split()[2] == vanished
 
 
+@pytest.fixture
+def submodule_env(tmp_path: Path) -> SimpleNamespace:
+    """A scripts integration checkout that is a real submodule.
+
+    The diary workspace records ``diary-scripts`` as a gitlink, so after every
+    diary approval the submodule is detached at that commit. ``s1`` is the
+    recorded gitlink, ``s2`` is approved scripts master, and ``s3`` is the next
+    reviewed scripts commit.
+    """
+    scripts = tmp_path / "scripts-approved"
+    scripts.mkdir()
+    run("git", "init", "-b", "master", cwd=scripts)
+    run("git", "config", "user.name", "Queue Test", cwd=scripts)
+    run("git", "config", "user.email", "queue@example.invalid", cwd=scripts)
+    commit(scripts, "s.txt", "s1\n")
+    s1 = run("git", "rev-parse", "HEAD", cwd=scripts)
+    commit(scripts, "s.txt", "s2\n")
+    s2 = run("git", "rev-parse", "HEAD", cwd=scripts)
+
+    superproject = tmp_path / "diary"
+    superproject.mkdir()
+    run("git", "init", "-b", "master", cwd=superproject)
+    run("git", "config", "user.name", "Queue Test", cwd=superproject)
+    run("git", "config", "user.email", "queue@example.invalid", cwd=superproject)
+    commit(superproject, "README.md", "diary\n")
+    run("git", "-c", "protocol.file.allow=always", "submodule", "add",
+        str(scripts), "diary-scripts", cwd=superproject)
+    run("git", "commit", "-m", "add the submodule", cwd=superproject)
+    integration = superproject / "diary-scripts"
+    run("git", "checkout", "--detach", s1, cwd=integration)
+    run("git", "add", "diary-scripts", cwd=superproject)
+    run("git", "commit", "-m", "record the gitlink", cwd=superproject)
+
+    review_config = tmp_path / "review.toml"
+    review_config.write_text('[review]\nmodel = "local-test"\n')
+    paths = amq.QueuePaths(
+        integration=integration,
+        approved=scripts,
+        queue=tmp_path / "diary-scripts-automatic",
+        worktrees=tmp_path / "diary-worktrees",
+        lock=tmp_path / "queue.lock",
+        review_config=review_config,
+    )
+    return SimpleNamespace(
+        paths=paths, approved=scripts, integration=integration,
+        superproject=superproject, s1=s1, s2=s2,
+    )
+
+
+def _publish(env: SimpleNamespace, reviewed: str) -> bool:
+    return amq.publish_fetched(
+        reviewed, env.paths, push=False, sync_environment=False,
+        synchronize_queue=False,
+    )
+
+
+def test_detached_submodule_integration_publishes_after_a_pointer_bump(
+    submodule_env: SimpleNamespace,
+):
+    """The documented bump leaves a detached submodule; scripts approval must work."""
+    env = submodule_env
+    assert (env.integration / ".git").is_file()
+    assert run("git", "rev-parse", "HEAD", cwd=env.integration) == env.s1
+    assert run("git", "rev-parse", "HEAD:diary-scripts", cwd=env.superproject) == env.s1
+
+    run("git", "checkout", "-q", "-b", "dev/change", cwd=env.approved)
+    commit(env.approved, "s.txt", "s3\n")
+    s3 = run("git", "rev-parse", "HEAD", cwd=env.approved)
+    run("git", "checkout", "-q", "master", cwd=env.approved)
+
+    assert _publish(env, s3) is True
+    # The detached submodule fast-forwards to the newly approved commit, so the
+    # next scripts approval starts from an approved commit instead of a branch.
+    assert run("git", "rev-parse", "HEAD", cwd=env.integration) == s3
+    assert run("git", "rev-parse", "master", cwd=env.approved) == s3
+
+
+def test_submodule_integration_head_must_match_the_gitlink(
+    submodule_env: SimpleNamespace,
+):
+    env = submodule_env
+    run("git", "checkout", "--detach", env.s2, cwd=env.integration)
+
+    with pytest.raises(amq.QueueError) as error:
+        _publish(env, env.s2)
+
+    message = str(error.value)
+    assert env.s2 in message
+    assert env.s1 in message
+
+
+def test_dirty_submodule_integration_is_rejected(submodule_env: SimpleNamespace):
+    env = submodule_env
+    (env.integration / "s.txt").write_text("local work\n")
+
+    with pytest.raises(amq.QueueError, match="uncommitted"):
+        _publish(env, env.s2)
+    assert (env.integration / "s.txt").read_text() == "local work\n"
+
+
+def test_normal_integration_checkout_still_requires_master(paths: amq.QueuePaths):
+    run("git", "checkout", "-q", "-b", "dev/not-master", cwd=paths.integration)
+    reviewed_oid = run("git", "rev-parse", "master", cwd=paths.approved)
+
+    with pytest.raises(amq.QueueError, match="not on master"):
+        amq.publish_fetched(
+            reviewed_oid, paths, push=False, sync_environment=False,
+            synchronize_queue=False,
+        )
+
+
 def test_doctor_flags_a_stale_installed_client(tmp_path: Path) -> None:
     """D6: approving a client change must not silently leave the old one running."""
     approved = tmp_path / "agent_merge_queue.py"

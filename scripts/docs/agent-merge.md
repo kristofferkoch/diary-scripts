@@ -125,6 +125,17 @@ reverted the sjekk-cursor change in `master` even though the approved scripts
 repository still had it). It applies to the unattended memory path as well, so
 a routine memory publication cannot roll the pointer back either.
 
+### Integration checkout after a pointer bump
+
+The scripts integration checkout is the diary workspace's `diary-scripts`
+submodule, so a submodule update leaves it detached at the gitlink the diary
+records. Approval accepts that detached HEAD only when the checkout is clean
+and `HEAD` equals `git -C <superproject> rev-parse HEAD:diary-scripts`; a
+different commit is refused and the error names both OIDs. A normal integration
+checkout (the diary workspace itself, where `.git` is a directory) must still be
+on `master`, so the diary-side guard is unchanged. The hand workaround of moving
+the submodule's `master` branch before approving is no longer needed.
+
 For scripts, an allowlist pre-scan rejects simple unapproved identities before
 queue acceptance. The request returns sanitized categories and paths to the
 producing agent, whose worktree remains available for fix-and-retry; matched

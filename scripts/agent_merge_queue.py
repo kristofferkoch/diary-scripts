@@ -195,6 +195,39 @@ def clean(repo: Path, *, safe: bool = False) -> bool:
     ).stdout.strip()
 
 
+def ensure_integration_head(paths: QueuePaths) -> None:
+    """Require a safe integration HEAD for the checkout kind in use.
+
+    A normal checkout (``.git`` is a directory) must be on ``master`` exactly
+    as before. The scripts integration checkout is instead the diary
+    workspace's ``diary-scripts`` submodule (``.git`` is a file), and a
+    submodule is normally detached at the gitlink the superproject records.
+    Demanding ``refs/heads/master`` there refused every approval that followed
+    a documented pointer bump. A submodule is accepted only when the caller
+    already found it clean and its HEAD is exactly the recorded gitlink;
+    any other detached commit is refused, naming both OIDs.
+    """
+    if not (paths.integration / ".git").is_file():
+        if git(paths.integration, "symbolic-ref", "HEAD").stdout.strip() != "refs/heads/master":
+            raise QueueError("integration checkout is not on master")
+        return
+    head = git(paths.integration, "rev-parse", "HEAD").stdout.strip()
+    superproject = paths.integration.parent
+    name = paths.integration.name
+    proc = git(superproject, "rev-parse", f"HEAD:{name}", check=False)
+    if proc.returncode:
+        raise QueueError(
+            f"integration submodule {paths.integration} is not recorded in "
+            f"{superproject}: {(proc.stderr or proc.stdout).strip()}"
+        )
+    recorded = proc.stdout.strip()
+    if head != recorded:
+        raise QueueError(
+            f"integration submodule HEAD {head} does not match the "
+            f"superproject gitlink {recorded} for {name} in {superproject}"
+        )
+
+
 GITLINK_MODE = "160000"
 
 
@@ -579,8 +612,7 @@ def publish_fetched(
     for label, repo in (("approved", paths.approved), ("integration", paths.integration)):
         if not clean(repo):
             raise QueueError(f"{label} checkout has uncommitted changes: {repo}")
-    if git(paths.integration, "symbolic-ref", "HEAD").stdout.strip() != "refs/heads/master":
-        raise QueueError("integration checkout is not on master")
+    ensure_integration_head(paths)
     if git(paths.approved, "symbolic-ref", "HEAD").stdout.strip() != "refs/heads/master":
         raise QueueError("approved checkout is not on master")
 
