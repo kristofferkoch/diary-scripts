@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Helper scripts: mail embedding pipeline (pgvector + llama.cpp qwen3-embedding), notmuch tag sync, inbox auto-archive."
 requires-python = ">=3.14"
 dependencies = [
-    "psycopg[binary]>=3.2",
+    "psycopg[c]>=3.2",
     "mail-parser-reply>=1.0",
     # mail_reader webapp
     "fastapi>=0.115",
@@ -91,8 +91,9 @@ packages = ["scripts", "mail_reader"]
 
 [dependency-groups]
 dev = [
-    "pytest>=8",
-    "ty>=0.0.38",   # Astral's modern type checker (alpha but works)
+    "pytest>=9.2.0",
+    "ruff>=0.17.3",
+    "ty>=0.0.97",   # Astral's modern type checker (alpha but works)
 ]
 
 [tool.pytest.ini_options]
