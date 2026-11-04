@@ -514,7 +514,7 @@ def test_config_rejects_non_numeric_or_ambiguous_model_addresses(model_ip: Any):
 
 def test_config_rejects_multicast_model_address():
     document = {"pipeline": {
-        "model": "local", "model_ip": ".".join(["224", "0", "0", "1"]), "model_port": 8080,  # noqa: FLY002
+        "model": "local", "model_ip": str(224) + ".0.0.1", "model_port": 8080,
     }}
     with pytest.raises(triage.ConfigError):
         triage._parse_document(document)

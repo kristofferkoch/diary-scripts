@@ -18,6 +18,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from mail_reader.config import cfg, legacy_state_root, workspace_root
 
 # Household first names the dashboard recognises in calendar titles.
@@ -637,7 +639,7 @@ def weather_block() -> dict[str, Any] | None:
     """Today + next 3 days, computed from yr.no compact timeseries."""
     try:
         payload = _fetch_yr_compact()
-    except Exception:  # noqa: BLE001 — optional dashboard data must not break rendering
+    except (httpx.HTTPError, TypeError, ValueError):
         return None
     series = (payload.get("properties") or {}).get("timeseries") or []
     if not series:
@@ -753,7 +755,7 @@ def _fetch_nowcast_payload() -> dict[str, Any] | None:
         _nowcast_cache["payload"] = payload
         _nowcast_cache["fetched_at"] = now
         return payload
-    except Exception:  # noqa: BLE001 — optional dashboard data must not break rendering
+    except (httpx.HTTPError, TypeError, ValueError):
         return None
 
 
@@ -855,7 +857,7 @@ def sun_block() -> dict[str, str] | None:
             "Oslo", "Norway", "Europe/Oslo", WEATHER_LAT, WEATHER_LON
         )
         s = sun(loc.observer, date=_dt.date.today(), tzinfo=loc.tzinfo)
-    except Exception:  # noqa: BLE001 — optional dashboard data must not break rendering
+    except (httpx.HTTPError, TypeError, ValueError):
         return None
     return {
         "rise": s["sunrise"].strftime("%H:%M"),

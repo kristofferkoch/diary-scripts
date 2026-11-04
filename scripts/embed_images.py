@@ -48,6 +48,7 @@ import base64
 import io
 import json
 import os
+import subprocess
 import sys
 import time
 import urllib.request
@@ -215,7 +216,7 @@ def _record_index(source: str) -> dict[str, dict[str, Any]]:
     for rec in iter_records(source, verbose=False):
         try:
             payload = BUILDERS[source](rec)
-        except Exception:  # noqa: BLE001, S112 — skip malformed image records
+        except (OSError, ValueError, TypeError, RuntimeError, KeyError, subprocess.SubprocessError):
             continue
         if payload is not None:
             index[payload["mid"]] = rec
@@ -465,14 +466,14 @@ def _store(conn: psycopg.Connection, batch: list[Prepared],
                     "WHERE id = %s",
                     (len(prep["description"]), VLM_MODEL, row["att_id"]))
             done += 1
-        except Exception as e:  # noqa: BLE001 — isolate bad images and embedding failures
+        except (OSError, ValueError, TypeError, RuntimeError, KeyError, AssertionError, psycopg.Error, subprocess.SubprocessError) as e:
             failed += 1
             print(f"  !! {row['mid']} {row['filename']} (write): {e}",
                   file=sys.stderr)
             try:
                 _mark_failure(conn, row)
-            except Exception:  # noqa: BLE001, S110 — failure marking is best effort
-                pass
+            except psycopg.Error as e:
+                print(f"  !! could not mark image failure: {e}", file=sys.stderr)
     return done, failed
 
 
@@ -510,7 +511,7 @@ def process(conn: psycopg.Connection, sources: tuple[str, ...], limit: int,
             d, f = flush(conn, pending, verbose)
             done += d
             failed += f
-        except Exception as e:  # noqa: BLE001 — isolate bad images and embedding failures
+        except (OSError, ValueError, TypeError, RuntimeError, KeyError, AssertionError, psycopg.Error, subprocess.SubprocessError) as e:
             # Embed endpoint down etc: count attempts so a persistent
             # outage doesn't re-describe the same images every run.
             failed += len(pending)
@@ -519,8 +520,8 @@ def process(conn: psycopg.Connection, sources: tuple[str, ...], limit: int,
             for prep in pending:
                 try:
                     _mark_failure(conn, prep["row"])
-                except Exception:  # noqa: BLE001, S110 — failure marking is best effort
-                    pass
+                except psycopg.Error as e:
+                    print(f"  !! could not mark image failure: {e}", file=sys.stderr)
         pending = []
         pending_chunks = 0
 
@@ -550,13 +551,13 @@ def process(conn: psycopg.Connection, sources: tuple[str, ...], limit: int,
                 print(f"  {n}/{len(rows)} {row['source']} {row['filename']} "
                       f"— skipped:no-blob ({e})", file=sys.stderr)
             continue
-        except Exception as e:  # noqa: BLE001 — isolate bad images and embedding failures
+        except (OSError, ValueError, TypeError, RuntimeError, KeyError, AssertionError, psycopg.Error, subprocess.SubprocessError) as e:
             failed += 1
             print(f"  !! {row['mid']} {row['filename']}: {e}", file=sys.stderr)
             try:
                 _mark_failure(conn, row)
-            except Exception:  # noqa: BLE001, S110 — failure marking is best effort
-                pass
+            except psycopg.Error as e:
+                print(f"  !! could not mark image failure: {e}", file=sys.stderr)
             continue
         text = f"Vedlegg {row['filename']} (bilde): {description}"
         pending.append({"row": row, "description": description,

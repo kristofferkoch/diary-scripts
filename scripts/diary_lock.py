@@ -1539,7 +1539,7 @@ class LockRequestHandler(socketserver.StreamRequestHandler):
         except (LockError, OSError) as exc:
             try:
                 server.controller.failsafe("request_failed")
-            except Exception as failsafe_error:  # noqa: BLE001 — latch every secondary failsafe failure
+            except (LockError, OSError, RuntimeError) as failsafe_error:
                 server.latch_failure(failsafe_error)
                 reply = {"ok": False, "error": f"{exc}; {failsafe_error}"}
             else:
@@ -1804,7 +1804,7 @@ def daemon_main(argv: list[str] | None = None) -> int:
             def turn_failed(error: Exception) -> None:
                 try:
                     controller.failsafe("turn_request_failed")
-                except Exception as failsafe_error:  # noqa: BLE001 — latch every secondary failsafe failure
+                except (LockError, OSError, RuntimeError) as failsafe_error:
                     server.latch_failure(failsafe_error)
                 else:
                     server.latch_failure(error)

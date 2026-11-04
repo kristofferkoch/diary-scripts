@@ -321,7 +321,7 @@ class MergeConsole:
             if head == reviewed_oid:
                 return "not_published"
             return "unknown"
-        except Exception:  # noqa: BLE001 — publication state is unknowable after query failure
+        except (OSError, ValueError, RuntimeError):
             return "unknown"
 
     def _record_best_effort(
@@ -329,10 +329,8 @@ class MergeConsole:
     ) -> None:
         try:
             self._record(action, oid, base, outcome)
-        except Exception:  # noqa: BLE001, S110 — preserve the original publication error
-            # Reporting the repository state must not be masked by a second
-            # audit failure.
-            pass
+        except (OSError, ValueError, RuntimeError):
+            return
 
 
 DIFF_LINE_CLASSES = {

@@ -345,7 +345,7 @@ class Stack:
                 publisher=publisher or publish_without_venv,
                 lock_state="locked",
             )
-        except Exception as exc:  # noqa: BLE001 — mirrored to the socket reply the console sees
+        except (OSError, ValueError, RuntimeError) as exc:
             return executor.error_reply(exc)
 
     def close(self) -> None:

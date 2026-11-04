@@ -66,7 +66,13 @@ def test_limiter_bursts_then_blocks():
     assert not lim.allow()
 
 
-@pytest.mark.parametrize("value", [None, 1, True, "", ".", "..", "../secret"])
+@pytest.mark.parametrize("value", [None, 1, True])
+def test_attachment_request_rejects_non_string_ids(value):
+    with pytest.raises(TypeError):
+        attachment_id(_get(value))
+
+
+@pytest.mark.parametrize("value", ["", ".", "..", "../secret"])
 def test_attachment_request_rejects_ambiguous_ids(value):
     with pytest.raises(ValueError):
         attachment_id(_get(value))

@@ -669,7 +669,7 @@ def _cleanup(catalog: Catalog, store: EvidenceStore, adapter: Adapter) -> dict[s
     request = _request(catalog, store, case, "cleanup")
     try:
         response = validate_response(case, adapter.call(request, case.timeout_seconds))
-    except Exception as exc:  # noqa: BLE001 — adapter failures become protocol evidence
+    except (OSError, TypeError, ValueError, RuntimeError) as exc:
         response = _protocol_failure(exc)
     store.record_cleanup(response)
     return response

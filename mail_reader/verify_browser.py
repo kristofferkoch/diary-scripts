@@ -320,7 +320,7 @@ def main() -> int:
         for run in checks:
             try:
                 r = run()
-            except Exception as e:  # noqa: BLE001 — report each independent browser check
+            except (PlaywrightError, AssertionError, OSError, ValueError, RuntimeError) as e:
                 r = Result(name="(uncaught)", ok=False,
                            error=f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
             results.append(r)

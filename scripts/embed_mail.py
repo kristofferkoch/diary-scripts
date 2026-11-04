@@ -67,6 +67,7 @@ import zipfile
 from collections import defaultdict
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime, timedelta
+from email.errors import MessageError
 from email.policy import default as email_default
 from email.utils import parsedate_to_datetime
 from typing import TypedDict
@@ -106,7 +107,7 @@ try:
     # 'da' catches Norwegian "skrev" / Danish; 'sv' covers Swedish.
     _REPLY_PARSER = EmailReplyParser(languages=["en", "da", "sv"])
     HAVE_REPLY_PARSER = True
-except Exception:  # noqa: BLE001 — malformed message input is skippable
+except (ImportError, AttributeError, LookupError, TypeError, ValueError, MessageError, UnicodeError):
     HAVE_REPLY_PARSER = False
 
 ME = [a.strip() for a in os.environ.get(
@@ -196,7 +197,7 @@ def strip_quotes_sig(text: str) -> str:
     if HAVE_REPLY_PARSER:
         try:
             t = _REPLY_PARSER.read(text).latest_reply or text
-        except Exception:  # noqa: BLE001 — malformed message input is skippable
+        except (ImportError, AttributeError, LookupError, TypeError, ValueError, MessageError, UnicodeError):
             t = text
     else:
         t = text
@@ -218,7 +219,7 @@ def pick_date(msg) -> str | None:
     for raw in msg.get_all("Date", []):
         try:
             dt = parsedate_to_datetime(raw)
-        except Exception:  # noqa: BLE001, S112 — malformed message input is skippable
+        except (TypeError, ValueError, MessageError, UnicodeError):
             continue
         if dt is None:
             continue
@@ -354,7 +355,7 @@ def iter_attachments(raw: bytes) -> Iterator[tuple[str, str, bytes, str]]:
             continue
         try:
             data = part.get_payload(decode=True)
-        except Exception:  # noqa: BLE001, S112 — malformed message input is skippable
+        except (TypeError, ValueError, MessageError, UnicodeError):
             continue
         # decode=True returns bytes for non-multipart leaf parts; skip otherwise.
         if not isinstance(data, bytes):
@@ -693,7 +694,7 @@ def _flush_batch(conn: psycopg.Connection, tier: int, batch: list[MessagePayload
                 row_id = row[0]
                 _insert_payload_rows(cur, row_id, payload, slots)
             done += 1
-        except Exception as e:  # noqa: BLE001 — isolate bad messages and embedding failures
+        except (OSError, ValueError, TypeError, RuntimeError, KeyError, AssertionError, psycopg.Error, subprocess.SubprocessError, MessageError) as e:
             failed += 1
             if verbose:
                 print(f"  !! {payload['mid']} (write): {e}", file=sys.stderr)
@@ -722,7 +723,7 @@ def process(conn: psycopg.Connection, tier: int, limit: int | None, verbose: boo
                 continue
         try:
             payload = _prepare_message(mid)
-        except Exception as e:  # noqa: BLE001 — isolate bad messages and embedding failures
+        except (OSError, ValueError, TypeError, RuntimeError, KeyError, AssertionError, psycopg.Error, subprocess.SubprocessError, MessageError) as e:
             failed += 1
             print(f"  !! {mid} (prepare): {e}", file=sys.stderr)
             continue
@@ -736,7 +737,7 @@ def process(conn: psycopg.Connection, tier: int, limit: int | None, verbose: boo
             try:
                 d, f = _flush_batch(conn, tier, pending, verbose)
                 done += d; failed += f
-            except Exception as e:  # noqa: BLE001 — isolate bad messages and embedding failures
+            except (OSError, ValueError, TypeError, RuntimeError, KeyError, AssertionError, psycopg.Error, subprocess.SubprocessError, MessageError) as e:
                 failed += len(pending)
                 print(f"  !! batch embed failed ({len(pending)} msgs): {e}",
                       file=sys.stderr)
@@ -754,7 +755,7 @@ def process(conn: psycopg.Connection, tier: int, limit: int | None, verbose: boo
         try:
             d, f = _flush_batch(conn, tier, pending, verbose)
             done += d; failed += f
-        except Exception as e:  # noqa: BLE001 — isolate bad messages and embedding failures
+        except (OSError, ValueError, TypeError, RuntimeError, KeyError, AssertionError, psycopg.Error, subprocess.SubprocessError, MessageError) as e:
             failed += len(pending)
             print(f"  !! final batch embed failed ({len(pending)} msgs): {e}",
                   file=sys.stderr)
@@ -780,7 +781,7 @@ def _flush_reembed(conn: psycopg.Connection,
             with conn.cursor() as cur, conn.transaction():
                 _insert_payload_rows(cur, row_id, payload, slots)
             done += 1
-        except Exception as e:  # noqa: BLE001 — isolate bad messages and embedding failures
+        except (OSError, ValueError, TypeError, RuntimeError, KeyError, AssertionError, psycopg.Error, subprocess.SubprocessError, MessageError) as e:
             failed += 1
             if verbose:
                 print(f"  !! {payload['mid']} (write): {e}", file=sys.stderr)
@@ -820,7 +821,7 @@ def process_reembed(conn: psycopg.Connection, limit: int | None,
         try:
             d, f = _flush_reembed(conn, pending, verbose)
             done += d; failed += f
-        except Exception as e:  # noqa: BLE001 — isolate bad messages and embedding failures
+        except (OSError, ValueError, TypeError, RuntimeError, KeyError, AssertionError, psycopg.Error, subprocess.SubprocessError, MessageError) as e:
             failed += len(pending)
             print(f"  !! batch embed failed ({len(pending)} msgs): {e}",
                   file=sys.stderr)
@@ -830,7 +831,7 @@ def process_reembed(conn: psycopg.Connection, limit: int | None,
     for n, (row_id, mid) in enumerate(rows, 1):
         try:
             payload = _prepare_message(mid)
-        except Exception as e:  # noqa: BLE001 — isolate bad messages and embedding failures
+        except (OSError, ValueError, TypeError, RuntimeError, KeyError, AssertionError, psycopg.Error, subprocess.SubprocessError, MessageError) as e:
             failed += 1
             print(f"  !! {mid} (prepare): {e}", file=sys.stderr)
             continue
