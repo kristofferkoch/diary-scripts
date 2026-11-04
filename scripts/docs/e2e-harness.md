@@ -271,7 +271,14 @@ nothing is written back to the checkouts.
   only the runtime changes. Each run records `SUBSTRATE accel=…` in the summary
   so a slow TCG run is never mistaken for a hang.
 - **Interface.** The rehearsal keeps `--approved-diary`, `--approved-scripts` and
-  `--keep`, and adds `--accel` and `--cache-dir`.
+  `--keep`, and adds `--accel`, `--cache-dir` and `--case both|happy|negative`.
+  The negative case needs no Authelia build, so it is the cheap one to run while
+  debugging.
+- **Measured (TCG, no `/dev/kvm`, 4 vCPU / 2 GiB).** Prepared base, once: ~10
+  minutes. Happy path: ~55 minutes, almost all of it Authelia's `go test` and
+  `go build`. Negative case: ~12 minutes. With KVM these should return to the
+  15–25-minute figure the container rehearsal quoted, but that is unmeasured
+  here.
 
 What it does:
 
@@ -324,6 +331,11 @@ and scratch directory for inspection.
   stand-in, not the installed unit.
 - **TCG says nothing about performance.** Without `/dev/kvm` the guest runs in
   software emulation, so the runtime is not a production measurement.
+- **The guest's SELinux policy is what makes the run slow-sensitive.** The
+  rehearsal found a real defect here that a container cannot see: an installer
+  that pre-created a `DynamicUser` state directory left an `unconfined_u`
+  directory, and systemd's rename at the next boot was denied, which crash-looped
+  the service. Keep the `avc: denied` assertion.
 
 ### Manual checklist after a real deployment
 
