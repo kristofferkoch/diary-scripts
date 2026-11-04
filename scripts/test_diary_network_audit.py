@@ -15,7 +15,6 @@ import pytest
 from scripts import diary_audit as audit
 from scripts import diary_network_audit as network
 
-
 UID = 1001
 GID = 1002
 GROUP = 30
@@ -516,7 +515,7 @@ def test_serve_fails_closed_when_audit_writer_is_unavailable(monkeypatch: pytest
             self.reads += 1
             if self.reads == 1:
                 return packet_message(ipv4())
-            raise socket.timeout("idle")
+            raise TimeoutError("idle")
 
         def close(self) -> None:
             self.closed = True

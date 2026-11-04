@@ -19,11 +19,17 @@ import re
 import stat
 import sys
 import tomllib
+from collections.abc import Generator, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
-from scripts.event_spool import EVENT_ID_RE, EventSpool, EventValidationError, canonical_json
+from scripts.event_spool import (
+    EVENT_ID_RE,
+    EventSpool,
+    EventValidationError,
+    canonical_json,
+)
 from scripts.safe_io import atomic_write_text, open_dir
 
 SCHEMA_VERSION = 1
@@ -208,7 +214,7 @@ def _valid_deadline(value: Any) -> bool:
             dt.date.fromisoformat(value)
             return True
         if DATETIME_RE.fullmatch(value):
-            parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+            parsed = dt.datetime.fromisoformat(value)
             return parsed.tzinfo is not None
     except ValueError:
         return False
@@ -343,7 +349,7 @@ def _state_datetime(value: Any, field: str) -> dt.datetime:
     if not isinstance(value, str) or not DATETIME_RE.fullmatch(value):
         raise StateError(f"triage state {field} is invalid")
     try:
-        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = dt.datetime.fromisoformat(value)
     except ValueError as exc:
         raise StateError(f"triage state {field} is invalid") from exc
     if parsed.tzinfo is None:
@@ -414,7 +420,7 @@ class TriageStore:
         return self.root / f"{event_id}.json"
 
     @contextlib.contextmanager
-    def lock(self) -> Iterator[None]:
+    def lock(self) -> Generator[None]:
         dir_fd = self._open_root(create=True)
         try:
             fd = os.open(".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)

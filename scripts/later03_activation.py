@@ -9,8 +9,9 @@ import shlex
 import stat
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 DEFAULT_EVIDENCE = "/etc/diary/later03-activation.conf"
 DEFAULT_DIARY_REPO = "/home/kek/diary-approved"

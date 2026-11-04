@@ -75,7 +75,7 @@ def _bounded_string(value: object, name: str, maximum: int = 512) -> str:
 def _timestamp(value: object, name: str) -> dt.datetime:
     text = _bounded_string(value, name, 64)
     try:
-        parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = dt.datetime.fromisoformat(text)
     except ValueError as exc:
         raise BaselineError(f"{name} must be ISO-8601") from exc
     if parsed.tzinfo is None:
@@ -451,12 +451,12 @@ def format_report(report: dict[str, Any]) -> str:
     coverage = report["coverage"]
     acceptance = report["acceptance"]
     lines = [
-        f"production-baseline sha256={report['report_sha256']} "
+        (f"production-baseline sha256={report['report_sha256']} "
         f"since={duration['started_at']} until={duration['ended_at']} "
-        f"duration_seconds={duration['seconds']}",
-        f"coverage={coverage['covered_count']}/{coverage['required_count']} "
+        f"duration_seconds={duration['seconds']}"),
+        (f"coverage={coverage['covered_count']}/{coverage['required_count']} "
         f"evidence_complete={str(acceptance['evidence_complete']).lower()} "
-        "live_verification=not_performed_by_this_tool",
+        "live_verification=not_performed_by_this_tool"),
     ]
     missing = [name for name, check in coverage["checks"].items() if not check["covered"]]
     if missing:

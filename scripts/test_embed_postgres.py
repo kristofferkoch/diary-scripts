@@ -48,11 +48,10 @@ def test_embed_messages_insert_replace_skip_and_cascade(
             "SELECT id, content_hash FROM messages WHERE message_id = 'spond:event:event-1'"
         )
         first_id, first_hash = cur.fetchone()
-    with psycopg.connect(test_pg_dsn) as check:
-        with check.cursor() as cur:
-            cur.execute("SELECT count(*) FROM messages WHERE id = %s", (first_id,))
-            row = cur.fetchone()
-            assert row is not None and row[0] == 1
+    with psycopg.connect(test_pg_dsn) as check, check.cursor() as cur:
+        cur.execute("SELECT count(*) FROM messages WHERE id = %s", (first_id,))
+        row = cur.fetchone()
+        assert row is not None and row[0] == 1
 
     records[:] = [_event("acceptedIds")]
     assert em.process(writer_conn, "spond", None, False) == (1, 0, 0)

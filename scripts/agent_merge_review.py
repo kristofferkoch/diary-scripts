@@ -26,7 +26,6 @@ from typing import Any
 from scripts.agent_merge_pii import (
     CONTROL_RE,
     DEFAULT_CONFIG,
-    DEFAULT_FAKE_IDENTITIES,
     MISLEADING_UNICODE_RE,
     Finding,
     PiiError,
@@ -232,9 +231,8 @@ def review_once(
         if current is None:
             return None
         report_path = report_dir / f"{current.oid}.json"
-        if report_path.exists() and not force:
-            if not load_report(report_path).get("stale", True):
-                return report_path
+        if report_path.exists() and not force and not load_report(report_path).get("stale", True):
+            return report_path
         config = read_config(config_path)
         prescan_findings = prescan(current.diff, current.messages, current.paths, config.allowed_identities)
         review_input = json.dumps({

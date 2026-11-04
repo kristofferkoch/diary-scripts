@@ -11,7 +11,6 @@ import pytest
 
 from scripts import diary_network_policy as policy
 
-
 UID = 1001
 
 

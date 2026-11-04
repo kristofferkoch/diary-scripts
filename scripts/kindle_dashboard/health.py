@@ -40,7 +40,7 @@ _HEALTH_FILE = Path(
 
 
 def _now() -> _dt.datetime:
-    return _dt.datetime.now(_dt.timezone.utc)
+    return _dt.datetime.now(_dt.UTC)
 
 
 def _iso(ts: _dt.datetime | None) -> str | None:

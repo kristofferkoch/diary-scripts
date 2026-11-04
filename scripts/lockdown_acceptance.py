@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tomllib
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -179,9 +179,7 @@ def _parse_catalog(raw: bytes) -> Catalog:
             raise AcceptanceError(f"case {case_id} has empty or unknown expectations")
         expected: dict[str, bool | int] = {}
         for key, value in raw_expected.items():
-            if isinstance(value, bool):
-                expected[key] = value
-            elif isinstance(value, int):
+            if isinstance(value, (bool, int)):
                 expected[key] = value
             else:
                 raise AcceptanceError(f"case {case_id} expectation {key} must be boolean or integer")
@@ -208,7 +206,7 @@ def _parse_catalog(raw: bytes) -> Catalog:
         coverage.update(case.coverage)
     if reboot_cases != 1:
         raise AcceptanceError("catalog must contain exactly one reboot case")
-    if dict((case.case_id, case.oid_equal) for case in cases if case.oid_equal) != {
+    if {case.case_id: case.oid_equal for case in cases if case.oid_equal} != {
         "preflight.deployed_identity": ("approved_commit_ids", "deployed_commit_ids"),
         "activation.integrated": ("approved_commit_ids", "deployed_commit_ids", "activated_commit_ids"),
     }:
@@ -232,7 +230,7 @@ def load_catalog(path: str | Path = DEFAULT_CATALOG) -> Catalog:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _json_bytes(value: object) -> bytes:
@@ -489,7 +487,7 @@ class EvidenceStore:
         cls, root: str | Path, catalog: Catalog, run_id: str | None = None,
         require_root_owned: bool = True,
     ) -> EvidenceStore:
-        selected = run_id or f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(4)}"
+        selected = run_id or f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(4)}"
         if not RUN_ID_RE.fullmatch(selected) or ".." in selected:
             raise AcceptanceError("invalid run ID")
         root_path = Path(root)
@@ -671,7 +669,7 @@ def _cleanup(catalog: Catalog, store: EvidenceStore, adapter: Adapter) -> dict[s
     request = _request(catalog, store, case, "cleanup")
     try:
         response = validate_response(case, adapter.call(request, case.timeout_seconds))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — adapter failures become protocol evidence
         response = _protocol_failure(exc)
     store.record_cleanup(response)
     return response

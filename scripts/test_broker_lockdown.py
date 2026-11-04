@@ -12,7 +12,6 @@ from scripts import broker_audit
 from scripts import diary_sync_broker as sync
 from scripts import sudo_broker as sudo
 
-
 CALLER = {"pid": 123, "uid": 1001, "gid": 1001}
 OWNER_UID = 1000
 

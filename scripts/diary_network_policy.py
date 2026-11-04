@@ -8,8 +8,9 @@ import os
 import pwd
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, cast
 
 TABLE = "diary_agent_policy"
 LEGACY_TABLE = "diary_agent_audit"
@@ -95,10 +96,10 @@ def ruleset(mode: str, uid: int) -> str:
     else:
         verdict = " drop" if mode == "locked" else ""
         lines.extend([
-            f'        {selector} ct state new counter log prefix "diary-{mode}-new" '
-            f"group 30 snaplen 256{verdict}",
-            f'        {selector} ct state established counter limit rate 10/second burst 20 packets '
-            f'log prefix "diary-{mode}-established" group 30 snaplen 256{verdict}',
+            (f'        {selector} ct state new counter log prefix "diary-{mode}-new" '
+            f"group 30 snaplen 256{verdict}"),
+            (f'        {selector} ct state established counter limit rate 10/second burst 20 packets '
+            f'log prefix "diary-{mode}-established" group 30 snaplen 256{verdict}'),
         ])
         if mode == "locked":
             lines.append(f"        {selector} counter drop")

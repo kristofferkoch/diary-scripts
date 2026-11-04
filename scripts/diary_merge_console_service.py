@@ -23,8 +23,6 @@ import pwd
 import socket
 import socketserver
 import struct
-import sys
-from pathlib import Path
 from typing import Any, Protocol
 
 from scripts import agent_merge_console as console
@@ -294,7 +292,7 @@ def _serve_connection(
     paths_by_repo: dict[str, queue.QueuePaths],
     verifier: GrantVerifier,
     auditor: console.DecisionAuditor,
-    publisher: console.Publisher,
+    publisher: console.Publisher | None,
     lock_state: Any,
 ) -> None:
     try:
@@ -373,7 +371,7 @@ class ExecutorServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer)
 
 
 class ExecutorHandler(socketserver.BaseRequestHandler):
-    server: ExecutorServer
+    server: ExecutorServer  # ty: ignore[invalid-mutable-override]
 
     def handle(self) -> None:
         server = self.server

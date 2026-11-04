@@ -82,6 +82,7 @@ def _poke_kindle() -> None:
              "kindle", "initctl restart dashboard"],
             timeout=15,
             capture_output=True,
+            check=False,
             text=True,
         )
         if result.returncode == 0:

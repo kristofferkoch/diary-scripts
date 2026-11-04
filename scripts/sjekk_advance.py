@@ -30,7 +30,6 @@ import sys
 from pathlib import Path
 
 from mail_reader.config import legacy_state_root
-
 from scripts import sjekk_cursor
 
 MANIFEST_NAME = "manifest.json"

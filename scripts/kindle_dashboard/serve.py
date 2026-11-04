@@ -122,6 +122,7 @@ def _sign_control(data: bytes) -> str | None:
             ["openssl", "dgst", "-sha256", "-sign", str(_SIGN_KEY)],
             input=data,
             capture_output=True,
+            check=False,
             timeout=10,
         )
     except Exception as exc:

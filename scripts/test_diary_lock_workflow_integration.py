@@ -10,15 +10,16 @@ import pytest
 
 from scripts import diary_lock_dashboard as dashboard
 from scripts import diary_lock_ui as ui
-from scripts.test_diary_lock_dashboard import controller_reply, owner_headers, web
+from scripts.test_diary_lock_dashboard import controller_reply, owner_headers
 from scripts.test_diary_lock_ui import (
     SESSION_COOKIE,
     action,
     authorize,
     confirm,
     request,
-    services,
 )
+
+pytest_plugins = ("scripts.test_diary_lock_dashboard", "scripts.test_diary_lock_ui")
 
 
 def test_dashboard_mount_data_drives_real_fresh_workflow(services: Any, web: Any) -> None:

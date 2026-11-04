@@ -24,9 +24,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Iterator
+from collections.abc import Iterator
+from datetime import UTC, datetime
+from typing import Any
 
 from mail_reader.config import workspace_root
 
@@ -46,8 +46,8 @@ def parse_iso(s: str) -> datetime:
         s = s[:-1] + "+00:00"
     dt = datetime.fromisoformat(s)
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 def iter_records(since: datetime | None,
@@ -58,7 +58,7 @@ def iter_records(since: datetime | None,
         if since is not None:
             try:
                 file_date = datetime.strptime(fp.stem, "%Y-%m-%d").replace(
-                    tzinfo=timezone.utc
+                    tzinfo=UTC
                 )
                 if file_date.date() < since.date():
                     continue

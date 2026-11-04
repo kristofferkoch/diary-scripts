@@ -264,6 +264,7 @@ printf '%s\n' "$SYNC_INSTALL_TEST_CONFIG_UID"
             env=env,
             capture_output=True,
             text=True,
+            check=False,
             timeout=30,
         )
     operations = log.read_text().splitlines()

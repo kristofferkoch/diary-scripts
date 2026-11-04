@@ -372,9 +372,8 @@ def test_lock_is_exclusive_then_released(tmp_path: Path):
     lock = tmp_path / "auth.json.lock"
     with file_lock(lock):
         assert lock.exists()
-        with pytest.raises(SkolemeldingError):
-            with file_lock(lock, timeout=0.2):
-                pass
+        with pytest.raises(SkolemeldingError), file_lock(lock, timeout=0.2):
+            pass
     assert not lock.exists()
 
 

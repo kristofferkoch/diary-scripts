@@ -31,12 +31,12 @@ import argparse
 import io
 import json
 import sys
-from datetime import datetime, timezone
+from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from mail_reader.config import legacy_state_root
-
 from scripts.vigilo_api import VigiloApi, VigiloError
 from scripts.vigilo_sync import CHECKOUT_EXPIRY_WARN_DAYS
 
@@ -61,8 +61,8 @@ def parse_iso(s: str) -> datetime:
         s = s[:-1] + "+00:00"
     dt = datetime.fromisoformat(s)
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 def load_state() -> dict[str, Any]:
@@ -84,7 +84,7 @@ def iter_records(since: datetime | None, until: datetime | None, kinds: set[str]
         if since is not None:
             try:
                 if datetime.strptime(fp.stem, "%Y-%m-%d").replace(
-                    tzinfo=timezone.utc
+                    tzinfo=UTC
                 ).date() < since.date():
                     continue
             except ValueError:

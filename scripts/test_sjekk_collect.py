@@ -12,7 +12,6 @@ import json
 import pytest
 
 from scripts import sjekk_collect
-from scripts import sjekk_cursor
 from scripts.sjekk_collect import (
     BASE_TRACKS,
     CURSOR_TRACK_FILES,

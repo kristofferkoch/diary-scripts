@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 
 from scripts import agent_merge_console as console
-from scripts import diary_audit
 from scripts import agent_merge_queue as queue
+from scripts import diary_audit
 
 
 def git(repo: Path, *args: str) -> str:
@@ -462,7 +462,7 @@ def test_publisher_failure_after_publication_reports_published(
     reviewed, base = _head(paths, "queue"), _head(paths, "approved")
 
     def publishes_then_fails(oid: str, target: queue.QueuePaths, **kwargs: object) -> bool:
-        queue.approve_queue(oid, target, sync_environment=False, **kwargs)  # type: ignore[arg-type]
+        queue.approve_queue(oid, target, sync_environment=False, **kwargs)  # ty: ignore[invalid-argument-type]
         raise RuntimeError("completion record lost")
 
     console_ = make_console(paths, reports, publisher=publishes_then_fails)

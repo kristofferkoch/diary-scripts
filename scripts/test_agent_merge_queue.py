@@ -141,6 +141,7 @@ def test_bundle_queue_and_agent_cleanup_do_not_touch_integration(paths: amq.Queu
     branch = subprocess.run(
         ["git", "show-ref", "--verify", "--quiet", "refs/heads/dev/change"],
         cwd=source_repo(paths),
+        check=False,
     )
     assert branch.returncode != 0, "agent cleanup deletes only the source branch"
     assert run("git", "rev-parse", "dev/change", cwd=paths.integration) == integration_head
@@ -377,6 +378,7 @@ def test_diary_regular_memory_change_publishes_without_owner_review(paths: amq.Q
     branch = subprocess.run(
         ["git", "show-ref", "--verify", "--quiet", "refs/heads/dev/diary"],
         cwd=source_repo(paths),
+        check=False,
     )
     assert branch.returncode != 0, "agent cleanup deletes the source branch"
     for repo in (paths.approved, paths.integration):

@@ -15,7 +15,6 @@ import os
 import re
 import urllib.parse
 from pathlib import Path
-from typing import cast
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -23,15 +22,17 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from . import agenda as agenda_mod
-from .auth import MailAuthMiddleware
 from . import calendar_md as calendar_mod
-from . import db, inbox as inbox_mod, message as message_mod, related as related_mod
+from . import db
 from . import entities as entities_mod
+from . import inbox as inbox_mod
+from . import message as message_mod
+from . import related as related_mod
 from . import summarize as summarize_mod
+from .auth import MailAuthMiddleware
 from .config import workspace_root
 from .date_format import relative_day, short_date, short_datetime
 from .thread_id import ThreadId
-
 
 REPO_ROOT = workspace_root()
 CALENDAR_MD = REPO_ROOT / "CALENDAR.md"
@@ -171,7 +172,7 @@ def get_tankekart(request: Request, message_id: str, mode: str = "chunks"):
     summary render no card)."""
     if mode not in ("chunks", "emergent"):
         mode = "chunks"
-    valid_mode = cast(related_mod.Mode, mode)
+    valid_mode = mode
     msg_id = urllib.parse.unquote(message_id)
     with db.connect() as conn:
         branches = related_mod.tankekart(conn, msg_id, mode=valid_mode)

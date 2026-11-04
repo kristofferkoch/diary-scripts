@@ -25,6 +25,7 @@ leaves would link nowhere in the mail UI.
 from __future__ import annotations
 
 import re
+import subprocess
 from collections import defaultdict
 from datetime import datetime
 from typing import Literal, TypedDict
@@ -34,7 +35,6 @@ import psycopg
 from scripts.embed_mail import chunk_text, embed_batch, nm_raw, parse_message
 
 from .thread_id import ThreadId
-
 
 Mode = Literal["chunks", "emergent"]
 
@@ -152,7 +152,7 @@ def _branches_live(conn: psycopg.Connection,
     run one nearest-neighbour query per chunk."""
     try:
         raw = nm_raw(notmuch_msg_id)
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return []
     _, body = parse_message(raw)
     if len(body) < 40:

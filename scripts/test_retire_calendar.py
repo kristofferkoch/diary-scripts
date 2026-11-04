@@ -7,15 +7,11 @@ from textwrap import dedent
 import pytest
 
 from scripts.retire_calendar import (
-    EVENT_RE,
-    MonthSection,
-    Document,
     ensure_section,
     event_dates,
     parse,
     retire,
 )
-
 
 # ---------- event_dates: pin the parser-contract for event lines ----------
 
@@ -270,7 +266,7 @@ def test_retire_span_kept_while_end_in_future() -> None:
         - **2026-06-29 – 2026-07-03** — Sommerskolen
         """
     )
-    new_src, new_dst, moved = retire(src, "## One-off events by month\n", dt.date(2026, 7, 3))
+    new_src, _new_dst, moved = retire(src, "## One-off events by month\n", dt.date(2026, 7, 3))
     # end == today → not strictly before → stays.
     assert moved == []
     assert new_src == src

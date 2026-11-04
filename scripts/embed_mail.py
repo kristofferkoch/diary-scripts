@@ -66,7 +66,7 @@ import urllib.request
 import zipfile
 from collections import defaultdict
 from collections.abc import Iterator, Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from email.policy import default as email_default
 from email.utils import parsedate_to_datetime
 from typing import TypedDict
@@ -74,7 +74,6 @@ from typing import TypedDict
 import psycopg
 
 from mail_reader.config import embed_url
-
 
 # `from` is a Python keyword, so use TypedDict's functional syntax to keep the
 # dict key matching the email header name exactly.
@@ -107,7 +106,7 @@ try:
     # 'da' catches Norwegian "skrev" / Danish; 'sv' covers Swedish.
     _REPLY_PARSER = EmailReplyParser(languages=["en", "da", "sv"])
     HAVE_REPLY_PARSER = True
-except Exception:
+except Exception:  # noqa: BLE001 — malformed message input is skippable
     HAVE_REPLY_PARSER = False
 
 ME = [a.strip() for a in os.environ.get(
@@ -197,7 +196,7 @@ def strip_quotes_sig(text: str) -> str:
     if HAVE_REPLY_PARSER:
         try:
             t = _REPLY_PARSER.read(text).latest_reply or text
-        except Exception:
+        except Exception:  # noqa: BLE001 — malformed message input is skippable
             t = text
     else:
         t = text
@@ -214,17 +213,17 @@ def pick_date(msg) -> str | None:
     # Some (mostly spammy) messages carry multiple Date: headers, the first of
     # which is garbage like year 2270. Pick the first one that parses to a
     # plausible instant (1990..now+1d) instead of trusting msg.get("Date").
-    lo = datetime(1990, 1, 1, tzinfo=timezone.utc)
-    hi = datetime.now(timezone.utc) + timedelta(days=1)
+    lo = datetime(1990, 1, 1, tzinfo=UTC)
+    hi = datetime.now(UTC) + timedelta(days=1)
     for raw in msg.get_all("Date", []):
         try:
             dt = parsedate_to_datetime(raw)
-        except Exception:
+        except Exception:  # noqa: BLE001, S112 — malformed message input is skippable
             continue
         if dt is None:
             continue
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
         if lo <= dt <= hi:
             return dt.isoformat()
     return None
@@ -275,7 +274,7 @@ def extract_pdf(data: bytes) -> str:
     try:
         r = subprocess.run(
             ["pdftotext", "-q", "-layout", "-", "-"],
-            input=data, capture_output=True, timeout=60)
+            input=data, capture_output=True, check=False, timeout=60)
         if r.returncode != 0:
             return ""
         return r.stdout.decode("utf-8", errors="replace").strip()
@@ -285,9 +284,8 @@ def extract_pdf(data: bytes) -> str:
 def _extract_from_zip(data: bytes, inner: str) -> str:
     """Open `data` as a zip, read `inner`, strip XML. '' on failure."""
     try:
-        with zipfile.ZipFile(io.BytesIO(data)) as z:
-            with z.open(inner) as f:
-                return _strip_xml(f.read().decode("utf-8", errors="replace"))
+        with zipfile.ZipFile(io.BytesIO(data)) as z, z.open(inner) as f:
+            return _strip_xml(f.read().decode("utf-8", errors="replace"))
     except (zipfile.BadZipFile, KeyError, UnicodeDecodeError):
         return ""
 
@@ -356,7 +354,7 @@ def iter_attachments(raw: bytes) -> Iterator[tuple[str, str, bytes, str]]:
             continue
         try:
             data = part.get_payload(decode=True)
-        except Exception:
+        except Exception:  # noqa: BLE001, S112 — malformed message input is skippable
             continue
         # decode=True returns bytes for non-multipart leaf parts; skip otherwise.
         if not isinstance(data, bytes):
@@ -395,7 +393,7 @@ def chunk_text(text: str) -> list[str]:
     # Invisible joiner/format chars (newsletter anti-truncation padding,
     # e.g. LinkedIn's CGJ+NBSP runs) make qwen3-embedding produce NaN
     # vectors that llama-server serializes as null (2026-08-03 incident).
-    text = re.sub("[͏​‌‍⁠﻿]", "", text).strip()
+    text = re.sub("[͏\u200b‌‍⁠﻿]", "", text).strip()
     if not text:
         return []
     if len(text) <= CHUNK_CHARS:
@@ -595,7 +593,7 @@ def _prepare_message(mid: str) -> MessagePayload | None:
     raw = nm_raw(mid)
     hdr, body = parse_message(raw)
     body_chunks = chunk_text(body) if len(body) >= 40 else []
-    attachments = []
+    attachments: list[AttachmentPayload] = []
     for fn, mime, data, text in iter_attachments(raw):
         a_chunks = chunk_text(text) if text else []
         attachments.append({
@@ -695,7 +693,7 @@ def _flush_batch(conn: psycopg.Connection, tier: int, batch: list[MessagePayload
                 row_id = row[0]
                 _insert_payload_rows(cur, row_id, payload, slots)
             done += 1
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — isolate bad messages and embedding failures
             failed += 1
             if verbose:
                 print(f"  !! {payload['mid']} (write): {e}", file=sys.stderr)
@@ -724,7 +722,7 @@ def process(conn: psycopg.Connection, tier: int, limit: int | None, verbose: boo
                 continue
         try:
             payload = _prepare_message(mid)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — isolate bad messages and embedding failures
             failed += 1
             print(f"  !! {mid} (prepare): {e}", file=sys.stderr)
             continue
@@ -738,7 +736,7 @@ def process(conn: psycopg.Connection, tier: int, limit: int | None, verbose: boo
             try:
                 d, f = _flush_batch(conn, tier, pending, verbose)
                 done += d; failed += f
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — isolate bad messages and embedding failures
                 failed += len(pending)
                 print(f"  !! batch embed failed ({len(pending)} msgs): {e}",
                       file=sys.stderr)
@@ -756,7 +754,7 @@ def process(conn: psycopg.Connection, tier: int, limit: int | None, verbose: boo
         try:
             d, f = _flush_batch(conn, tier, pending, verbose)
             done += d; failed += f
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — isolate bad messages and embedding failures
             failed += len(pending)
             print(f"  !! final batch embed failed ({len(pending)} msgs): {e}",
                   file=sys.stderr)
@@ -782,7 +780,7 @@ def _flush_reembed(conn: psycopg.Connection,
             with conn.cursor() as cur, conn.transaction():
                 _insert_payload_rows(cur, row_id, payload, slots)
             done += 1
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — isolate bad messages and embedding failures
             failed += 1
             if verbose:
                 print(f"  !! {payload['mid']} (write): {e}", file=sys.stderr)
@@ -822,7 +820,7 @@ def process_reembed(conn: psycopg.Connection, limit: int | None,
         try:
             d, f = _flush_reembed(conn, pending, verbose)
             done += d; failed += f
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — isolate bad messages and embedding failures
             failed += len(pending)
             print(f"  !! batch embed failed ({len(pending)} msgs): {e}",
                   file=sys.stderr)
@@ -832,7 +830,7 @@ def process_reembed(conn: psycopg.Connection, limit: int | None,
     for n, (row_id, mid) in enumerate(rows, 1):
         try:
             payload = _prepare_message(mid)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — isolate bad messages and embedding failures
             failed += 1
             print(f"  !! {mid} (prepare): {e}", file=sys.stderr)
             continue

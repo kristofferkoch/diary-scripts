@@ -8,6 +8,7 @@ guard for the file-missing case.
 """
 from __future__ import annotations
 
+import itertools
 from datetime import date
 from pathlib import Path
 
@@ -39,7 +40,7 @@ def test_parse_real_repo_files_smoke():
         assert len(events) >= 5
         assert all(isinstance(e.start_date, date) for e in events)
         # Sort invariant: monotonic on start_date.
-        for a, b in zip(events, events[1:]):
+        for a, b in itertools.pairwise(events):
             assert a.start_date <= b.start_date
     if past.exists():
         events = parse_calendar(past)

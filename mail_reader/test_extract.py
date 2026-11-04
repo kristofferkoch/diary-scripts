@@ -9,7 +9,6 @@ import pytest
 
 from mail_reader import extract
 
-
 # ---------- normalize_entity (pure, no DB) ----------
 
 @pytest.mark.parametrize("kind,value,meta,want", [

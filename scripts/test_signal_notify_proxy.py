@@ -10,7 +10,11 @@ import threading
 import pytest
 
 from scripts.signal_notify_proxy import (
-    Limiter, attachment_id, handle, read_attachment, sanitize,
+    Limiter,
+    attachment_id,
+    handle,
+    read_attachment,
+    sanitize,
 )
 
 
@@ -41,13 +45,13 @@ def test_group_send_is_rejected():
 
 
 def test_missing_note_to_self_is_rejected():
-    clean, why = sanitize(_send(message="hi"))
+    clean, _why = sanitize(_send(message="hi"))
     assert clean is None
 
 
 def test_other_methods_are_rejected():
     for method in ("receive", "listAccounts", "subscribe", "sendReceipt"):
-        clean, why = sanitize({"jsonrpc": "2.0", "id": 1, "method": method, "params": {}})
+        clean, _why = sanitize({"jsonrpc": "2.0", "id": 1, "method": method, "params": {}})
         assert clean is None, method
 
 

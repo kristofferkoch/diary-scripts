@@ -26,9 +26,10 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Protocol, cast
+from typing import Any, Protocol, cast
 
 SCHEMA_VERSION = 1
 DEFAULT_SOCKET = "/run/diary-lock/socket"
@@ -280,7 +281,7 @@ def cgroup_set(value: str) -> CgroupSet:
         raise argparse.ArgumentTypeError("cgroup set must be FAMILY:TABLE:SET")
     if any(any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for character in part) for part in parts):
         raise argparse.ArgumentTypeError("cgroup set contains invalid characters")
-    return cast(CgroupSet, parts)
+    return parts
 
 
 class NftCgroupIdentity:
@@ -1495,12 +1496,15 @@ class Controller:
             return self.status()
         if value["cmd"] == "break_glass" and peer["uid"] in {0, owner_uid}:
             return self.break_glass(peer)
-        if value["cmd"] in {"unlock", "extend"} and peer["uid"] == ui_uid:
-            if not self.ui_actions_enabled():
-                raise RequestRejected(
-                    "UI unlock and attendance are disabled until the root-owned "
-                    "enablement file exists"
-                )
+        if (
+            value["cmd"] in {"unlock", "extend"}
+            and peer["uid"] == ui_uid
+            and not self.ui_actions_enabled()
+        ):
+            raise RequestRejected(
+                "UI unlock and attendance are disabled until the root-owned "
+                "enablement file exists"
+            )
         if value["cmd"] == "unlock" and peer["uid"] == ui_uid:
             return self.unlock(peer)
         if value["cmd"] == "extend" and peer["uid"] == ui_uid:
@@ -1535,7 +1539,7 @@ class LockRequestHandler(socketserver.StreamRequestHandler):
         except (LockError, OSError) as exc:
             try:
                 server.controller.failsafe("request_failed")
-            except Exception as failsafe_error:
+            except Exception as failsafe_error:  # noqa: BLE001 — latch every secondary failsafe failure
                 server.latch_failure(failsafe_error)
                 reply = {"ok": False, "error": f"{exc}; {failsafe_error}"}
             else:
@@ -1800,7 +1804,7 @@ def daemon_main(argv: list[str] | None = None) -> int:
             def turn_failed(error: Exception) -> None:
                 try:
                     controller.failsafe("turn_request_failed")
-                except Exception as failsafe_error:
+                except Exception as failsafe_error:  # noqa: BLE001 — latch every secondary failsafe failure
                     server.latch_failure(failsafe_error)
                 else:
                     server.latch_failure(error)

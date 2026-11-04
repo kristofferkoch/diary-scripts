@@ -5,7 +5,6 @@ import base64
 import contextlib
 import io
 from email.message import EmailMessage
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -13,7 +12,6 @@ from PIL import Image
 
 import scripts.embed_images as ei
 from scripts.embed_messages import signal_payload
-
 
 # ---------- fakes ----------
 

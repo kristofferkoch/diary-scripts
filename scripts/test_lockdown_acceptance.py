@@ -15,7 +15,6 @@ import pytest
 
 from scripts import lockdown_acceptance as acceptance
 
-
 EXPECTED_CASES = {
     "preflight.dark_safe",
     "preflight.deployed_identity",
@@ -323,9 +322,11 @@ def test_unexpected_harness_failure_still_attempts_cleanup(
 ) -> None:
     store = create_store(tmp_path, catalog, "error-run")
     adapter = FakeAdapter(catalog)
-    with patch.object(adapter, "call", side_effect=RuntimeError("injected harness error")):
-        with pytest.raises(RuntimeError, match="injected"):
-            acceptance.execute_suite(catalog, store, adapter)
+    with (
+        patch.object(adapter, "call", side_effect=RuntimeError("injected harness error")),
+        pytest.raises(RuntimeError, match="injected"),
+    ):
+        acceptance.execute_suite(catalog, store, adapter)
     assert store.metadata["status"] == "failed"
     assert store.metadata["cleanup"]["status"] == "fail"
 

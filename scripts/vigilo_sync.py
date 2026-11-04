@@ -60,7 +60,7 @@ import argparse
 import json
 import re
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -71,14 +71,13 @@ class CheckInNotesApi(Protocol):
     ) -> list[dict[str, Any]]: ...
 
 from mail_reader.config import cfg, legacy_state_root
-
 from scripts.attachment_store import find_attachment, write_attachment
 from scripts.safe_io import append_text, ensure_dir
 from scripts.vigilo_api import (
-    AuthExpiredError,
-    ConfigError,
     POLL_FLOOR_SECONDS,
     ApiError,
+    AuthExpiredError,
+    ConfigError,
     VigiloApi,
     VigiloError,
     person_name,
@@ -114,7 +113,7 @@ _UNSAFE = re.compile(r"[^\w.()\[\]-]+")
 
 
 def utcnow_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def today() -> date:
@@ -698,12 +697,15 @@ def fetch_check_out_notes(api: CheckInNotesApi, state: dict[str, Any],
             change: str | None = None
             if entry is None or entry.get("sig") != sig:
                 change = "endret" if entry else "ny"
-            elif days_left is not None and days_left <= CHECKOUT_EXPIRY_WARN_DAYS:
-                if _reminder_due(entry.get("emitted"), day):
-                    # A note past its toDate should not be coming back at all;
-                    # if it does, "utløper om -3 dager" is not a sentence.
-                    change = (f"utløper om {days_left} dager" if days_left >= 0
-                              else "utløpt — returneres fortsatt av AKS")
+            elif (
+                days_left is not None
+                and days_left <= CHECKOUT_EXPIRY_WARN_DAYS
+                and _reminder_due(entry.get("emitted"), day)
+            ):
+                # A note past its toDate should not be coming back at all;
+                # if it does, "utløper om -3 dager" is not a sentence.
+                change = (f"utløper om {days_left} dager" if days_left >= 0
+                          else "utløpt — returneres fortsatt av AKS")
             if change is None:
                 continue
             data = _check_out_note_data(note, child_id=child_id, unit_names=unit_names,
@@ -864,7 +866,7 @@ def run_once(
 
 def today_jsonl() -> Path:
     ensure_dir(OUT_DIR)
-    return OUT_DIR / f"{datetime.now(timezone.utc):%Y-%m-%d}.jsonl"
+    return OUT_DIR / f"{datetime.now(UTC):%Y-%m-%d}.jsonl"
 
 
 def append_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
@@ -889,10 +891,10 @@ def recently_ran(state: dict[str, Any]) -> bool:
         raw = str(last).replace("Z", "+00:00")
         then = datetime.fromisoformat(raw)
         if then.tzinfo is None:
-            then = then.replace(tzinfo=timezone.utc)
+            then = then.replace(tzinfo=UTC)
     except ValueError:
         return False
-    age = datetime.now(timezone.utc) - then
+    age = datetime.now(UTC) - then
     return timedelta(0) <= age < timedelta(seconds=floor)
 
 

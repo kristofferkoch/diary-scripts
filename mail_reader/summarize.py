@@ -18,7 +18,6 @@ from typing import TypedDict
 
 import psycopg
 
-
 # Frozen at the last prompt version that ever generated rows. Read-side
 # queries (entities, agenda, this module) filter on it so only rows from
 # the final extraction schema are surfaced.

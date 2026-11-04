@@ -53,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("hook payload is too large")
         payload = json.loads(raw)
         if not isinstance(payload, dict) or not isinstance(payload.get("session_id"), str):
-            raise ValueError("hook payload has no session ID")
+            raise TypeError("hook payload has no session ID")
         reply = request(args.socket, {
             "cmd": args.command,
             "runtime": args.runtime,
@@ -62,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "start" and reply.get("scope"):
             print(reply["scope"])
         return 0
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
         print(f"diary-agent-turn: {exc}", file=sys.stderr)
         if args.command == "start":
             return 2

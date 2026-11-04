@@ -6,7 +6,12 @@ import stat
 import tomllib
 from pathlib import Path
 
-from mail_reader.hosts_config import HOSTS_CONFIG_PATH, read_hosts, render_hosts, validate_hosts
+from mail_reader.hosts_config import (
+    HOSTS_CONFIG_PATH,
+    read_hosts,
+    render_hosts,
+    validate_hosts,
+)
 from scripts.safe_io import atomic_write_text
 
 TRUSTED_CONFIG_PATH = Path("/etc/diary/trusted.toml")

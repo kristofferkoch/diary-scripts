@@ -14,11 +14,12 @@ import threading
 import time
 import tomllib
 import urllib.parse
+from collections.abc import Callable
 from dataclasses import dataclass
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable, Protocol, cast
+from typing import Any, Protocol, cast
 
 from scripts import diary_production_baseline as production_baseline
 
@@ -496,7 +497,7 @@ class OwnerUIServer(ThreadingHTTPServer):
 
 
 class OwnerUIHandler(BaseHTTPRequestHandler):
-    server: OwnerUIServer
+    server: OwnerUIServer  # ty: ignore[invalid-mutable-override]
     protocol_version = "HTTP/1.1"
 
     def log_message(self, format: str, *args: Any) -> None:

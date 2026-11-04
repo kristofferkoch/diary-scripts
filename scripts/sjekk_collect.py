@@ -69,7 +69,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from mail_reader.config import legacy_state_root, workspace_root
-
 from scripts import sjekk_cursor
 
 DEFAULT_TIMEOUT = 120
@@ -130,8 +129,8 @@ BASE_TRACKS: dict[str, list[list[str]]] = {
     # Per source: the runbook's green/not-green rule is per source, and a
     # single aggregate hides one stale source behind the others.
     "embed-health.txt": [["psql", "-d", "mailvec", "-t", "-c",
-                          "SELECT source, now() - max(embedded_at) "
-                          "FROM messages GROUP BY source ORDER BY source;"]],
+                          ("SELECT source, now() - max(embedded_at) "
+                          "FROM messages GROUP BY source ORDER BY source;")]],
     # One command for both identities: `diary-sync status` asks the broker
     # (agent) and `--fallback` runs `systemctl --user` locally (kek, or a
     # broker outage). See scripts/docs/diary-sync.md.
@@ -206,7 +205,7 @@ def _run_one(argv: list[str], timeout: int) -> TrackResult:
     res = TrackResult(filename="", exit_code=0)
     try:
         proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=timeout,
+            argv, capture_output=True, text=True, check=False, timeout=timeout,
         )
         res.output = proc.stdout + proc.stderr
         res.exit_code = proc.returncode
@@ -272,8 +271,8 @@ def render_index(stamp: str, results: list[TrackResult],
     lines = [
         f"# sjekk-collect {stamp}",
         "",
-        "Read this first; open only files with content. "
-        "`!!` tracks need a manual look.",
+        ("Read this first; open only files with content. "
+        "`!!` tracks need a manual look."),
         "",
     ]
     if window:
@@ -378,7 +377,7 @@ def _broker_status() -> dict | None:
     try:
         proc = subprocess.run(
             ["diary-sync", "status", "--json", "--fallback"],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, check=False, timeout=60,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -400,7 +399,7 @@ def _last_mail_sync() -> dt.datetime | None:
         proc = subprocess.run(
             ["systemctl", "--user", "show", "mail-sync.service",
              "-p", "ExecMainExitTimestamp", "--value"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, check=False, timeout=30,
         )
         stamp = _parse_systemd_stamp(proc.stdout)
     except (OSError, subprocess.TimeoutExpired):
@@ -434,8 +433,7 @@ def _last_sync_epoch(state_file: Path) -> int | None:
     if not isinstance(raw, str) or not raw:
         return None
     try:
-        return int(dt.datetime.fromisoformat(
-            raw.replace("Z", "+00:00")).timestamp())
+        return int(dt.datetime.fromisoformat(raw).timestamp())
     except ValueError:
         return None
 

@@ -8,11 +8,11 @@ the isolation contract.
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from pathlib import Path
 
 import pytest
 
-from scripts import agent_merge_console as console
 from scripts.e2e import harness
 
 QUEUE = "a" * 40
@@ -34,7 +34,7 @@ def decision_event() -> dict[str, str]:
 
 
 @pytest.fixture
-def stack(tmp_path: Path) -> harness.Stack:
+def stack(tmp_path: Path) -> Generator[harness.Stack]:
     built = harness.build_stack(tmp_path)
     try:
         yield built
@@ -157,7 +157,6 @@ def test_audit_restart_keeps_state_and_accepts_writes(
 
 def test_failed_publication_reports_the_repository_state(stack: harness.Stack) -> None:
     """A publisher failure must say whether anything actually got published."""
-    from scripts import diary_merge_console_service as executor
 
     reviewed = harness.enqueue_change(stack.scripts)
     base = base_oid(stack.scripts)
@@ -166,7 +165,7 @@ def test_failed_publication_reports_the_repository_state(stack: harness.Stack) -
         raise RuntimeError("injected publication failure")
 
     reply = stack.decide(
-        "scripts", "merge", reviewed, base, publisher=failing,  # type: ignore[arg-type]
+        "scripts", "merge", reviewed, base, publisher=failing,
     )
 
     assert reply["error"] == "not_published"

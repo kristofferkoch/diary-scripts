@@ -8,8 +8,8 @@ send ``Authorization: Bearer``.
 
 from __future__ import annotations
 
-import html
 import hmac
+import html
 import json
 import os
 import secrets

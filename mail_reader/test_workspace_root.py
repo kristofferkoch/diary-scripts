@@ -14,12 +14,9 @@ import importlib.util
 import re
 from pathlib import Path
 
-import pytest
-
 import mail_reader
 import scripts
 from mail_reader import config
-
 
 # ---- behaviour: config / env drive the root, not __file__ ------------------
 

@@ -64,7 +64,6 @@ from scripts.vigilo_api import (
     authorize_url,
     code_from_redirect,
     exchange_code,
-    token_path,
 )
 
 # A captured redirect is only worth validating against a state we issued, and

@@ -4,9 +4,8 @@ from __future__ import annotations
 import http.client
 import json
 import os
-import socket
 import re
-import sqlite3
+import socket
 import threading
 import time
 import urllib.parse
@@ -33,7 +32,7 @@ OTHER_OID = "c" * 40
 # --------------------------------------------------------------------------- fakes
 
 
-class FakeExecutor:
+class FakeExecutor(ui.ExecutorClient):
     """Stand-in for the kek-run executor; records requests, returns canned replies."""
 
     def __init__(self) -> None:
@@ -89,7 +88,7 @@ def services(tmp_path: Path) -> Iterator[Services]:
         session_cookie=SESSION_COOKIE,
     )
     ui_server = ui.ConsoleServer(
-        ("127.0.0.1", 0), ui_config, fake,  # type: ignore[arg-type]
+        ("127.0.0.1", 0), ui_config, fake,
         ui.FreshGrantClient(ui_config.public_origin, ui_config.fresh_backend, SESSION_COOKIE),
     )
     servers = [auth_server, fresh_server, ui_server]
@@ -393,11 +392,11 @@ def test_executor_forwards_the_exact_binding_and_requires_a_consumed_grant(
         "base_oid": BASE_OID, "transaction": "tx-1",
     }
     with pytest.raises(console.OwnerAuthorizationRequired):
-        executor.handle_request(request, _paths_by_repo(tmp_path), verifier, auditor=object())  # type: ignore[arg-type]
+        executor.handle_request(request, _paths_by_repo(tmp_path), verifier, auditor=object())  # ty: ignore[invalid-argument-type]
     assert verifier.calls == [("scripts", "merge", QUEUE_OID, BASE_OID, "tx-1")]
 
     verifier.allow = True
-    reply = executor.handle_request(request, _paths_by_repo(tmp_path), verifier, auditor=object())  # type: ignore[arg-type]
+    reply = executor.handle_request(request, _paths_by_repo(tmp_path), verifier, auditor=object())  # ty: ignore[invalid-argument-type]
     assert reply == {"ok": True, "action": "merge", "outcome": "merged"}
 
 
@@ -416,7 +415,7 @@ def test_executor_rejects_anything_outside_its_two_fixed_verbs(
     tmp_path: Path, payload: dict[str, Any],
 ) -> None:
     with pytest.raises(executor.ExecutorError):
-        executor.handle_request(payload, _paths_by_repo(tmp_path), FakeVerifier(), auditor=object())  # type: ignore[arg-type]
+        executor.handle_request(payload, _paths_by_repo(tmp_path), FakeVerifier(), auditor=object())  # ty: ignore[invalid-argument-type]
 
 
 def test_executor_snapshot_holds_no_decision_authority(
@@ -434,7 +433,7 @@ def test_executor_snapshot_holds_no_decision_authority(
         return FakeConsole()
 
     monkeypatch.setattr(executor, "_console", fake_console)
-    reply = executor.handle_request({"cmd": "snapshot", "repo": "scripts"}, _paths_by_repo(tmp_path), FakeVerifier(), auditor=object())  # type: ignore[arg-type]
+    reply = executor.handle_request({"cmd": "snapshot", "repo": "scripts"}, _paths_by_repo(tmp_path), FakeVerifier(), auditor=object())  # ty: ignore[invalid-argument-type]
     assert reply == {"ok": True, "snapshot": {"pending": False}}
     with pytest.raises(console.OwnerAuthorizationRequired):
         seen[0]("merge", QUEUE_OID, BASE_OID)
@@ -608,7 +607,7 @@ def test_socket_activated_stdio_mode_checks_the_peer_uid_and_answers_once(
     try:
         client.sendall(b'{"cmd":"snapshot","repo":"scripts"}\n')
         code = executor.serve_stdio(
-            paths, FakeVerifier(), os.geteuid(), auditor=object(), connection=server,  # type: ignore[arg-type]
+            paths, FakeVerifier(), os.geteuid(), auditor=object(), connection=server,  # ty: ignore[invalid-argument-type]
         )
         assert code == 0
         assert json.loads(client.recv(65536)) == {"ok": True, "snapshot": {"pending": False}}
@@ -620,7 +619,7 @@ def test_socket_activated_stdio_mode_checks_the_peer_uid_and_answers_once(
     try:
         client.sendall(b'{"cmd":"snapshot","repo":"scripts"}\n')
         code = executor.serve_stdio(
-            paths, FakeVerifier(), os.geteuid() + 1, auditor=object(), connection=server,  # type: ignore[arg-type]
+            paths, FakeVerifier(), os.geteuid() + 1, auditor=object(), connection=server,  # ty: ignore[invalid-argument-type]
         )
         assert code == 1
         assert b"not authorized" in client.recv(65536)
@@ -739,8 +738,8 @@ def test_executor_selects_the_path_set_for_the_requested_repository(
 
     reply = executor.handle_request(
         {"cmd": "snapshot", "repo": "diary"},
-        {"scripts": scripts, "diary": diary},  # type: ignore[dict-item]
-        FakeVerifier(), auditor=object(),
+        {"scripts": scripts, "diary": diary},  # ty: ignore[invalid-argument-type]
+        FakeVerifier(), auditor=object(),  # ty: ignore[invalid-argument-type]
     )
 
     assert reply["ok"] is True
@@ -757,7 +756,7 @@ def test_executor_requires_exactly_one_known_repository(
 ) -> None:
     with pytest.raises(executor.ExecutorError):
         executor.handle_request(
-            request_value, _paths_by_repo(tmp_path), FakeVerifier(), auditor=object(),
+            request_value, _paths_by_repo(tmp_path), FakeVerifier(), auditor=object(),  # ty: ignore[invalid-argument-type]
         )
 
 
@@ -772,8 +771,8 @@ def test_diary_publication_does_not_sync_a_python_environment(
         return True
 
     monkeypatch.setattr(executor.queue, "approve_queue", fake_approve)
-    executor._publication("diary")("a" * 40, object(), expected_base="b" * 40)  # type: ignore[arg-type]
-    executor._publication("scripts")("a" * 40, object(), expected_base="b" * 40)  # type: ignore[arg-type]
+    executor._publication("diary")("a" * 40, object(), expected_base="b" * 40)  # ty: ignore[invalid-argument-type]
+    executor._publication("scripts")("a" * 40, object(), expected_base="b" * 40)  # ty: ignore[invalid-argument-type]
 
     # The reviewed base still reaches the publisher for both repositories; only
     # the venv sync differs.

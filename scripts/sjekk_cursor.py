@@ -34,9 +34,10 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from datetime import datetime, timedelta, timezone
+from collections.abc import Iterable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from mail_reader.config import workspace_root
 
@@ -62,8 +63,8 @@ def parse_iso(value: str) -> datetime:
         value = value[:-1] + "+00:00"
     dt = datetime.fromisoformat(value)
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 def format_iso(dt: datetime) -> str:
@@ -72,7 +73,7 @@ def format_iso(dt: datetime) -> str:
     >>> format_iso(parse_iso("2026-11-02T09:00:00+01:00"))
     '2026-11-02T08:00:00Z'
     """
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def state_dir(root: Path | None = None) -> Path:
@@ -129,7 +130,7 @@ def window(cursor: dict[str, Any], track: str,
     lower bound by :data:`MAIL_OVERLAP` so a late arrival with an old ``Date:``
     is still inside the window.
     """
-    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    now = (now or datetime.now(UTC)).astimezone(UTC)
     raw = _entry(cursor, track).get("to")
     if not isinstance(raw, str) or not raw:
         return None, now
@@ -156,7 +157,7 @@ def advance(cursor: dict[str, Any], track: str, until: datetime,
     Monotonic on purpose: two concurrent sjekker may both triage the same
     window, but neither may push the cursor behind the other's progress.
     """
-    until = until.astimezone(timezone.utc)
+    until = until.astimezone(UTC)
     current = _entry(cursor, track).get("to")
     if isinstance(current, str) and current:
         try:

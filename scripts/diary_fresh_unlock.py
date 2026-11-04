@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import grp
 import hashlib
 import hmac
 import html
@@ -22,11 +21,12 @@ import threading
 import time
 import tomllib
 import urllib.parse
+from collections.abc import Callable
 from dataclasses import dataclass
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 DEFAULT_CONFIG = "/etc/diary/lock-auth.toml"
 DEFAULT_DATABASE = "/var/lib/diary-lock-auth/transactions.sqlite3"
@@ -598,7 +598,7 @@ class FreshUnlockServer(ThreadingHTTPServer):
 
 
 class FreshUnlockHandler(BaseHTTPRequestHandler):
-    server: FreshUnlockServer
+    server: FreshUnlockServer  # ty: ignore[invalid-mutable-override]
     protocol_version = "HTTP/1.1"
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -905,7 +905,7 @@ def peer_uid(connection: socket.socket) -> int:
 class MergeGrantVerifyHandler(socketserver.StreamRequestHandler):
     """Answer one metadata question: was this exact merge grant consumed?"""
 
-    server: MergeGrantVerifyServer
+    server: MergeGrantVerifyServer  # ty: ignore[invalid-mutable-override]
 
     def _reply(self, value: dict[str, Any]) -> None:
         try:

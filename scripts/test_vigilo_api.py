@@ -12,9 +12,9 @@ import json
 import os
 import time
 from collections.abc import Callable
-from typing import Any, cast
 from datetime import date
 from pathlib import Path
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -377,9 +377,8 @@ def test_lock_is_exclusive_then_released(tmp_path: Path):
     lock = tmp_path / "tokens.json.lock"
     with file_lock(lock):
         assert lock.exists()
-        with pytest.raises(VigiloError):
-            with file_lock(lock, timeout=0.2):
-                pass
+        with pytest.raises(VigiloError), file_lock(lock, timeout=0.2):
+            pass
     assert not lock.exists()
 
 

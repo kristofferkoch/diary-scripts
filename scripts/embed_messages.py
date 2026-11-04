@@ -58,7 +58,6 @@ from typing import Any, Literal
 import psycopg
 
 from mail_reader.config import legacy_state_root, workspace_root
-
 from scripts.embed_mail import (
     BATCH_CHUNKS,
     AttachmentPayload,
@@ -532,7 +531,7 @@ def _flush_batch(conn: psycopg.Connection, batch: list[SourcePayload],
                 assert row is not None, "RETURNING id must yield a row"
                 _insert_payload_rows(cur, row[0], payload, slots)
             done += 1
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — isolate bad records and embedding failures
             failed += 1
             print(f"  !! {payload['mid']} (write): {e}", file=sys.stderr)
     return done, failed
@@ -592,7 +591,7 @@ def process(conn: psycopg.Connection, source: str, limit: int | None,
             break
         try:
             payload = builder(rec)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — isolate bad records and embedding failures
             failed += 1
             print(f"  !! {source} record (prepare): {e}", file=sys.stderr)
             continue
@@ -613,7 +612,7 @@ def process(conn: psycopg.Connection, source: str, limit: int | None,
             d, f = _flush_batch(conn, pending, verbose)
             done += d
             failed += f
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — isolate bad records and embedding failures
             failed += len(pending)
             print(f"  !! batch embed failed ({len(pending)} records): {e}",
                   file=sys.stderr)

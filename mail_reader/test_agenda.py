@@ -15,7 +15,6 @@ import pytest
 from mail_reader import agenda, summarize
 from mail_reader.thread_id import ThreadId
 
-
 TEST_PROMPT = "pytest-agenda"
 
 

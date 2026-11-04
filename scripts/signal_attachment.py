@@ -37,7 +37,7 @@ def fetch_attachment(attachment_id: str, socket_path: str, timeout: float = 30.0
         raise RuntimeError(response["error"].get("message", "signal proxy error"))
     result = response.get("result")
     if not isinstance(result, dict) or not isinstance(result.get("data"), str):
-        raise RuntimeError("signal proxy returned an invalid attachment response")
+        raise TypeError("signal proxy returned an invalid attachment response")
     return base64.b64decode(result["data"], validate=True)
 
 

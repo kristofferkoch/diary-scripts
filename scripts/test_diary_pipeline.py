@@ -4,10 +4,10 @@ import json
 import os
 import stat
 import threading
+from collections.abc import Generator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Iterator
 
 import pytest
 
@@ -109,7 +109,7 @@ def test_environment_cannot_select_config_or_endpoint(
 
 
 @contextmanager
-def health_server(status: int = 200, location: str | None = None) -> Iterator[tuple[str, int, list[str]]]:
+def health_server(status: int = 200, location: str | None = None) -> Generator[tuple[str, int, list[str]]]:
     requests: list[str] = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -145,9 +145,11 @@ def test_fixed_model_health_succeeds():
 
 @pytest.mark.parametrize("status", [301, 302, 307, 308, 404, 500])
 def test_health_does_not_follow_redirects_or_accept_other_endpoints(status: int):
-    with health_server(status=status, location="http://example.com/health") as (address, port, requests):
-        with pytest.raises(pipeline.PipelineError, match=f"HTTP {status}"):
-            pipeline.probe_model(pipeline.ModelEndpoint(address, port, "local-test-model"))
+    with (
+        health_server(status=status, location="http://example.com/health") as (address, port, requests),
+        pytest.raises(pipeline.PipelineError, match=f"HTTP {status}"),
+    ):
+        pipeline.probe_model(pipeline.ModelEndpoint(address, port, "local-test-model"))
     assert requests == ["/health"]
 
 

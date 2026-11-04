@@ -5,8 +5,8 @@ import json
 import os
 import shutil
 import signal
-import subprocess
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -132,7 +132,7 @@ class FakeSystemd:
             return self.socket_active
         if unit.endswith(".scope"):
             return unit in self.scopes_by_name and unit not in self.inactive_scopes
-        if unit.endswith(".timer") or unit.endswith(".path"):
+        if unit.endswith((".timer", ".path")):
             return self.scheduled.get(unit, False)
         return self.services.get(unit, False)
 
@@ -144,7 +144,7 @@ class FakeSystemd:
         elif unit.endswith(".scope"):
             self.inactive_scopes.add(unit)
             self.membership[unit] = set()
-        elif unit.endswith(".timer") or unit.endswith(".path"):
+        elif unit.endswith((".timer", ".path")):
             self.scheduled[unit] = False
         else:
             self.services[unit] = False
@@ -1108,7 +1108,8 @@ def test_real_ordinary_unlock_restores_socket_and_broker_with_live_manager() -> 
             assert kwargs["env"]["DBUS_SESSION_BUS_ADDRESS"] == (
                 f"unix:path=/run/user/{os.geteuid()}/systemd/private"
             )
-        return subprocess.run(argv, **kwargs)
+        check = kwargs.pop("check", False)
+        return subprocess.run(argv, check=check, **kwargs)
 
     systemd = lock.SystemdUser(
         None, runner=private_run, broker_unit=broker_unit, socket_unit=socket_unit,

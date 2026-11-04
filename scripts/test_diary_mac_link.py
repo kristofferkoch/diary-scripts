@@ -11,7 +11,6 @@ import pytest
 
 from scripts import diary_mac_link as mac
 
-
 UID = 1234
 
 
@@ -141,7 +140,7 @@ def test_atomic_transactions_never_leave_an_uncontained_intermediate(tmp_path: P
 def test_mac_plist_binds_only_owner_supplied_dedicated_address(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     root = ET.fromstring(mac.render_mac_plist(config))
-    values = list(root.iter("dict"))[0]
+    values = next(iter(root.iter("dict")))
     children = list(values)
     plist = {children[index].text: children[index + 1] for index in range(0, len(children), 2)}
     arguments = [item.text for item in plist["ProgramArguments"]]
@@ -421,7 +420,7 @@ def test_preflight_rejects_unreviewed_live_policy_without_mutating(tmp_path: Pat
 def test_preflight_requires_act01_and_rejects_bridge_enslaved_interface(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    migration, system, layout = isolated_migration(tmp_path)
+    migration, _system, layout = isolated_migration(tmp_path)
     layout.act01_record.write_text("not accepted\n", encoding="utf-8")
     with pytest.raises(mac.MacLinkError, match="ACT-01"):
         migration.preflight()

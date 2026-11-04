@@ -192,8 +192,8 @@ def test_excessive_nesting_is_rejected_without_recursion_failure():
         b"\xff\xfe",
         b'{"x": NaN}',
         b'{"schema_version":1,"schema_version":1}',
-        b'{"schema_version":1,"event_id":"x","source":"spond","kind":"event",'
-        b'"native_id":"id","revision":"notmuch-v1","payload":{}}',
+        (b'{"schema_version":1,"event_id":"x","source":"spond","kind":"event",'
+        b'"native_id":"id","revision":"notmuch-v1","payload":{}}'),
     ],
 )
 def test_malformed_serialized_events_are_rejected(raw: bytes):

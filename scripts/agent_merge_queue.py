@@ -26,10 +26,10 @@ import struct
 import subprocess
 import sys
 import tempfile
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
 
 if __package__:
     from scripts.agent_merge_pii import DEFAULT_CONFIG, PiiError, prescan, read_config
@@ -148,7 +148,7 @@ def paths_for(repo: str) -> QueuePaths:
 
 
 @contextmanager
-def queue_lock(paths: QueuePaths) -> Iterator[None]:
+def queue_lock(paths: QueuePaths) -> Generator[None]:
     paths.lock.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with paths.lock.open("a+") as handle:
         os.chmod(paths.lock, 0o600)
@@ -166,9 +166,7 @@ def git(repo: Path, *args: str, safe: bool = False, check: bool = True) -> subpr
     cmd += ["-C", str(repo), *args]
     env = os.environ.copy()
     for key in list(env):
-        if key in {"GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"}:
-            del env[key]
-        elif key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
+        if key in {"GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"} or key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
             del env[key]
     protected = (
         ("core.fsmonitor", "false"),
@@ -181,7 +179,7 @@ def git(repo: Path, *args: str, safe: bool = False, check: bool = True) -> subpr
     for index, (key, value) in enumerate(protected):
         env[f"GIT_CONFIG_KEY_{index}"] = key
         env[f"GIT_CONFIG_VALUE_{index}"] = value
-    proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
     if check and proc.returncode:
         detail = (proc.stderr or proc.stdout).strip()
         raise QueueError(f"git {' '.join(args)} failed: {detail}")
@@ -349,7 +347,7 @@ def ensure_queue(paths: QueuePaths) -> None:
     if not paths.queue.exists():
         proc = subprocess.run(
             ["git", "clone", "--no-hardlinks", str(paths.approved), str(paths.queue)],
-            capture_output=True, text=True,
+            capture_output=True, text=True, check=False,
         )
         if proc.returncode:
             raise QueueError(f"could not create isolated queue repository: {proc.stderr.strip()}")
@@ -568,7 +566,7 @@ def sync_venv(paths: QueuePaths) -> None:
     """
     proc = subprocess.run(
         ["uv", "sync", "--frozen", "--project", str(paths.approved)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=False,
     )
     if proc.returncode:
         raise QueueError(f"approved virtualenv sync failed: {(proc.stderr or proc.stdout).strip()}")
@@ -578,7 +576,7 @@ def sync_venv(paths: QueuePaths) -> None:
         return
     proc = subprocess.run(
         ["uv", "sync", "--frozen", "--project", str(agent_scripts)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=False,
     )
     if proc.returncode:
         print(
@@ -812,7 +810,7 @@ def peer_uid(fd: int) -> int:
     sock = socket.fromfd(fd, socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         raw = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
-        pid, uid, gid = struct.unpack("3i", raw)
+        _pid, uid, _gid = struct.unpack("3i", raw)
         return uid
     finally:
         sock.close()

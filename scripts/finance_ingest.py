@@ -256,9 +256,7 @@ def is_interesting(t: Transaction, large_threshold: Decimal = Decimal(10000)) ->
         return True
     if not t.tekst:
         return True
-    if abs(t.belop) >= Decimal(1000) and t.hovedkategori in ("", "Ukategorisert"):
-        return True
-    return False
+    return bool(abs(t.belop) >= Decimal(1000) and t.hovedkategori in ("", "Ukategorisert"))
 
 
 def find_mail_by_amount(

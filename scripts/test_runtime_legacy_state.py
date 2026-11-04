@@ -6,8 +6,16 @@ import os
 from pathlib import Path
 
 from mail_reader.config import legacy_state_root
-from scripts import embed_messages, sjekk_collect, spond_sync, spondshow
-from scripts import skolemelding_sync, skolemeldingshow, vigiloshown, vigilo_sync
+from scripts import (
+    embed_messages,
+    sjekk_collect,
+    skolemelding_sync,
+    skolemeldingshow,
+    spond_sync,
+    spondshow,
+    vigilo_sync,
+    vigiloshown,
+)
 from scripts.kindle_dashboard import data as dashboard
 
 

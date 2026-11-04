@@ -50,7 +50,7 @@ def paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def test_migration_extracts_only_hosts_with_modes_and_deterministic_content(paths):
-    source, destination, chown_calls = paths
+    _source, destination, chown_calls = paths
     migration.install_public_hosts()
     text = destination.read_text()
     assert text.startswith("[hosts]\n")

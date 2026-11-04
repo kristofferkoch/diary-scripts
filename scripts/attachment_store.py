@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import secrets
 import stat
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -66,7 +66,7 @@ def _descend(fd: int, component: str, *, create: bool) -> int:
 @contextmanager
 def _directory(
     root: str | os.PathLike[str], parts: tuple[str, ...] = (), *, create: bool = False
-) -> Iterator[int]:
+) -> Generator[int]:
     root_path = _root_path(root)
     fd = os.open(root_path.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:

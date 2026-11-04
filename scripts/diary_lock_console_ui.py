@@ -21,13 +21,19 @@ import socket
 import threading
 import time
 import urllib.parse
+from collections.abc import Callable
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Callable
+from typing import Any
 
 from scripts import agent_merge_console as console
-from scripts.diary_lock_ui import AutheliaClient, Config, OwnerUIError, _cookies, load_config
 from scripts import diary_lock_ui as owner_ui
+from scripts.diary_lock_ui import (
+    AutheliaClient,
+    Config,
+    _cookies,
+    load_config,
+)
 
 DEFAULT_CONFIG = "/etc/diary/lock-auth.toml"
 DEFAULT_EXECUTOR_SOCKET = "/run/diary-merge-console/socket"
@@ -376,7 +382,7 @@ class ConsoleServer(ThreadingHTTPServer):
 
 
 class ConsoleHandler(BaseHTTPRequestHandler):
-    server: ConsoleServer
+    server: ConsoleServer  # ty: ignore[invalid-mutable-override]
     protocol_version = "HTTP/1.1"
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -548,7 +554,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._html(403, render_result("unauthorized"))
         except owner_ui.OwnerUIError:
             self._html(503, render_result("unavailable"))
-        except Exception:
+        except Exception:  # noqa: BLE001 — unexpected request failures become a generic 503
             self._html(503, render_result("unavailable"))
 
     def do_GET(self) -> None:

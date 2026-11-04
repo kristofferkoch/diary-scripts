@@ -6,7 +6,6 @@ import argparse
 import os
 import signal
 import subprocess
-import sys
 
 
 def parser() -> argparse.ArgumentParser:

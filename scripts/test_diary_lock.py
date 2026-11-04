@@ -99,7 +99,7 @@ def controller(tmp_path: Path, now=None, monotonic=None, enabled: bool = True):
 
 
 def test_ui_unlock_and_extend_require_the_root_enablement_file(tmp_path: Path) -> None:
-    svc, modes, events, _, _ = controller(tmp_path, enabled=False)
+    svc, _modes, _events, _, _ = controller(tmp_path, enabled=False)
     svc.startup()
     ui = peer(uid=1100)
     with pytest.raises(lock.RequestRejected):
@@ -190,9 +190,11 @@ def test_state_rejects_foreign_ownership(tmp_path: Path) -> None:
         info = real_fstat(fd)
         return SimpleNamespace(st_uid=info.st_uid + 1, st_mode=info.st_mode)
 
-    with patch.object(lock.os, "fstat", side_effect=foreign_fstat):
-        with pytest.raises(lock.LockError, match="ownership or mode"):
-            lock.StateStore(str(path), "boot-test").load()
+    with (
+        patch.object(lock.os, "fstat", side_effect=foreign_fstat),
+        pytest.raises(lock.LockError, match="ownership or mode"),
+    ):
+        lock.StateStore(str(path), "boot-test").load()
 
 
 def test_locking_is_persisted_before_mode_transition(tmp_path: Path) -> None:
@@ -322,9 +324,8 @@ def test_invalid_owner_request_does_not_trigger_failsafe(tmp_path: Path) -> None
     svc.startup()
     svc.break_glass(peer())
     before = svc.status()
-    with patch.object(svc, "failsafe") as failsafe:
-        with pytest.raises(lock.LockError):
-            svc.handle({"cmd": "unknown"}, peer(), owner_uid=1000)
+    with patch.object(svc, "failsafe") as failsafe, pytest.raises(lock.LockError):
+        svc.handle({"cmd": "unknown"}, peer(), owner_uid=1000)
     failsafe.assert_not_called()
     assert svc.status() == before
 
@@ -418,9 +419,11 @@ def test_forwarder_fail_then_active_before_poll_enters_locked_recovery(tmp_path:
 def test_failsafe_propagates_write_errors_and_retains_locking(tmp_path: Path) -> None:
     svc, modes, events, _, _ = controller(tmp_path)
     events.fail_emit = True
-    with patch.object(svc.store, "save", side_effect=OSError("read-only state")):
-        with pytest.raises(lock.LockError, match="could not prove locked"):
-            svc.failsafe("state_failed")
+    with (
+        patch.object(svc.store, "save", side_effect=OSError("read-only state")),
+        pytest.raises(lock.LockError, match="could not prove locked"),
+    ):
+        svc.failsafe("state_failed")
     assert svc.status()["state"] == "LOCKING"
     assert modes.active == {"diary-locked.service"}
 
@@ -664,9 +667,11 @@ def test_audit_heartbeat_fails_when_socket_accepts_without_recording(tmp_path: P
         heartbeat_reader=lambda *_: [],
     )
     try:
-        with patch.object(audit.time, "sleep") as sleep:
-            with pytest.raises(audit.AuditError, match="not readable"):
-                svc.heartbeat(peer())
+        with (
+            patch.object(audit.time, "sleep") as sleep,
+            pytest.raises(audit.AuditError, match="not readable"),
+        ):
+            svc.heartbeat(peer())
         assert sleep.call_count == 9
         assert b"DIARY_AUDIT_EVENT=audit.heartbeat" in sink.recv(65535)
     finally:

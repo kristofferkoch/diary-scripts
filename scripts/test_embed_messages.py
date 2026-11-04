@@ -536,7 +536,7 @@ class TestProcessMultiVersion:
         v2 = _spond_event({"acceptedIds": ["A"]})
         v1_hash = _must(spond_payload(v1))["content_hash"]
         db = _FakeDb({"spond:event:e1": v1_hash})     # DB has the old version
-        done, skipped, failed = self._run(monkeypatch, db, [v1, v2])
+        done, _skipped, failed = self._run(monkeypatch, db, [v1, v2])
         assert failed == 0
         assert done == 1
         assert db.deletes == ["spond:event:e1"]       # replaced exactly once
@@ -546,7 +546,7 @@ class TestProcessMultiVersion:
     def test_identical_reemission_embeds_once(self, monkeypatch):
         v1 = _spond_event({"unansweredIds": ["A"]})
         db = _FakeDb()
-        done, skipped, failed = self._run(monkeypatch, db, [v1, v1])
+        done, _skipped, failed = self._run(monkeypatch, db, [v1, v1])
         assert failed == 0
         assert done == 1
         assert db.inserts == ["spond:event:e1"]
@@ -562,7 +562,7 @@ class TestProcessMultiVersion:
                           "body": "Thursday at 18:00"}}
         db = _FakeDb()
         monkeypatch.setattr("scripts.embed_messages.BATCH_CHUNKS", 1)
-        done, skipped, failed = self._run(monkeypatch, db, [v1, other, v2])
+        done, _skipped, failed = self._run(monkeypatch, db, [v1, other, v2])
         assert failed == 0
         assert done == 2      # event + post, each exactly once
         assert sorted(db.inserts) == ["spond:event:e1", "spond:post:p1"]

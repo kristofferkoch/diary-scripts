@@ -13,9 +13,10 @@ import re
 import socket
 import socketserver
 import struct
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, cast
 from urllib.parse import urlsplit
 
 from scripts.diary_lock_ui import AuditReportProvider, ControllerClient, ReportProvider
@@ -124,7 +125,7 @@ def _text(value: object, field: str) -> str:
 def _timestamp(value: object, field: str) -> str:
     text = _text(value, field)
     try:
-        dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        dt.datetime.fromisoformat(text)
     except ValueError as exc:
         raise DashboardError(f"invalid {field}") from exc
     return text
@@ -466,7 +467,7 @@ class DashboardServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    server: DashboardServer
+    server: DashboardServer  # ty: ignore[invalid-mutable-override]
     protocol_version = "HTTP/1.1"
 
     def setup(self) -> None:
