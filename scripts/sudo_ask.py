@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import socket
 import stat
 import sys
@@ -72,7 +73,12 @@ def main(argv: list[str]) -> int:
         if not as_user:
             die("--as needs a user name")
 
-        cmd = rest[0] if len(rest) == 1 else " ".join(rest)
+        # The broker runs the request as a shell command, so several argv
+        # words must keep their quoting. Joining them with a bare space turned
+        # `sudo-ask bash -lc 'set -o pipefail; ...'` into `bash -lc set -o
+        # pipefail; ...` — which printed the whole login environment, secrets
+        # included, instead of running the script.
+        cmd = rest[0] if len(rest) == 1 else shlex.join(rest)
 
     try:
         st = os.stat(SOCK_PATH)

@@ -16,6 +16,11 @@ sudo-ask systemctl restart caddy
 sudo-ask --as kek 'systemctl --user restart mail-sync'
 ```
 
+Several arguments are shell-quoted before they reach the broker, so
+`sudo-ask bash -lc 'set -e; ./deploy.sh'` runs that script instead of spilling
+`set -e` into the broker's own shell. Pass one already-quoted string when you
+want pipes or `&&` logic: the client cannot infer intent from a bare argument.
+
 In the default mode, nothing runs until you type `y`. **There is no answer
 timeout** — a request waits until you have read it and decided, because being
 hurried is how a wrong command gets approved. Closing the terminal (or Ctrl-C,

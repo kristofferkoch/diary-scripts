@@ -22,6 +22,7 @@ import json
 import os
 import pty
 import select
+import shlex
 import socket
 import subprocess
 import sys
@@ -300,6 +301,47 @@ def test_break_glass_client_uses_fixed_operation() -> None:
         assert request["cwd"] == os.getcwd()
         assert isinstance(request["client_pid"], int)
         assert "as" not in request
+
+
+def test_client_escapes_arguments_so_the_shell_keeps_them_intact() -> None:
+    """Several argv words must survive the broker running a shell command.
+
+    `sudo-ask bash -lc 'set -o pipefail; ...'` used to be spliced into
+    `bash -lc set -o pipefail; ...`, which ran `bash -lc set` and printed the
+    whole login environment — secrets included — instead of the script.
+    """
+    with tempfile.TemporaryDirectory(prefix="sudo-quote-test-") as directory:
+        path = os.path.join(directory, "broker.sock")
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(path)
+        server.listen(1)
+        received: list[dict] = []
+
+        def serve() -> None:
+            conn, _ = server.accept()
+            with conn:
+                data = b""
+                while not data.endswith(b"\n"):
+                    data += conn.recv(4096)
+                received.append(json.loads(data))
+                conn.sendall(b'{"t":"exit","code":0}\n')
+            server.close()
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        payload = "set -o pipefail; echo 'a b'"
+        res = subprocess.run(
+            [sys.executable, str(CLIENT), "bash", "-lc", payload],
+            capture_output=True,
+            env={**os.environ, "SUDO_BROKER_SOCK": path},
+            timeout=10,
+            check=False,
+        )
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert res.returncode == 0, res.stderr
+        assert len(received) == 1
+        assert shlex.split(received[0]["cmd"]) == ["bash", "-lc", payload]
 
 
 def test_auto_accept_all_approves_without_prompting() -> None:
