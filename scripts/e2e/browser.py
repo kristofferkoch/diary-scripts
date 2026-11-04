@@ -246,7 +246,7 @@ class ExecutorHandler(socketserver.StreamRequestHandler):
                     publisher=harness.publish_without_venv,
                     lock_state="locked",
                 )
-            except Exception as exc:  # noqa: BLE001 — mirror executor failures to the test socket
+            except (OSError, ValueError, RuntimeError) as exc:
                 reply = executor.error_reply(exc)
         self.wfile.write(json.dumps(reply).encode("ascii") + b"\n")
 

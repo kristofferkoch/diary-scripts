@@ -554,7 +554,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._html(403, render_result("unauthorized"))
         except owner_ui.OwnerUIError:
             self._html(503, render_result("unavailable"))
-        except Exception:  # noqa: BLE001 — unexpected request failures become a generic 503
+        except (OSError, ValueError, RuntimeError):
             self._html(503, render_result("unavailable"))
 
     def do_GET(self) -> None:
