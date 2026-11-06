@@ -845,6 +845,14 @@ def pid_running(pid: int) -> bool:
     return stat.rsplit(")", 1)[1].strip().split()[0] != "Z"
 
 
+def remove_state_dir(state_dir: Path) -> None:
+    shutil.rmtree(state_dir, ignore_errors=True)
+    try:
+        state_dir.parent.rmdir()
+    except OSError:
+        pass
+
+
 class OutageSystemd:
     def manager_pid(self) -> None:
         return None
@@ -983,14 +991,16 @@ signal.pause()
             time.sleep(0.05)
         escape_pid = int(escape_pid_file.read_text())
         assert pid_running(escape_pid)
-        dbus_pid = systemd.main_pid("dbus-broker.service")
-        assert "/session.slice/dbus-broker.service" in lock.process_cgroup(dbus_pid)
-        assert processes.is_workload(dbus_pid)
-        dbus_attached = True
-        try:
-            systemd.attach("dbus-broker.service", escape_pid)
-        except lock.SystemdUnavailable:
-            dbus_attached = False
+        dbus_attached = None
+        if systemd.active("dbus-broker.service"):
+            dbus_pid = systemd.main_pid("dbus-broker.service")
+            assert "/session.slice/dbus-broker.service" in lock.process_cgroup(dbus_pid)
+            assert processes.is_workload(dbus_pid)
+            dbus_attached = True
+            try:
+                systemd.attach("dbus-broker.service", escape_pid)
+            except lock.SystemdUnavailable:
+                dbus_attached = False
         init_attached = True
         try:
             systemd.attach("init.scope", escape_pid)
@@ -1036,7 +1046,10 @@ signal.pause()
             svc.cancel()
         except lock.LockError:
             subprocess.run(["/usr/bin/systemctl", "--user", "stop", service, escape_service], check=False)
-        shutil.rmtree(state_dir, ignore_errors=True)
+        subprocess.run([
+            "/usr/bin/systemctl", "--user", "reset-failed", service, escape_service,
+        ], check=False, capture_output=True)
+        remove_state_dir(state_dir)
 
 
 @pytest.mark.skipif(os.environ.get("DIARY_TEST_SYSTEMD_USER") != "1", reason="opt-in synthetic user units")
@@ -1082,7 +1095,7 @@ time.sleep(300)
     finally:
         subprocess.run(["/usr/bin/systemctl", "--user", "stop", service], check=False)
         socket_path.unlink(missing_ok=True)
-        shutil.rmtree(state_dir, ignore_errors=True)
+        remove_state_dir(state_dir)
 
 
 @pytest.mark.skipif(os.environ.get("DIARY_TEST_SYSTEMD_USER") != "1", reason="opt-in synthetic user units")
@@ -1131,4 +1144,4 @@ def test_real_ordinary_unlock_restores_socket_and_broker_with_live_manager() -> 
         subprocess.run(["/usr/bin/systemctl", "--user", "disable", socket_unit, broker_unit], check=False)
         subprocess.run(["/usr/bin/systemctl", "--user", "daemon-reload"], check=False)
         socket_path.unlink(missing_ok=True)
-        shutil.rmtree(state_dir, ignore_errors=True)
+        remove_state_dir(state_dir)

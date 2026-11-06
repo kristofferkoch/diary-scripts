@@ -172,25 +172,28 @@ Run ordinary tests without creating units:
 uv run pytest scripts/test_diary_lock.py scripts/test_diary_agent_turn.py -q
 ```
 
-Run the real process-tree probe only in an agent test session with a user bus:
+Run the real process-tree and synthetic-bus probes only in an agent test
+session with its private user-manager socket:
 
 ```bash
-DIARY_TEST_SYSTEMD_USER=1 uv run pytest \
-  scripts/test_diary_agent_turn.py::test_real_control_group_kills_setsid_child_preserves_state_and_does_not_resume -q
+DIARY_TEST_SYSTEMD_USER=1 uv run pytest scripts/test_diary_agent_turn.py -q
 ```
 
-The opt-in probe creates a uniquely named synthetic service and scope with a
-supervised runtime plus an arbitrary `escape-*.service`, moves the runtime to
-the scope, spawns a `setsid` child, and stops only those synthetic units. It
-verifies the workload and arbitrary-service PIDs die, on-disk state remains,
-the real user-manager PID stays alive, fresh supervisor/runtime PIDs appear,
-and the fresh service does not recreate the old child. Its manager uses
+The first opt-in probe creates a uniquely named synthetic service and scope
+with a supervised runtime plus an arbitrary `escape-*.service`, moves the
+runtime to the scope, spawns a `setsid` child, and stops only those synthetic
+units. It verifies the workload and arbitrary-service PIDs die, on-disk state
+remains, the real user-manager PID stays alive, fresh supervisor/runtime PIDs
+appear, and the fresh service does not recreate the old child. Its manager uses
 `contain_all_scopes=False`, a two-test-service lister, and an isolated final-bus
 hook; production contains every non-init scope and every service. The probe
-verifies the deployed D-Bus path is `session.slice/dbus-broker.service` and
-attempts D-Bus and `init.scope` attachment. On systemd 259 in the current
-environment both API attempts are denied; if policy changes, the fake-`/proc`
-attached-workload regressions require those PIDs to remain eligible.
+always attempts `init.scope` attachment. If the real D-Bus broker is active, it
+also verifies its `session.slice/dbus-broker.service` path and attempts D-Bus
+attachment; an already-inactive real broker is not started merely for this
+optional check. On systemd 259 in the current environment the API attempts are
+denied; if policy changes, the fake-`/proc` attached-workload regressions
+require those PIDs to remain eligible. Cleanup stops and resets every synthetic
+transient unit so failed test units do not remain registered.
 
 A second opt-in probe starts only a uniquely named synthetic broker with a Unix
 listener. Final quiescence kills its PID and removes the listener from
@@ -239,62 +242,365 @@ starts fresh supervisor/runtime processes.
 
 ## Required controlled live verification
 
-Do not use the production web sessions for this test. Approve and install both
-repositories first, choose a quiet owner-controlled window, and prepare fresh
-DSH and Kimi test sessions whose conversation files can be checksummed. Install
-the approved agent units and hook fragments, install
-`systemd/units/diary-lockd.service.d/50-turn-cancellation.conf` as
-`/etc/systemd/system/diary-lockd.service.d/50-turn-cancellation.conf`, reload
-the system and agent user managers, and restart only the intended services.
+The synthetic probes above do not replace a real controller `LOCKING`
+transition. Conversely, the controller test below does not replace the
+synthetic probe's proof that a `setsid` descendant dies with its turn scope.
+Both are required. Do not use existing production web sessions and do not run
+this while another agent or owner task is active: `LOCKING` deliberately stops
+**every** agent-UID workload, including the session running a command.
 
-For each runtime:
+Approve and publish both repositories and their matching gitlink first. Record
+the full approved OIDs, choose an exclusive owner-controlled window, close all
+ordinary DSH/Kimi sessions, and create fresh test sessions. Locate each fresh
+session's conversation file through that runtime's session UI/list and record
+its path and SHA-256; do not guess a conversation path. Prepare a second,
+non-agent terminal for every command below. An agent-UID shell will be killed.
 
-1. Start a test turn that runs a tool tree with a parent, child, and `setsid`
-   grandchild. Record all PIDs and the conversation-file checksum.
-2. Confirm the runtime child is in its `diary-<runtime>-turn-*.scope` and the
-   scope has `KillMode=control-group`. Confirm the web UI remains available.
-3. Before locking, create an agent-owned `systemd-run --user --on-active=...`
-   timer and a path unit; none of them may be active after `LOCKED`, and no
-   service they would have started may appear. Enter `LOCKING`. Confirm the
-   turn ends without its final tool/model result, every recorded PID is gone, no
-   new agent-user scope survives, and both services remain stopped. Check the
-   transition audit and durable state.
-4. Verify the conversation checksum/history remains and records at most an
-   interrupted turn, not successful completion of the cancelled tool.
-5. Confirm ordinary lock preserved the manager while D-Bus and all workload
-   services stopped. Verify no subsequent call reactivates broker or socket.
-   With the manager still alive and its PID unchanged, restore socket through
-   `/run/user/<uid>/systemd/private` before any public-bus readiness call, then
-   restore the broker. Before attended egress opens, confirm old services are
-   inactive and no stale scope/process survives, followed by fresh
-   supervisor/runtime PIDs and a working web UI. Wait for background completion
-   and verify no cancelled tool or model turn resumes
-   and no blocked operation is replayed.
-6. Start a new explicit turn and verify it receives a new scope and finishes
-   normally. Repeat for the other runtime while the first has a turn to prove
-   their scopes are independent.
-7. Test two simultaneous turns in one runtime: the second must fail closed and
-   the controller must not report healthy attended/unscoped execution.
-8. Start a task/system-originated Kimi turn while locked. Observation-only
-   `TurnStarted` must reach the root failsafe and kill the runtime rather than
-   continue. Create another tool scope and an arbitrary `escape.service` during
-   cancellation and verify later passes remove both before `LOCKED`. Attempt
-   D-Bus, `dbus.socket`, custom-slice, unknown-unit, and `init.scope`
-   attachment: the API must reject it or the attached PID must be killed. Only
-   the current manager identity remains untouched.
+### Preflight, backup, and activation
 
-Inject a scope-stop failure: it must retain `LOCKING` even when other scopes
-were stopped. Separately stop the user manager during an active test turn: the
-independent PID fallback must kill every recorded workload PID before degraded
-lock can complete. Attended mode must explicitly recover and re-pin the
-replacement manager before PID quiescence, quiesce any `default.target`
-auto-started PIDs, restore and verify `dbus.socket` followed by D-Bus under
-`session.slice`, and only then
-start fresh supervisor/runtime processes; it must not kill the manager or
-attend the auto-started PIDs. Stop the controller during an active turn and verify its
+Run the isolated unit suite, all three synthetic user-manager probes, and the
+root mount/capability gate on the exact approved artifacts. Then set a unique
+tag and backup directory in the non-agent terminal:
+
+```bash
+DIARY=/home/kek/diary-approved
+TAG=ctl02-$(date -u +%Y%m%dT%H%M%SZ)
+BACKUP=/var/backups/$TAG
+AGENT_UID=$(id -u agent)
+as-agent() {
+  sudo-ask runuser -u agent -- env HOME=/home/agent \
+    XDG_RUNTIME_DIR=/run/user/$AGENT_UID \
+    DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$AGENT_UID/systemd/private "$@"
+}
+attend() {
+  sudo-ask --as kek 'printf "ATTENDED\n" | /usr/bin/script -qec "/usr/local/bin/diary-lock break-glass" /dev/null'
+}
+```
+
+The broker permits root and `kek`, not `agent`; root is used only for `runuser`,
+and the command itself runs as `agent`. Approved broker commands have no
+terminal stdin, so `attend` uses `script` to supply the required interactive
+confirmation only after the owner approves that exact request. Confirm
+`AGENT_UID` is 981. The controller drop-ins and both user drop-ins must all be
+absent and must not be symlinks. The `! -L` checks are required because `! -e`
+alone accepts a dangling symlink. An existing user drop-in or symlink is a stop
+condition, never a file to overwrite or quietly incorporate into this test:
+
+```bash
+sudo-ask test ! -e /etc/systemd/system/diary-lockd.service.d/50-turn-cancellation.conf
+sudo-ask test ! -L /etc/systemd/system/diary-lockd.service.d/50-turn-cancellation.conf
+sudo-ask test ! -e /etc/systemd/system/diary-lockd.service.d/60-cgroup-identity.conf
+sudo-ask test ! -L /etc/systemd/system/diary-lockd.service.d/60-cgroup-identity.conf
+as-agent test ! -e /home/agent/.config/systemd/user/dsh-web.service.d/50-turn-cancellation.conf
+as-agent test ! -L /home/agent/.config/systemd/user/dsh-web.service.d/50-turn-cancellation.conf
+as-agent test ! -e /home/agent/.config/systemd/user/kimi-web.service.d/50-turn-cancellation.conf
+as-agent test ! -L /home/agent/.config/systemd/user/kimi-web.service.d/50-turn-cancellation.conf
+```
+
+If any check fails, stop before making a backup or other change. A fresh rerun
+is allowed only after a previous activation was completely rolled back; use a
+new `TAG` and repeat every preflight check. Record the loaded pre-change
+`ExecStart`, `MainPID`, and user-manager PID. Identify the DSH hook file from
+`dsh-hooks-claude-code`'s `configPath` and Kimi's actual `config.toml`; assign
+those paths to `DSH_HOOKS` and `KIMI_CONFIG`, require both to be regular files,
+and do not continue if either path is uncertain. Preserve the files that will
+change, root-only:
+
+```bash
+sudo-ask install -d -o root -g root -m 0700 "$BACKUP"
+sudo-ask cp -a /home/agent/.config/systemd/user/dsh-web.service "$BACKUP/"
+sudo-ask cp -a /home/agent/.config/systemd/user/kimi-web.service "$BACKUP/"
+sudo-ask cp -a "$DSH_HOOKS" "$BACKUP/dsh-hooks.json"
+sudo-ask cp -a "$KIMI_CONFIG" "$BACKUP/kimi-config.toml"
+```
+
+The repository's top-level `dsh-web.service` and `kimi-web.service` are inactive
+LATER-03 **system-service candidates**. Do not install either into the user
+manager. Install only the pre-LATER-03 user drop-ins and the controller drop-in:
+
+```bash
+as-agent install -d -m 0755 \
+  /home/agent/.config/systemd/user/dsh-web.service.d \
+  /home/agent/.config/systemd/user/kimi-web.service.d
+as-agent install -m 0644 \
+  "$DIARY/dsh/dsh-web.service.d/50-turn-cancellation.conf" \
+  /home/agent/.config/systemd/user/dsh-web.service.d/50-turn-cancellation.conf
+as-agent install -m 0644 \
+  "$DIARY/kimi/kimi-web.service.d/50-turn-cancellation.conf" \
+  /home/agent/.config/systemd/user/kimi-web.service.d/50-turn-cancellation.conf
+sudo-ask install -d -o root -g root -m 0755 \
+  /etc/systemd/system/diary-lockd.service.d
+sudo-ask install -o root -g root -m 0644 \
+  "$DIARY/systemd/units/diary-lockd.service.d/50-turn-cancellation.conf" \
+  /etc/systemd/system/diary-lockd.service.d/50-turn-cancellation.conf
+```
+
+These writes are one activation attempt. If any step after the backup fails, do
+not rerun installation, create a new backup, or overwrite the original evidence.
+Keep the same `TAG` and `BACKUP`, reach a verified `LOCKED` state, and perform
+the rollback below. Because both user drop-ins were required absent, rollback
+removes only files created by this attempt even when just one drop-in was
+installed. If rollback itself is interrupted, inspect and complete its remaining
+steps without rerunning activation or replacing the backup.
+
+Merge `dsh/turn-hooks.json` into `DSH_HOOKS`, appending rather than replacing
+existing `UserPromptSubmit` or `Stop` arrays, and append `kimi/turn-hooks.toml`
+to `KIMI_CONFIG` exactly once. Save reviewed diffs in the backup directory.
+Reload and restart the user services before enabling the controller hook:
+
+```bash
+as-agent systemctl --user daemon-reload
+as-agent systemctl --user restart dsh-web.service kimi-web.service
+for unit in dsh-web.service kimi-web.service; do
+  as-agent systemctl --user show "$unit" \
+    --property=MainPID,ExecStart,KillMode,SendSIGKILL,TimeoutStopUSec
+  supervisor=$(as-agent systemctl --user show "$unit" --property=MainPID --value)
+  as-agent cat "/proc/$supervisor/task/$supervisor/children"
+done
+```
+
+Each `ExecStart` must name `/usr/local/bin/diary-agent-supervisor`, and each
+supervisor must have exactly one direct runtime child. Now reload and restart
+the controller. Its startup transition must stop all agent workloads:
+
+```bash
+sudo-ask systemctl daemon-reload
+sudo-ask systemctl restart diary-lockd.service
+sudo-ask --as kek /usr/local/bin/diary-lock status
+! as-agent systemctl --user is-active --quiet dsh-web.service
+! as-agent systemctl --user is-active --quiet kimi-web.service
+```
+
+Require durable `LOCKED`, not `LOCKING`. Use the explicitly approved `attend`
+function above and verify both services return with fresh supervisor/runtime
+PIDs before starting a test turn:
+
+```bash
+attend
+as-agent systemctl --user is-active dsh-web.service kimi-web.service
+```
+
+### Synthetic turn, child tree, lock, and no resume
+
+Repeat this subsection with `RUNTIME=dsh`, then with `RUNTIME=kimi`. In the
+corresponding fresh web session, ask for a shell tool run of exactly the
+following, replacing `RUNTIME` with its value. This is the synthetic turn: the
+tool parent waits on a child, which waits on a `start_new_session=True`
+grandchild. None writes `completed` unless the whole tree survives.
+
+```bash
+python3 - "/home/agent/$TAG-$RUNTIME" <<'PY'
+import os
+import pathlib
+import subprocess
+import sys
+
+state = pathlib.Path(sys.argv[1])
+state.mkdir(parents=True, exist_ok=False)
+(state / "tool-parent.pid").write_text(f"{os.getpid()}\n")
+grandchild_code = (
+    "import pathlib,sys,time; "
+    "pathlib.Path(sys.argv[1], 'setsid-ready').write_text('ready\\n'); "
+    "time.sleep(300)"
+)
+child_code = (
+    "import pathlib,subprocess,sys; "
+    "p = subprocess.Popen([sys.executable, '-c', sys.argv[2], sys.argv[1]], "
+    "start_new_session=True); "
+    "pathlib.Path(sys.argv[1], 'tool-setsid.pid').write_text(str(p.pid) + '\\n'); "
+    "p.wait()"
+)
+child = subprocess.Popen([
+    sys.executable, "-c", child_code, str(state), grandchild_code,
+])
+(state / "tool-child.pid").write_text(f"{child.pid}\n")
+child.wait()
+(state / "completed").write_text("must not exist after cancellation\n")
+PY
+```
+
+While the tool is still running, require all three PID files plus
+`setsid-ready`, and record the PIDs, supervisor, runtime, scope, and current
+conversation SHA-256 in the evidence log. These commands must show one active
+turn scope, `KillMode=control-group`, and the runtime's cgroup at or below that
+scope's `ControlGroup`; the web service must remain active:
+
+```bash
+state=/home/agent/$TAG-$RUNTIME
+as-agent ls "$state"
+as-agent systemctl --user list-units --type=scope --state=active \
+  --plain --no-legend "diary-$RUNTIME-turn-*.scope"
+scope=$(as-agent systemctl --user list-units --type=scope --state=active \
+  --plain --no-legend "diary-$RUNTIME-turn-*.scope" | awk 'NR == 1 {print $1}')
+test -n "$scope"
+as-agent systemctl --user show "$scope" --property=KillMode,ControlGroup
+supervisor=$(as-agent systemctl --user show "$RUNTIME-web.service" \
+  --property=MainPID --value)
+runtime_pid=$(as-agent cat "/proc/$supervisor/task/$supervisor/children")
+test "$(printf '%s\n' "$runtime_pid" | wc -w)" = 1
+as-agent cat "/proc/$runtime_pid/cgroup"
+as-agent systemctl --user is-active "$RUNTIME-web.service"
+```
+
+Create one transient timer and one path unit whose activation markers must never
+appear. The path trigger is deliberately created only after lock:
+
+```bash
+as-agent systemd-run --user --unit "$TAG-scheduled" --on-active=600 \
+  /bin/touch "/home/agent/$TAG-timer-fired"
+as-agent bash -c 'printf "%s\n" "[Path]" "PathExistsChanged=$1" > "$2"' _ \
+  "/home/agent/$TAG-path.trigger" \
+  "/home/agent/.config/systemd/user/$TAG-path.path"
+as-agent bash -c 'printf "%s\n" "[Service]" "Type=oneshot" \
+  "ExecStart=/bin/touch $1" > "$2"' _ \
+  "/home/agent/$TAG-path-fired" \
+  "/home/agent/.config/systemd/user/$TAG-path.service"
+as-agent systemctl --user daemon-reload
+as-agent systemctl --user start "$TAG-path.path"
+as-agent systemctl --user is-active "$TAG-scheduled.timer" "$TAG-path.path"
+manager_before=$(sudo-ask systemctl show "user@$AGENT_UID.service" \
+  --property=MainPID --value)
+```
+
+From the non-agent terminal, request lock. Do not issue further model prompts
+until the transition and process checks complete:
+
+```bash
+sudo-ask --as kek /usr/local/bin/diary-lock lock
+sudo-ask --as kek /usr/local/bin/diary-lock status
+! as-agent systemctl --user is-active --quiet dsh-web.service
+! as-agent systemctl --user is-active --quiet kimi-web.service
+! as-agent systemctl --user is-active --quiet "$TAG-scheduled.timer"
+! as-agent systemctl --user is-active --quiet "$TAG-path.path"
+! as-agent test -e "/home/agent/$TAG-timer-fired"
+! as-agent test -e "/home/agent/$TAG-path-fired"
+! as-agent test -e "$state/completed"
+as-agent touch "/home/agent/$TAG-path.trigger"
+! as-agent systemctl --user is-active --quiet "$TAG-path.service"
+as-agent systemctl --user list-units --type=scope --state=active \
+  --plain --no-legend
+```
+
+Only `init.scope` may remain active in the final scope listing. For every PID in
+`tool-parent.pid`, `tool-child.pid`, `tool-setsid.pid`, and the recorded
+supervisor/runtime PIDs, inspect `/proc/<pid>/stat`: absence or zombie state is
+required; any running, sleeping, or stopped process is a failure. The manager
+PID must still equal `manager_before` and be alive. D-Bus broker and socket must
+be inactive, and `/run/user/$AGENT_UID/bus` must have no listener in
+`/proc/net/unix`. Read the trusted journal namespace for the matching
+`controller.turn_cancellation` and `controller.transition` events. The fresh
+conversation file must still exist and contain the prompt/interrupted history,
+not a successful final tool/model result. Its hash may change if the runtime
+records interruption; preservation, not byte-for-byte equality, is the gate.
+
+Unlock through the same explicitly approved `attend` path. Confirm the manager
+PID is unchanged, the old scope and PIDs remain gone, both services have fresh
+supervisor/runtime PIDs, and the web UI works. Wait at least 30 seconds without
+sending a prompt. Neither `completed`, a timer/path activation marker, nor new
+output in the cancelled conversation may appear; the old model turn must not
+resume. Then start a new explicit turn, require a different scope name, and let
+it finish normally:
+
+```bash
+attend
+manager_after=$(sudo-ask systemctl show "user@$AGENT_UID.service" \
+  --property=MainPID --value)
+test "$manager_after" = "$manager_before"
+as-agent systemctl --user is-active dsh-web.service kimi-web.service
+! as-agent systemctl --user is-active --quiet "$TAG-scheduled.timer"
+! as-agent systemctl --user is-active --quiet "$TAG-path.path"
+sleep 30
+! as-agent test -e "$state/completed"
+! as-agent test -e "/home/agent/$TAG-timer-fired"
+! as-agent test -e "/home/agent/$TAG-path-fired"
+```
+
+Repeat for the other runtime. With one runtime's new turn active, start a turn
+in the other and verify independent scopes. Then test two simultaneous turns in
+one runtime: the second must fail closed and must not leave healthy attended,
+unscoped execution. Start a task/system-originated Kimi turn while locked:
+observation-only `TurnStarted` must invoke the root failsafe and kill the
+runtime instead of continuing. Create another tool scope and arbitrary
+`escape.service` during cancellation and require later passes to remove both.
+Attempt D-Bus, `dbus.socket`, custom-slice, unknown-unit, and `init.scope`
+attachment: the API must reject it or the attached PID must be killed. Only the
+current manager identity may remain untouched.
+
+Inject a scope-stop failure: durable state must remain `LOCKING` even when other
+scopes stopped. Separately stop the user manager during an active test turn:
+the independent PID fallback must kill every recorded workload PID before
+degraded lock can complete. Unlock must re-pin the replacement manager before
+PID quiescence, quiesce `default.target` auto-started PIDs, restore and verify
+`dbus.socket` then D-Bus under `session.slice`, and only then start fresh
+supervisor/runtime processes. It must not kill the manager or attend the
+auto-started PIDs. Stop the controller during an active turn and verify its
 stop/failsafe path also cancels the complete tree.
 
-After the controlled window, remove the turn-cancellation drop-in and custom
-hook entries, restore the prior approved agent units if activation is not yet
-intended, reload, and leave general-agent enforcement dark. Only the deployment
-change with these concrete results may delete CTL-02 from the board.
+### Mandatory dark-state restoration
+
+If any transition is stuck in `LOCKING`, any PID survives, or policy verification
+fails, stop here: keep workloads stopped, preserve evidence, and use the
+controller/failsafe recovery procedure. Do not conceal a failed containment
+test by removing the drop-in. Enter the rollback steps below only from a
+verified `LOCKED` state with no active test turn.
+
+First lock once more to stop the fresh sessions, then restore the exact backups
+and remove only files created for this test:
+
+```bash
+sudo-ask --as kek /usr/local/bin/diary-lock lock
+sudo-ask rm -f /etc/systemd/system/diary-lockd.service.d/50-turn-cancellation.conf
+sudo-ask cp -a "$BACKUP/dsh-web.service" /home/agent/.config/systemd/user/dsh-web.service
+sudo-ask cp -a "$BACKUP/kimi-web.service" /home/agent/.config/systemd/user/kimi-web.service
+sudo-ask cp -a "$BACKUP/dsh-hooks.json" "$DSH_HOOKS"
+sudo-ask cp -a "$BACKUP/kimi-config.toml" "$KIMI_CONFIG"
+as-agent rm -f \
+  /home/agent/.config/systemd/user/dsh-web.service.d/50-turn-cancellation.conf \
+  /home/agent/.config/systemd/user/kimi-web.service.d/50-turn-cancellation.conf \
+  "/home/agent/.config/systemd/user/$TAG-path.path" \
+  "/home/agent/.config/systemd/user/$TAG-path.service"
+sudo-ask systemctl daemon-reload
+sudo-ask systemctl restart diary-lockd.service
+as-agent systemctl --user daemon-reload
+as-agent systemctl --user reset-failed "$TAG-scheduled.timer" \
+  "$TAG-scheduled.service" "$TAG-path.path" "$TAG-path.service" || true
+as-agent systemctl --user start dbus.socket dbus-broker.service
+as-agent systemctl --user restart dsh-web.service kimi-web.service
+as-agent rm -f "/home/agent/$TAG-path.trigger" \
+  "/home/agent/$TAG-timer-fired" "/home/agent/$TAG-path-fired"
+for runtime in dsh kimi; do
+  as-agent rm -f "/home/agent/$TAG-$runtime/tool-parent.pid" \
+    "/home/agent/$TAG-$runtime/tool-child.pid" \
+    "/home/agent/$TAG-$runtime/tool-setsid.pid" \
+    "/home/agent/$TAG-$runtime/setsid-ready" \
+    "/home/agent/$TAG-$runtime/completed"
+  as-agent rmdir "/home/agent/$TAG-$runtime"
+done
+```
+
+Run artifact cleanup only after recording marker absence/presence in the
+evidence log. `rmdir` deliberately fails if an unexpected file remains; do not
+replace it with recursive deletion. Retain the two interrupted conversation
+files and the backup. Prove the final state, do not merely assume it from
+successful cleanup commands:
+
+- the CTL-02 and LATER-03 controller drop-ins are absent;
+  `systemctl show diary-lockd.service` has `ProtectHome=yes`, an empty
+  `CapabilityBoundingSet`, and no `--agent-user` or `--turn-socket` in its loaded
+  `ExecStart`;
+- both loaded user-unit `ExecStart` values equal their recorded originals and
+  contain no supervisor; both services are active with direct runtime MainPIDs;
+- restored hook files match their backups byte-for-byte and contain no
+  `diary-agent-turn` entries from this test;
+- no `diary-*-turn-*`, `$TAG` timer/path/service, or test child process remains;
+  the public bus is restored and the user manager is healthy;
+- `/etc/diary/network-policy-enabled` remains absent, no LATER-03 activation was
+  attempted, and the other enforcement arms have their recorded pre-test state;
+- the final durable controller state is `LOCKED` with the base, dark controller.
+  This is expected even though the ordinary user services run: base CTL-01 mode
+  markers are not general-agent containment.
+
+Only a later deployment record containing the exact approved OIDs and all
+synthetic, live, failure-injection, no-resume, and dark-restoration results may
+delete CTL-02 from the board. Passing isolated tests alone changes no live card
+state.
