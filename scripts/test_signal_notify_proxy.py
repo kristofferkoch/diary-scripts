@@ -161,3 +161,26 @@ def test_end_to_end_attachment_read_and_reject(tmp_path):
     response = _ask(listen_path, _get("blob.csv"))
     assert base64.b64decode(response["result"]["data"]) == b"a;b\n1;2\n"
     assert "error" in _ask(listen_path, _get("../secret"))
+
+
+def test_end_to_end_attachment_rejects_null_id(tmp_path):
+    listen_path = str(tmp_path / "listen.sock")
+    proxy_srv = _bind(listen_path)
+    proxy = threading.Thread(
+        target=_proxy,
+        args=(proxy_srv, str(tmp_path / "unused.sock"), 1, str(tmp_path)),
+    )
+    proxy.start()
+
+    response = _ask(listen_path, _get(None))
+    proxy.join(timeout=5)
+
+    assert not proxy.is_alive()
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {
+            "code": -32600,
+            "message": "getAttachment requires a string params.id",
+        },
+    }

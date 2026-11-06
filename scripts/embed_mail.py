@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import argparse
 import email
+import http.client
 import io
 import json
 import math
@@ -737,7 +738,7 @@ def process(conn: psycopg.Connection, tier: int, limit: int | None, verbose: boo
             try:
                 d, f = _flush_batch(conn, tier, pending, verbose)
                 done += d; failed += f
-            except (OSError, ValueError, TypeError, RuntimeError, KeyError, AssertionError, psycopg.Error, subprocess.SubprocessError, MessageError) as e:
+            except (OSError, http.client.HTTPException, ValueError, TypeError, RuntimeError, KeyError, AssertionError, psycopg.Error, subprocess.SubprocessError, MessageError) as e:
                 failed += len(pending)
                 print(f"  !! batch embed failed ({len(pending)} msgs): {e}",
                       file=sys.stderr)
@@ -755,7 +756,7 @@ def process(conn: psycopg.Connection, tier: int, limit: int | None, verbose: boo
         try:
             d, f = _flush_batch(conn, tier, pending, verbose)
             done += d; failed += f
-        except (OSError, ValueError, TypeError, RuntimeError, KeyError, AssertionError, psycopg.Error, subprocess.SubprocessError, MessageError) as e:
+        except (OSError, http.client.HTTPException, ValueError, TypeError, RuntimeError, KeyError, AssertionError, psycopg.Error, subprocess.SubprocessError, MessageError) as e:
             failed += len(pending)
             print(f"  !! final batch embed failed ({len(pending)} msgs): {e}",
                   file=sys.stderr)

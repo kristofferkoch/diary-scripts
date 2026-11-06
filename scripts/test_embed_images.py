@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import http.client
 import io
 from email.message import EmailMessage
 from typing import Any, cast
@@ -489,3 +490,25 @@ class TestProcess:
         attempts = [p for s, p in conn.executed
                     if s.startswith("UPDATE attachments SET vlm_attempts")]
         assert attempts == [(1, None, 7), (1, None, 8)]
+
+    def test_incomplete_read_marks_attempt_and_continues(self, monkeypatch):
+        conn = _FakeConn()
+        rows = [_pending_row(), _pending_row(att_id=8, mid="id-2")]
+        _patch_pipeline(monkeypatch, rows, blob=_png_bytes(300, 300))
+        monkeypatch.setattr(ei, "BATCH_CHUNKS", 1)
+        calls = []
+
+        def flaky_embed(texts):
+            calls.append(texts)
+            if len(calls) == 1:
+                raise http.client.IncompleteRead(b"truncated")
+            return [[0.1, 0.2]] * len(texts)
+
+        monkeypatch.setattr(ei, "embed_batch", flaky_embed)
+        done, skipped, failed = ei.process(cast(Any, conn), ("mail",), 25, False)
+
+        assert (done, skipped, failed) == (1, 0, 1)
+        assert len(calls) == 2
+        attempts = [p for s, p in conn.executed
+                    if s.startswith("UPDATE attachments SET vlm_attempts")]
+        assert attempts == [(1, None, 7)]

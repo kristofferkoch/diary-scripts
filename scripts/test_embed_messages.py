@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import http.client
 from typing import Any, cast
 
 import psycopg
@@ -568,3 +569,31 @@ class TestProcessMultiVersion:
         assert sorted(db.inserts) == ["spond:event:e1", "spond:post:p1"]
         assert db.deletes == []
         assert db.hashes["spond:event:e1"] == _must(spond_payload(v2))["content_hash"]
+
+    def test_incomplete_read_counts_failure_and_continues(self, monkeypatch):
+        from scripts.embed_messages import process
+        records = [
+            _spond_event({"unansweredIds": ["A"]}),
+            {"kind": "post", "fetched_at": "f",
+             "data": {"id": "p1", "title": "Info night",
+                      "body": "Thursday at 18:00"}},
+        ]
+        db = _FakeDb()
+        monkeypatch.setattr("scripts.embed_messages.iter_records",
+                            lambda source, verbose: iter(records))
+        monkeypatch.setattr("scripts.embed_messages.BATCH_CHUNKS", 1)
+        calls = []
+
+        def flaky_embed(batch):
+            calls.append([payload["mid"] for payload in batch])
+            if len(calls) == 1:
+                raise http.client.IncompleteRead(b"truncated")
+            return _fake_embed_pending(batch)
+
+        monkeypatch.setattr("scripts.embed_messages._embed_pending", flaky_embed)
+        done, skipped, failed = process(cast(Any, _FakeConn(db)),
+                                        "spond", None, False)
+
+        assert (done, skipped, failed) == (1, 0, 1)
+        assert calls == [["spond:event:e1"], ["spond:post:p1"]]
+        assert db.inserts == ["spond:post:p1"]

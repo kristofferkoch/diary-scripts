@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import http.client
 import io
 import json
 import os
@@ -511,7 +512,7 @@ def process(conn: psycopg.Connection, sources: tuple[str, ...], limit: int,
             d, f = flush(conn, pending, verbose)
             done += d
             failed += f
-        except (OSError, ValueError, TypeError, RuntimeError, KeyError, AssertionError, psycopg.Error, subprocess.SubprocessError) as e:
+        except (OSError, http.client.HTTPException, ValueError, TypeError, RuntimeError, KeyError, AssertionError, psycopg.Error, subprocess.SubprocessError) as e:
             # Embed endpoint down etc: count attempts so a persistent
             # outage doesn't re-describe the same images every run.
             failed += len(pending)

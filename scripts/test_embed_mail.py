@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import email
+import http.client
 import io
 import shutil
 import subprocess
 import zipfile
 from email.policy import default as email_default
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -673,6 +675,66 @@ class TestEmbedBatch:
         bodies.clear()
         out = embed_mail.embed_batch(["a" * 40] * 3)   # 40+40 fits, +40 caps
         assert bodies == [["a" * 40, "a" * 40], ["a" * 40]]
+
+
+class TestProcessTransportFailures:
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, sql, params):
+            pass
+
+        def fetchone(self):
+            return None
+
+    class _Conn:
+        def cursor(self):
+            return TestProcessTransportFailures._Cursor()
+
+    @staticmethod
+    def _patch_messages(monkeypatch, message_ids):
+        from scripts import embed_mail
+        monkeypatch.setattr(embed_mail, "nm_search_ids",
+                            lambda query, limit: message_ids)
+        monkeypatch.setattr(embed_mail, "_prepare_message", lambda mid: {
+            "mid": mid, "body_chunks": ["body"], "attachments": [],
+        })
+
+    def test_incomplete_read_in_full_batch_continues(self, monkeypatch, capsys):
+        from scripts import embed_mail
+        self._patch_messages(monkeypatch, ["first", "second"])
+        monkeypatch.setattr(embed_mail, "BATCH_CHUNKS", 1)
+        calls = []
+
+        def flush(conn, tier, pending, verbose):
+            calls.append([payload["mid"] for payload in pending])
+            if len(calls) == 1:
+                raise http.client.IncompleteRead(b"truncated")
+            return 1, 0
+
+        monkeypatch.setattr(embed_mail, "_flush_batch", flush)
+        embed_mail.process(cast(Any, self._Conn()), 1, None, False)
+
+        assert calls == [["first"], ["second"]]
+        assert "[tier 1] done=1 skipped=0 failed=1" in capsys.readouterr().err
+
+    def test_incomplete_read_in_final_batch_is_counted(self, monkeypatch, capsys):
+        from scripts import embed_mail
+        self._patch_messages(monkeypatch, ["only"])
+
+        def flush(conn, tier, pending, verbose):
+            raise http.client.IncompleteRead(b"truncated")
+
+        monkeypatch.setattr(embed_mail, "_flush_batch", flush)
+        embed_mail.process(cast(Any, self._Conn()), 1, None, False)
+
+        error = capsys.readouterr().err
+        assert "final batch embed failed (1 msgs)" in error
+        assert "[tier 1] done=0 skipped=0 failed=1" in error
 
 
 # ---------- end-to-end with real notmuch (skipped if mail not present) ----------

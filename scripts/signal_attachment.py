@@ -55,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
             with Path(args.output).open("xb") as output:
                 output.write(data)
             print(f"wrote {args.output} ({len(data)} bytes)", file=sys.stderr)
-    except (OSError, RuntimeError, ValueError) as exc:
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
         print(f"signal-attachment: {exc}", file=sys.stderr)
         return 1
     return 0

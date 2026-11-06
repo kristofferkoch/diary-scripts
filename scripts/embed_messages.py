@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import sys
@@ -612,7 +613,7 @@ def process(conn: psycopg.Connection, source: str, limit: int | None,
             d, f = _flush_batch(conn, pending, verbose)
             done += d
             failed += f
-        except (OSError, ValueError, TypeError, RuntimeError, KeyError, AssertionError, psycopg.Error) as e:
+        except (OSError, http.client.HTTPException, ValueError, TypeError, RuntimeError, KeyError, AssertionError, psycopg.Error) as e:
             failed += len(pending)
             print(f"  !! batch embed failed ({len(pending)} records): {e}",
                   file=sys.stderr)

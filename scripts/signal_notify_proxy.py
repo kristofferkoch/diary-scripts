@@ -402,6 +402,10 @@ def handle_attachment(conn: socket.socket, request: dict, root: str) -> None:
     with ATTACHMENT_SLOTS:
         try:
             value = attachment_id(request)
+        except (TypeError, ValueError) as exc:
+            send_error(conn, request_id, str(exc))
+            return
+        try:
             data = read_attachment(root, value)
         except FileNotFoundError:
             send_error(conn, request_id, "attachment not found")
