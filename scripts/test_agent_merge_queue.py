@@ -1,7 +1,10 @@
 """Security-boundary tests for the human-approved publication queue."""
 from __future__ import annotations
 
+import socket
 import subprocess
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1044,3 +1047,382 @@ def test_doctor_requires_an_explicit_approved_checkout(capsys: pytest.CaptureFix
     """The installed client has no AGENT_MERGE_* env; never fall back to it."""
     assert amq.queue_main(["doctor"]) == 2
     assert "requires --approved" in capsys.readouterr().err
+
+
+def test_status_is_queued_then_exact_oid_is_approved(paths: amq.QueuePaths):
+    source_branch(paths)
+    queue_source(paths)
+    oid = reviewed(paths)
+    paths.lock.unlink()
+
+    assert amq.approval_status(oid, paths) == "queued"
+    assert not paths.lock.exists(), "read-only status neither takes nor creates the queue lock"
+
+    assert amq.approve_queue(oid, paths) is True
+    assert amq.approval_status(oid, paths) == "approved"
+
+
+def test_status_treats_a_rewritten_queue_oid_as_absent(paths: amq.QueuePaths):
+    source_branch(paths)
+    queue_source(paths)
+    old = reviewed(paths)
+    second = source_branch(paths, "dev/second")
+    commit(second, "second.txt", "superseding change\n")
+    queue_source(paths, "dev/second")
+    new = reviewed(paths)
+    assert new != old
+
+    assert amq.approval_status(old, paths) == "absent"
+    assert amq.approval_status(new, paths) == "queued"
+    assert run("git", "merge-base", "--is-ancestor", old, new, cwd=paths.queue) == ""
+
+
+def test_status_treats_a_denied_or_emptied_queue_as_absent(paths: amq.QueuePaths):
+    source_branch(paths)
+    queue_source(paths)
+    oid = reviewed(paths)
+    run("git", "reset", "--hard", "master", cwd=paths.queue)
+
+    assert amq.approval_status(oid, paths) == "absent"
+    assert amq.approval_status("0" * 40, paths) == "absent"
+
+
+@pytest.mark.parametrize("repo", ["diary", "scripts"])
+@pytest.mark.parametrize("peer", ["owner", "agent"])
+def test_status_service_authorizes_owner_and_agent_for_both_repositories(
+    paths: amq.QueuePaths,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    repo: str,
+    peer: str,
+):
+    oid = "a" * 40
+    selected: list[str] = []
+    monkeypatch.setattr(amq, "peer_uid", lambda fd: 1000 if peer == "owner" else 1001)
+    monkeypatch.setattr(amq.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(amq.pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=1001))
+    monkeypatch.setattr(amq, "paths_for", lambda name: selected.append(name) or paths)
+    monkeypatch.setattr(amq, "approval_status", lambda value, paths: "queued")
+    for authority in ("queue_change", "approve_queue", "publish_diary_unattended"):
+        monkeypatch.setattr(
+            amq, authority, lambda *args, **kwargs: pytest.fail("status invoked a write operation")
+        )
+
+    assert amq.queue_main(["status", "--repo", repo, "--peer-fd", "0", oid]) == 0
+    assert capsys.readouterr().out == "STATUS queued\n"
+    assert selected == [repo]
+
+
+def test_status_service_rejects_unauthorized_peer_before_any_repository_access(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    monkeypatch.setattr(amq, "peer_uid", lambda fd: 1002)
+    monkeypatch.setattr(amq.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(amq.pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=1001))
+    monkeypatch.setattr(amq, "paths_for", lambda repo: pytest.fail("unauthorized peer read a path"))
+    monkeypatch.setattr(
+        amq, "approval_status", lambda *args: pytest.fail("unauthorized peer read queue state")
+    )
+
+    assert amq.queue_main(["status", "--repo", "scripts", "--peer-fd", "0", "a" * 40]) == 1
+    assert "owner or agent" in capsys.readouterr().err
+
+
+def test_status_service_rejects_malformed_oid_without_reading_repository(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    monkeypatch.setattr(amq, "peer_uid", lambda fd: 1000)
+    monkeypatch.setattr(amq.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(amq, "paths_for", lambda repo: pytest.fail("malformed OID read a path"))
+
+    assert amq.queue_main(["status", "--repo", "diary", "--peer-fd", "0", "short"]) == 2
+    assert "full queue commit OID" in capsys.readouterr().err
+
+
+def test_wait_returns_success_only_for_exact_approved_response(monkeypatch: pytest.MonkeyPatch):
+    oid = "b" * 40
+    replies = iter(["STATUS queued\nRESULT ok 0\n", "STATUS approved\nRESULT ok 0\n"])
+    seen: list[str] = []
+    monkeypatch.setattr(
+        amq, "request", lambda payload, timeout: seen.append(payload) or next(replies)
+    )
+    monkeypatch.setattr(amq.time, "sleep", lambda seconds: None)
+
+    assert amq.wait_main(["scripts", oid, "--timeout", "5"]) == 0
+    assert seen == [f"status scripts {oid}", f"status scripts {oid}"]
+
+
+def test_wait_absent_is_denial_without_replay(monkeypatch: pytest.MonkeyPatch):
+    oid = "c" * 40
+    seen: list[str] = []
+    monkeypatch.setattr(
+        amq,
+        "request",
+        lambda payload, timeout: seen.append(payload) or "STATUS absent\nRESULT ok 0\n",
+    )
+
+    assert amq.wait_main(["diary", oid, "--timeout", "5"]) == 10
+    assert seen == [f"status diary {oid}"]
+
+
+def test_wait_polling_has_a_bounded_timeout(monkeypatch: pytest.MonkeyPatch):
+    now = [0.0]
+    calls: list[float] = []
+    monkeypatch.setattr(amq.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(amq.time, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
+    monkeypatch.setattr(amq, "WAIT_POLL_INTERVAL", 0.01)
+    monkeypatch.setattr(
+        amq,
+        "request",
+        lambda payload, timeout: calls.append(timeout) or "STATUS queued\nRESULT ok 0\n",
+    )
+
+    assert amq.wait_for_approval("scripts", "d" * 40, 0.025) == 124
+    assert len(calls) == 3
+    assert all(0 < timeout <= 0.025 for timeout in calls)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["other", "a" * 40],
+        ["scripts", "short"],
+        ["scripts", "a" * 40, "--timeout", "-1"],
+        ["scripts", "a" * 40, "--timeout", "nan"],
+        ["scripts", "a" * 40, "--timeout", "inf"],
+        ["scripts", "a" * 40, "--timeout", "not-a-number"],
+    ],
+)
+def test_wait_rejects_bad_input_without_socket_access(
+    argv: list[str], monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(amq, "request", lambda *args, **kwargs: pytest.fail("bad input used socket"))
+    with pytest.raises(SystemExit) as error:
+        amq.wait_main(argv)
+    assert error.value.code == 2
+
+
+def test_wait_uses_twenty_minute_default(monkeypatch: pytest.MonkeyPatch):
+    seen: list[float] = []
+    monkeypatch.setattr(
+        amq, "wait_for_approval", lambda repo, oid, timeout: seen.append(timeout) or 0
+    )
+    assert amq.wait_main(["scripts", "a" * 40]) == 0
+    assert seen == [20 * 60.0]
+
+
+def test_wait_rejects_invalid_or_failed_service_response(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(amq, "request", lambda payload, timeout: "STATUS approved\nRESULT fail 1\n")
+    assert amq.wait_for_approval("scripts", "a" * 40, 5) == 2
+
+
+@pytest.mark.parametrize("repo", ["diary", "scripts"])
+def test_request_wait_prints_resulting_queue_oid_and_waits(
+    paths: amq.QueuePaths,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    repo: str,
+):
+    source = source_branch(paths)
+    expected = run("git", "rev-parse", "HEAD", cwd=source)
+    queued_oid = "e" * 40
+    assert queued_oid != expected
+    monkeypatch.setattr(amq, "AGENT_WORKTREE_ROOT", paths.worktrees)
+    monkeypatch.setattr(amq, "AGENT_SOURCES", {"scripts": source_repo(paths), "diary": source_repo(paths)})
+    monkeypatch.setattr(amq.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_name="agent"))
+    seen: list[str] = []
+
+    def deliver(payload: str, timeout: float = 300) -> str:
+        seen.append(payload)
+        if payload.startswith("status "):
+            return "STATUS approved\nRESULT ok 0\n"
+        return f"approve: agent-merge-approve {repo} {queued_oid}\nRESULT ok 0\n"
+
+    monkeypatch.setattr(amq, "request", deliver)
+    assert amq.agent_request(repo, "dev/change", wait=True, timeout=5) == 0
+
+    assert seen == [f"{repo} dev/change {expected}", f"status {repo} {queued_oid}"]
+    assert capsys.readouterr().out.endswith(f"{queued_oid}\napproved\n")
+    assert not source.exists()
+
+
+def test_request_wait_stops_after_absent_without_requeue(
+    paths: amq.QueuePaths, monkeypatch: pytest.MonkeyPatch
+):
+    source_branch(paths)
+    monkeypatch.setattr(amq, "AGENT_WORKTREE_ROOT", paths.worktrees)
+    monkeypatch.setattr(amq, "AGENT_SOURCES", {"scripts": source_repo(paths), "diary": source_repo(paths)})
+    monkeypatch.setattr(amq.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_name="agent"))
+    seen: list[str] = []
+
+    def deliver(payload: str, timeout: float = 300) -> str:
+        seen.append(payload)
+        if payload.startswith("status "):
+            return "STATUS absent\nRESULT ok 0\n"
+        return f"approve: agent-merge-approve scripts {'f' * 40}\nRESULT ok 0\n"
+
+    monkeypatch.setattr(amq, "request", deliver)
+    assert amq.agent_request("scripts", "dev/change", wait=True, timeout=5) == 10
+    assert len(seen) == 2
+    assert seen[1] == f"status scripts {'f' * 40}"
+
+
+def test_request_wait_options_are_forwarded(monkeypatch: pytest.MonkeyPatch):
+    seen: list[tuple[str, str, bool, float]] = []
+    monkeypatch.setattr(
+        amq,
+        "agent_request",
+        lambda repo, branch, *, wait, timeout: seen.append((repo, branch, wait, timeout)) or 0,
+    )
+    assert amq.queue_main(["request", "diary", "dev/change", "--wait", "--timeout", "12"]) == 0
+    assert seen == [("diary", "dev/change", True, 12.0)]
+    with pytest.raises(SystemExit) as error:
+        amq.queue_main(["request", "diary", "dev/change", "--timeout", "12"])
+    assert error.value.code == 2
+
+
+def socket_thread(path: Path, handler) -> threading.Thread:
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(path))
+    server.listen(1)
+
+    def serve() -> None:
+        try:
+            conn, _ = server.accept()
+            with conn:
+                conn.settimeout(2)
+                data = b""
+                while not data.endswith(b"\n"):
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        return
+                    data += chunk
+                handler(conn)
+        finally:
+            server.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    return thread
+
+
+def test_trickling_response_cannot_exceed_absolute_socket_deadline(tmp_path: Path):
+    path = tmp_path / "trickle.sock"
+
+    def trickle(conn: socket.socket) -> None:
+        for _ in range(20):
+            try:
+                conn.sendall(b"x")
+            except BrokenPipeError:
+                return
+            time.sleep(0.02)
+
+    thread = socket_thread(path, trickle)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        amq.request("status scripts " + "a" * 40, socket_path=path, timeout=0.12)
+    elapsed = time.monotonic() - started
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert elapsed < 0.35, f"per-operation timeouts let the exchange run for {elapsed:.3f}s"
+
+
+def test_socket_response_size_is_bounded(tmp_path: Path):
+    path = tmp_path / "oversize.sock"
+
+    def oversize(conn: socket.socket) -> None:
+        conn.sendall(b"x" * (amq.MAX_RESPONSE_BYTES + 1))
+
+    thread = socket_thread(path, oversize)
+    with pytest.raises(OSError, match="size limit"):
+        amq.request("status scripts " + "a" * 40, socket_path=path, timeout=2)
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+
+
+def test_annotated_tag_and_other_non_commit_oids_are_not_approved(paths: amq.QueuePaths):
+    amq.ensure_queue(paths)
+    commit_oid = run("git", "rev-parse", "master", cwd=paths.approved)
+    run("git", "tag", "-a", "-m", "annotated tag", "reviewed-tag", commit_oid, cwd=paths.approved)
+    tag_oid = run("git", "rev-parse", "reviewed-tag", cwd=paths.approved)
+    assert run("git", "cat-file", "-t", tag_oid, cwd=paths.approved) == "tag"
+    (paths.approved / "blob.txt").write_text("not a commit\n")
+    blob_oid = run("git", "hash-object", "-w", "blob.txt", cwd=paths.approved)
+    tree_oid = run("git", "rev-parse", "master^{tree}", cwd=paths.approved)
+
+    assert amq.approval_status(commit_oid, paths) == "approved"
+    for oid, kind in ((tag_oid, "tag"), (blob_oid, "blob"), (tree_oid, "tree")):
+        with pytest.raises(amq.BadRequest, match=kind):
+            amq.approval_status(oid, paths)
+
+
+def test_non_commit_oid_has_bad_request_service_and_client_semantics(
+    paths: amq.QueuePaths, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    amq.ensure_queue(paths)
+    commit_oid = run("git", "rev-parse", "master", cwd=paths.approved)
+    run("git", "tag", "-a", "-m", "annotated tag", "reviewed-tag", commit_oid, cwd=paths.approved)
+    tag_oid = run("git", "rev-parse", "reviewed-tag", cwd=paths.approved)
+    monkeypatch.setattr(amq, "peer_uid", lambda fd: 1000)
+    monkeypatch.setattr(amq.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(amq, "paths_for", lambda repo: paths)
+
+    assert amq.queue_main(["status", "--repo", "scripts", "--peer-fd", "0", tag_oid]) == 2
+    captured = capsys.readouterr()
+    assert "STATUS" not in captured.out
+    assert "not tag" in captured.err
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        amq,
+        "request",
+        lambda payload, timeout: calls.append(payload) or "agent-merge: not tag\nRESULT fail 2\n",
+    )
+    monkeypatch.setattr(amq.time, "sleep", lambda seconds: pytest.fail("bad request was retried"))
+    assert amq.wait_for_approval("scripts", tag_oid, 30) == 2
+    assert calls == [f"status scripts {tag_oid}"]
+
+
+def test_git_operational_failure_is_not_missing_object_or_denial(
+    paths: amq.QueuePaths, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    amq.ensure_queue(paths)
+    original_git = amq.git
+
+    def failing_git(
+        repo: Path,
+        *args: str,
+        safe: bool = False,
+        check: bool = True,
+        input_text: str | None = None,
+    ):
+        if repo == paths.approved and args[:2] == ("cat-file", "--batch-check=%(objectname) %(objecttype)"):
+            return subprocess.CompletedProcess(
+                ["git", "cat-file"], 128, "", "fatal: object store is unreadable"
+            )
+        return original_git(repo, *args, safe=safe, check=check, input_text=input_text)
+
+    monkeypatch.setattr(amq, "git", failing_git)
+    with pytest.raises(amq.QueueError, match="could not inspect requested object"):
+        amq.approval_status("0" * 40, paths)
+
+    monkeypatch.setattr(amq, "peer_uid", lambda fd: 1000)
+    monkeypatch.setattr(amq.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(amq, "paths_for", lambda repo: paths)
+    assert amq.queue_main(["status", "--repo", "scripts", "--peer-fd", "0", "0" * 40]) == 1
+    assert "unreadable" in capsys.readouterr().err
+
+
+def test_wait_operational_failure_returns_two_without_polling(monkeypatch: pytest.MonkeyPatch):
+    calls: list[str] = []
+    monkeypatch.setattr(
+        amq,
+        "request",
+        lambda payload, timeout: calls.append(payload)
+        or "agent-merge: object store is unreadable\nRESULT fail 1\n",
+    )
+    monkeypatch.setattr(amq.time, "sleep", lambda seconds: pytest.fail("operational error was retried"))
+
+    assert amq.wait_for_approval("diary", "0" * 40, 30) == 2
+    assert calls == ["status diary " + "0" * 40]

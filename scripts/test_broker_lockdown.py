@@ -129,6 +129,7 @@ def test_audit_only_never_queries_controller(monkeypatch: pytest.MonkeyPatch) ->
         ("diary-sync", "start", 1001, False, "service_start"),
         ("agent-merge", "diary", 1001, False, "publication_request"),
         ("agent-merge", "scripts", 1001, False, "publication_request"),
+        ("agent-merge", "status", 1001, True, "read_only"),
         ("agent-merge", "approve", 1000, True, "owner_approval"),
         ("agent-merge", "approve", 1001, False, "owner_required"),
         ("sudo-broker", "execute", 1001, False, "privileged_execute"),

@@ -26,6 +26,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -60,6 +61,10 @@ BRANCH_RE = re.compile(r"^(dev|mem)/[a-z0-9][a-z0-9-]*$")
 OID_RE = re.compile(r"^[0-9a-f]{40}$")
 LOCK_PATH = Path("/var/lib/agent-merge/queue.lock")
 SOCKET_PATH = Path("/run/agent-merge/socket")
+DEFAULT_WAIT_TIMEOUT = 20 * 60.0
+WAIT_POLL_INTERVAL = 2.0
+STATUS_SOCKET_TIMEOUT = 10.0
+MAX_RESPONSE_BYTES = 1024 * 1024
 AGENT_WORKTREE_ROOT = Path("/home/kek/diary-worktrees")
 AGENT_SOURCES = {
     "diary": AGENT_WORKTREE_ROOT / "_sources" / "diary",
@@ -81,6 +86,10 @@ DIARY_UNATTENDED_TOPICS = frozenset({
 
 class QueueError(RuntimeError):
     """A request cannot be completed without weakening the boundary."""
+
+
+class BadRequest(QueueError):
+    """A request names an object that cannot be a reviewed commit."""
 
 
 class ReviewRequired(QueueError):
@@ -159,7 +168,13 @@ def queue_lock(paths: QueuePaths) -> Generator[None]:
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-def git(repo: Path, *args: str, safe: bool = False, check: bool = True) -> subprocess.CompletedProcess[str]:
+def git(
+    repo: Path,
+    *args: str,
+    safe: bool = False,
+    check: bool = True,
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     cmd = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
     if safe:
         cmd += ["-c", f"safe.directory={repo}"]
@@ -179,7 +194,7 @@ def git(repo: Path, *args: str, safe: bool = False, check: bool = True) -> subpr
     for index, (key, value) in enumerate(protected):
         env[f"GIT_CONFIG_KEY_{index}"] = key
         env[f"GIT_CONFIG_VALUE_{index}"] = value
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False, env=env, input=input_text)
     if check and proc.returncode:
         detail = (proc.stderr or proc.stdout).strip()
         raise QueueError(f"git {' '.join(args)} failed: {detail}")
@@ -361,6 +376,52 @@ def ensure_queue(paths: QueuePaths) -> None:
         raise QueueError(f"queue checkout has uncommitted changes: {paths.queue}")
 
 
+def approved_contains(paths: QueuePaths, reviewed: str) -> bool:
+    proc = git(
+        paths.approved,
+        "cat-file",
+        "--batch-check=%(objectname) %(objecttype)",
+        input_text=reviewed + "\n",
+        check=False,
+    )
+    if proc.returncode:
+        detail = (proc.stderr or proc.stdout).strip()
+        raise QueueError(f"could not inspect requested object: {detail}")
+    fields = proc.stdout.strip().split()
+    if fields == [reviewed, "missing"]:
+        return False
+    if len(fields) != 2 or fields[0] != reviewed:
+        raise QueueError("could not parse Git object-type response")
+    if fields[1] != "commit":
+        raise BadRequest(f"status OID must name a commit, not {fields[1]}")
+    proc = git(
+        paths.approved, "merge-base", "--is-ancestor", reviewed, "refs/heads/master",
+        check=False,
+    )
+    if proc.returncode == 0:
+        return True
+    if proc.returncode == 1:
+        return False
+    detail = (proc.stderr or proc.stdout).strip()
+    raise QueueError(f"could not inspect approved master: {detail}")
+
+
+def approval_status(reviewed: str, paths: QueuePaths) -> str:
+    """Observe one exact queue OID without locking or changing either checkout."""
+    if not OID_RE.fullmatch(reviewed):
+        raise QueueError("status requires the full reviewed queue commit OID")
+    for label, repo in (("approved", paths.approved), ("queue", paths.queue)):
+        if not (repo / ".git").is_dir():
+            raise QueueError(f"{label} checkout must have private, standalone Git metadata")
+    actual = git(paths.queue, "symbolic-ref", "HEAD").stdout.strip()
+    if actual != QUEUE_REF:
+        raise QueueError(f"queue HEAD is {actual}, expected {QUEUE_REF}")
+    queued = git(paths.queue, "rev-parse", "HEAD").stdout.strip() == reviewed
+    if approved_contains(paths, reviewed):
+        return "approved"
+    return "queued" if queued else "absent"
+
+
 def bundle_path(worktrees: Path, repo: str, branch: str, expected: str) -> Path:
     if repo not in AGENT_SOURCES:
         raise QueueError(f"unknown repository {repo}")
@@ -480,10 +541,11 @@ def queue_change(branch: str, expected: str, paths: QueuePaths, *, repo: str = "
         if repo == "scripts":
             enforce_scripts_pii(paths, fetched)
         if git(paths.queue, "merge-base", "--is-ancestor", fetched, QUEUE_BRANCH, check=False).returncode == 0:
+            current = git(paths.queue, "rev-parse", "HEAD").stdout.strip()
             if repo == "scripts":
-                current = git(paths.queue, "rev-parse", "HEAD").stdout.strip()
                 request_advisory_review(paths, current)
             print(f"agent-merge: {branch} is already queued")
+            print(f"approve: agent-merge-approve {repo} {current}")
             return False
 
         base = git(paths.queue, "rev-parse", "--short", "HEAD").stdout.strip()
@@ -734,21 +796,114 @@ def publish_diary_unattended(
 
 
 def request(payload: str, socket_path: Path = SOCKET_PATH, timeout: float = 300.0) -> str:
+    deadline = time.monotonic() + timeout
+
+    def remaining() -> float:
+        seconds = deadline - time.monotonic()
+        if seconds <= 0:
+            raise TimeoutError("merge socket request exceeded its deadline")
+        return seconds
+
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        sock.settimeout(timeout)
+        sock.settimeout(remaining())
         sock.connect(str(socket_path))
+        sock.settimeout(remaining())
         sock.sendall(payload.encode() + b"\n")
         sock.shutdown(socket.SHUT_WR)
         chunks: list[bytes] = []
-        while chunk := sock.recv(65536):
+        size = 0
+        while True:
+            sock.settimeout(remaining())
+            chunk = sock.recv(min(65536, MAX_RESPONSE_BYTES + 1 - size))
+            if not chunk:
+                break
             chunks.append(chunk)
+            size += len(chunk)
+            if size > MAX_RESPONSE_BYTES:
+                raise OSError("merge socket response exceeds the size limit")
     finally:
         sock.close()
     return b"".join(chunks).decode(errors="replace")
 
 
-def agent_request(repo: str, branch: str) -> int:
+def status_from_response(output: str) -> str:
+    lines = output.splitlines()
+    statuses = [line.removeprefix("STATUS ") for line in lines if line.startswith("STATUS ")]
+    results = [line for line in lines if line.startswith("RESULT ")]
+    if (
+        len(statuses) != 1
+        or statuses[0] not in {"queued", "absent", "approved"}
+        or not results
+        or results[-1] != "RESULT ok 0"
+    ):
+        raise QueueError("merge socket returned an invalid status response")
+    return statuses[0]
+
+
+def wait_for_approval(repo: str, reviewed: str, timeout: float) -> int:
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return 124
+        try:
+            output = request(
+                f"status {repo} {reviewed}",
+                timeout=min(STATUS_SOCKET_TIMEOUT, remaining),
+            )
+            state = status_from_response(output)
+        except (OSError, QueueError) as exc:
+            print(f"agent-merge-wait: {exc}", file=sys.stderr)
+            return 2
+        if state == "approved":
+            return 0
+        if state == "absent":
+            return 10
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return 124
+        time.sleep(min(WAIT_POLL_INTERVAL, remaining))
+
+
+def timeout_seconds(value: str) -> float:
+    try:
+        seconds = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("timeout must be a number of seconds") from exc
+    if not 0 <= seconds < float("inf"):
+        raise argparse.ArgumentTypeError("timeout must be a finite, non-negative number")
+    return seconds
+
+
+def wait_main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="agent-merge-wait",
+        description="Wait for one exact reviewed queue OID without granting approval authority.",
+    )
+    parser.add_argument("repo", choices=("diary", "scripts"))
+    parser.add_argument("reviewed", metavar="OID", help="full reviewed queue commit OID")
+    parser.add_argument("--timeout", type=timeout_seconds, default=DEFAULT_WAIT_TIMEOUT)
+    args = parser.parse_args(argv)
+    if not OID_RE.fullmatch(args.reviewed):
+        parser.error("OID must be the full 40-character commit OID")
+    result = wait_for_approval(args.repo, args.reviewed, args.timeout)
+    print({0: "approved", 10: "absent", 124: "timeout"}.get(result, "bad-request"))
+    return result
+
+
+def response_queue_oid(output: str, repo: str, fallback: str) -> str:
+    matches = re.findall(
+        rf"^approve: agent-merge-approve {re.escape(repo)} ([0-9a-f]{{40}})$",
+        output,
+        flags=re.MULTILINE,
+    )
+    return matches[-1] if matches else fallback
+
+
+def agent_request(
+    repo: str, branch: str, *, wait: bool = False, timeout: float = DEFAULT_WAIT_TIMEOUT
+) -> int:
     try:
         is_agent = pwd.getpwuid(os.geteuid()).pw_name == "agent"
     except KeyError:
@@ -760,6 +915,7 @@ def agent_request(repo: str, branch: str) -> int:
     source: Path | None = None
     bundle: Path | None = None
     result = 1
+    reviewed: str | None = None
     try:
         source_repo = AGENT_SOURCES[repo]
         source, expected, bundle = create_agent_bundle(
@@ -770,6 +926,7 @@ def agent_request(repo: str, branch: str) -> int:
         results = [line for line in output.splitlines() if line.startswith("RESULT ")]
         if results and results[-1].startswith("RESULT ok"):
             cleanup_agent_source(source_repo, branch, source)
+            reviewed = response_queue_oid(output, repo, expected)
             result = 0
     except KeyError:
         print(f"agent-merge-request: unknown repository {repo}", file=sys.stderr)
@@ -781,6 +938,9 @@ def agent_request(repo: str, branch: str) -> int:
         except OSError as exc:
             print(f"agent-merge-request: could not remove bundle {bundle}: {exc}", file=sys.stderr)
             result = 1
+    if result == 0 and wait and reviewed is not None:
+        print(reviewed, flush=True)
+        return wait_main([repo, reviewed, "--timeout", str(timeout)])
     return result
 
 
@@ -816,6 +976,18 @@ def peer_uid(fd: int) -> int:
         sock.close()
 
 
+def require_status_peer(fd: int) -> None:
+    caller = peer_uid(fd)
+    if caller == os.geteuid():
+        return
+    try:
+        agent_uid = pwd.getpwnam("agent").pw_uid
+    except KeyError:
+        agent_uid = None
+    if caller != agent_uid:
+        raise QueueError("status requires the account owner or agent UID")
+
+
 def queue_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Operate the reviewed publication queues.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -827,6 +999,10 @@ def queue_main(argv: list[str] | None = None) -> int:
     approved.add_argument("--repo", choices=("scripts", "diary"), default="scripts")
     approved.add_argument("reviewed")
     approved.add_argument("--peer-fd", type=int, required=True)
+    status = sub.add_parser("status", help="observe one exact queue OID for an authorized peer")
+    status.add_argument("--repo", choices=("scripts", "diary"), required=True)
+    status.add_argument("reviewed")
+    status.add_argument("--peer-fd", type=int, required=True)
     unattended = sub.add_parser(
         "publish-diary", help="publish only regular-file memory and data-topic changes"
     )
@@ -838,6 +1014,12 @@ def queue_main(argv: list[str] | None = None) -> int:
     agent = sub.add_parser("request", help="bundle and request one source branch as the agent")
     agent.add_argument("repo", choices=("scripts", "diary"))
     agent.add_argument("branch")
+    agent.add_argument("--wait", action="store_true", help="wait for the exact resulting queue OID")
+    agent.add_argument("--timeout", type=timeout_seconds, default=None)
+    waiting = sub.add_parser("wait", help="wait for an exact queue OID over the merge socket")
+    waiting.add_argument("repo", choices=("diary", "scripts"))
+    waiting.add_argument("reviewed", metavar="OID")
+    waiting.add_argument("--timeout", type=timeout_seconds, default=DEFAULT_WAIT_TIMEOUT)
     doctor = sub.add_parser(
         "doctor", help="compare the installed approval client with the approved source",
     )
@@ -847,7 +1029,16 @@ def queue_main(argv: list[str] | None = None) -> int:
     if args.command == "client":
         return approve_main(["--repo", args.repo, args.reviewed])
     if args.command == "request":
-        return agent_request(args.repo, args.branch)
+        if args.timeout is not None and not args.wait:
+            parser.error("request --timeout requires --wait")
+        return agent_request(
+            args.repo,
+            args.branch,
+            wait=args.wait,
+            timeout=DEFAULT_WAIT_TIMEOUT if args.timeout is None else args.timeout,
+        )
+    if args.command == "wait":
+        return wait_main([args.repo, args.reviewed, "--timeout", str(args.timeout)])
     if args.command == "doctor":
         if not args.approved:
             # Do not fall back to default_paths() here: the installed client run
@@ -864,6 +1055,12 @@ def queue_main(argv: list[str] | None = None) -> int:
             queue_change(args.branch, args.expected, paths_for(args.repo), repo=args.repo)
         elif args.command == "publish-diary":
             publish_diary_unattended(args.branch, args.expected, diary_paths())
+        elif args.command == "status":
+            require_status_peer(args.peer_fd)
+            if not OID_RE.fullmatch(args.reviewed):
+                print("agent-merge: status requires a full queue commit OID", file=sys.stderr)
+                return 2
+            print(f"STATUS {approval_status(args.reviewed, paths_for(args.repo))}")
         else:
             if peer_uid(args.peer_fd) != os.geteuid():
                 raise QueueError("approval requires the account owner's UID")
@@ -872,6 +1069,9 @@ def queue_main(argv: list[str] | None = None) -> int:
                 paths_for(args.repo),
                 sync_environment=args.repo == "scripts",
             )
+    except BadRequest as exc:
+        print(f"agent-merge: {exc}", file=sys.stderr)
+        return 2
     except ReviewRequired as exc:
         print(f"agent-merge: {exc}", file=sys.stderr)
         return 3

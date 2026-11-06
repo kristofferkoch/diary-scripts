@@ -18,7 +18,7 @@ Entry-point names: `mailshow`, `search-mail`, `embed-mail`, `embed-messages`,
 `dsh-web-notify`, `vigilo-api`, `vigilo-login`, `vigilo-sync`, `vigiloshown`,
 `skolemelding-api`, `skolemelding-login`, `skolemelding-sync`,
 `skolemeldingshow`, `diary-sync`, `diary-sync-broker`, `diary-pipeline-triage`,
-`agent-merge-review`, `diary-audit`, `diary-auditd`, `diary-production-baseline`, `diary-lock`, `diary-lockd`, `diary-network-auditd`, `diary-dns-auditd`, `diary-network-policy`, `diary-dns-policy`, `diary-dns-policyd`, `diary-fresh-unlock`, `diary-lock-dashboard`, `diary-lock-ui`, `diary-lockdown-acceptance`, `diary-mac-link`. Server modules are invoked as `uv run python -m mail_reader.server` and
+`agent-merge-wait`, `agent-merge-review`, `diary-audit`, `diary-auditd`, `diary-production-baseline`, `diary-lock`, `diary-lockd`, `diary-network-auditd`, `diary-dns-auditd`, `diary-network-policy`, `diary-dns-policy`, `diary-dns-policyd`, `diary-fresh-unlock`, `diary-lock-dashboard`, `diary-lock-ui`, `diary-lockdown-acceptance`, `diary-mac-link`. Server modules are invoked as `uv run python -m mail_reader.server` and
 `uv run python -m scripts.kindle_dashboard.serve`.
 
 `uv run` creates/syncs `.venv/` on demand; you never need to activate
@@ -72,7 +72,7 @@ Per-tool detail and the triage SOPs live in `docs/`. This file is the index.
 | [`docs/pipeline-triage.md`](docs/pipeline-triage.md) | PIPE-03 fixed-local-model triage, strict result validation, local review, and restart-safe state |
 | [`docs/pipeline-notifications.md`](docs/pipeline-notifications.md) | fixed-template safe rendering, local review/digests, durable per-event and aggregate rate limits |
 | [`docs/legacy-state.md`](docs/legacy-state.md) | manual collector runtime state and safe migration out of tracked `memory/` |
-| [`docs/agent-merge.md`](docs/agent-merge.md) | `agent-merge-queue` / `agent-merge-approve`: separate automatic and approved trees, exact-OID owner publication |
+| [`docs/agent-merge.md`](docs/agent-merge.md) | `agent-merge-queue` / `agent-merge-approve` / `agent-merge-wait`: separate automatic and approved trees, exact-OID owner publication and bounded read-only waiting |
 | [`docs/agent-merge-review.md`](docs/agent-merge-review.md) | advisory local-model scripts-queue review, pre-queue allowlist rejection, owner-readable reports |
 | [`docs/agent-merge-console.md`](docs/agent-merge-console.md) | prepared LATER-01 owner Merge/Deny UI extension, exact-OID decisions, audit, and CTL-07/09 integration gates |
 | [`docs/e2e-harness.md`](docs/e2e-harness.md) | unprivileged, scratch-state end-to-end harness for the merge console: protocol stack, audit journal mapping, publication, and what layer 2 must add |

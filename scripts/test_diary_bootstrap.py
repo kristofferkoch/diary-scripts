@@ -115,3 +115,18 @@ def test_clean_host_bootstrap_installs_both_sync_units_before_try_restart():
         reload,
     )
     assert runtime_install < broker_install < reload < restart
+
+
+def test_bootstrap_installs_bounded_wait_client():
+    source = os.environ.get("DIARY_BOOTSTRAP_INSTALLER")
+    if source is None:
+        pytest.skip("set DIARY_BOOTSTRAP_INSTALLER to test the diary installer")
+    installer = Path(source).read_text()
+
+    queue_install = installer.index('"$APPROVED/scripts/agent_merge_queue.py"')
+    wait_install = installer.index(
+        'install -o root -g root -m 0755 "$TRUSTED/dsh/agent-uid/agent-merge-wait"'
+    )
+    socket_install = installer.index('/usr/local/bin/agent-merge-wait', wait_install)
+    reload = installer.index("systemctl daemon-reload", socket_install)
+    assert queue_install < wait_install < socket_install < reload

@@ -25,6 +25,7 @@ CALLER = {"pid": 123, "uid": 1001, "gid": 1001}
         ("diary-sync", "sync", "would_deny", "external_sync"),
         ("agent-merge", "diary", "would_deny", "publication_request"),
         ("agent-merge", "scripts", "would_deny", "publication_request"),
+        ("agent-merge", "status", "allow", "read_only"),
         ("sudo-broker", "execute", "would_deny", "privileged_execute"),
     ],
 )

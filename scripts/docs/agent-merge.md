@@ -89,6 +89,42 @@ cleaning source. No routine owner-side Git cleanup or sudo is needed. Review and
 approval remain separate operations. A diary request that needs review prints the
 affected paths and the exact approval command.
 
+### Wait for the exact decision
+
+Add `--wait` to a request to print the resulting queue OID on its own line and
+wait in the same turn. An unattended diary publication prints its exact source
+OID instead and completes immediately. The timeout applies only to waiting:
+
+```bash
+agent-merge-request scripts dev/<slug> --wait --timeout 600
+agent-merge-wait scripts <full-queue-OID> --timeout 600
+```
+
+The default timeout is 20 minutes. The client polls every two seconds and starts
+no daemon or replacement publication request. Each socket exchange has one
+absolute deadline covering connect, send, and every receive, recalculated before
+each blocking operation; responses are capped at 1 MiB. Its exit statuses are:
+
+- `0`: the exact requested OID has type `commit` and is an ancestor of that
+  repository's approved `master` (including when approval created a later merge
+  commit);
+- `10`: `absent`, meaning the current queue head is not that OID and approved
+  `master` does not contain it — denied, superseded, rewritten, or rebased away;
+- `124`: the bounded wait expired while the exact OID remained queued;
+- `2`: malformed or non-commit input, a socket error, an invalid/failed service
+  response, or a Git operational failure.
+
+Waiting uses the existing peer-credential-checked socket's read-only `status`
+verb. The service returns only `queued`, `absent`, or `approved` for one repo and
+full exact commit OID. Annotated tags and other non-commit objects are rejected,
+never peeled to commits. A genuinely missing object is absent; an unreadable,
+corrupt, or otherwise failing repository fails the exchange rather than becoming
+`absent` or remaining queued until timeout. Only the owner or designated agent
+UID may observe status; approval still requires the owner UID. Status takes no
+queue lock, creates no queue or state file, exposes no diff or branch, and cannot
+approve, merge, push, or replay a denied request. It remains available in locked
+mode as a read-only operation.
+
 ## Human review and approval
 
 The queue checkouts are `diary-automatic` and `diary-scripts-automatic`, beside
@@ -153,9 +189,10 @@ are in [`agent-merge-console.md`](agent-merge-console.md).
 The human supplies the reviewed OID explicitly; the client never substitutes a
 newer queue HEAD. `agent-merge-approve` sends that OID with the request, so a
 branch queued after review cannot slip into approval. The socket service uses
-`SO_PEERCRED` to require a caller with the account owner's UID; there is no token
-or Signal prompt. Queue and approval operations are serialized with an exclusive
-lock. The console additionally supplies `expected_base` with the reviewed
+`SO_PEERCRED` to require a caller with the account owner's UID for approval;
+status separately admits only that owner or the designated agent UID. There is
+no token or Signal prompt. Queue and approval operations are serialized with an
+exclusive lock; read-only status deliberately does not take that lock. The console additionally supplies `expected_base` with the reviewed
 approved-master OID. `approve_queue()` checks it before fetching and rechecks it
 under the same lock immediately before merge, preventing base-only drift from
 creating an unreviewed merge. The argument is optional, so existing local CLI
@@ -164,13 +201,14 @@ and unattended publication behavior is unchanged.
 The socket front-end also emits AUD-04 locked-mode decisions with kernel peer
 identity: diary/scripts requests are `would_deny`; approval is `allow` only when
 the peer UID equals the service owner UID, and non-owner approval is `would_deny`
-with `reason=owner_required`. This observation does not alter queueing or approval
-and does not use the advisory model reviewer as an authority.
+with `reason=owner_required`. Status is `allow` with `reason=read_only`. This
+observation does not alter queueing or approval and does not use the advisory
+model reviewer as an authority.
 
 Setting `DIARY_BROKER_ENFORCE_LOCKDOWN=1` in the root-owned service environment
 opts into CTL-05 enforcement. While `LOCKING`/`LOCKED`, diary/scripts queue and
 publication requests and unknown operations are denied before dispatch; exact-OID
-owner approval remains available. Controller uncertainty or a failed audit write
+owner approval and read-only status remain available. Controller uncertainty or a failed audit write
 also denies. The service has `diary-lock-control` only to confirm controller
 state. The shipped unit leaves the variable unset, preserving audit-only behavior,
 and denied requests are never queued for replay.

@@ -30,6 +30,7 @@ def frontend(tmp_path: Path) -> tuple[Path, Path]:
     queue.write_text(
         "#!/bin/bash\n"
         'printf "%s\\n" "$*" >> "$QUEUE_TEST_LOG"\n'
+        'if [[ ${1:-} == status ]]; then echo "STATUS queued"; fi\n'
     )
     audit_wrapper.chmod(0o755)
     queue.chmod(0o755)
@@ -266,3 +267,47 @@ def test_attended_publication_runs_only_new_request(
     assert queue_log.read_text() == f"queue --repo scripts dev/attended {'f' * 40}\n"
     assert events[0]["event"]["lock_state"] == "attended"
     assert events[0]["event"]["decision"] == "allow"
+
+
+@pytest.mark.parametrize("repo", ["diary", "scripts"])
+def test_status_dispatches_only_exact_oid_observation(
+    frontend: tuple[Path, Path], tmp_path: Path, repo: str,
+) -> None:
+    script, queue_log = frontend
+    oid = "0" * 40
+    result, output, events = invoke(script, f"status {repo} {oid}", tmp_path)
+
+    assert result == 0
+    assert output == b"STATUS queued\nRESULT ok 0\n"
+    assert queue_log.read_text() == f"status --repo {repo} --peer-fd 0 {oid}\n"
+    assert events[0]["event"]["operation"] == "status"
+    assert events[0]["event"]["decision"] == "allow"
+    assert events[0]["event"]["reason"] == "read_only"
+
+
+@pytest.mark.parametrize("request_text", ["status other " + "a" * 40, "status scripts short"])
+def test_status_rejects_bad_request_before_queue_dispatch(
+    frontend: tuple[Path, Path], tmp_path: Path, request_text: str,
+) -> None:
+    script, queue_log = frontend
+    result, output, _ = invoke(script, request_text, tmp_path)
+
+    assert result == 2
+    assert output == b"RESULT fail 2 bad-status\n"
+    assert not queue_log.exists()
+
+
+def test_locked_status_remains_read_only_and_available(
+    frontend: tuple[Path, Path], tmp_path: Path,
+) -> None:
+    script, queue_log = frontend
+    oid = "1" * 40
+    result, output, events = invoke(
+        script, f"status diary {oid}", tmp_path, lock_state="LOCKED",
+    )
+
+    assert result == 0
+    assert output == b"STATUS queued\nRESULT ok 0\n"
+    assert queue_log.read_text() == f"status --repo diary --peer-fd 0 {oid}\n"
+    assert events[0]["event"]["decision"] == "allow"
+    assert events[0]["event"]["reason"] == "read_only"

@@ -33,6 +33,7 @@ POLICY = {
     "agent-merge": {
         "diary": ("would_deny", "publication_request"),
         "scripts": ("would_deny", "publication_request"),
+        "status": ("allow", "read_only"),
     },
     "sudo-broker": {
         "execute": ("would_deny", "privileged_execute"),
