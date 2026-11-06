@@ -72,16 +72,17 @@ SYNC_TARGETS: dict[str, tuple[str, ...]] = {
     )
     for target in ("spond", "vigilo", "skolemelding")
 }
+COLLECT_LOCK_DIR = "/run/user/1000/diary-collect"
 
 
 def sync_argv(target: str) -> tuple[str, ...] | None:
     template = SYNC_TARGETS.get(target)
     if template is None:
         return None
-    runtime = os.environ.get("XDG_RUNTIME_DIR") or os.path.join(os.path.expanduser("~"), ".cache")
-    lock_dir = os.path.join(runtime, "diary-collect")
-    os.makedirs(lock_dir, mode=0o700, exist_ok=True)
-    return ("/usr/bin/flock", os.path.join(lock_dir, f"{target}.lock"), *template)
+    os.makedirs(COLLECT_LOCK_DIR, mode=0o700, exist_ok=True)
+    return (
+        "/usr/bin/flock", os.path.join(COLLECT_LOCK_DIR, f"{target}.lock"), *template,
+    )
 ALLOWED_START_UNITS = ("mail-sync.service",)
 STATUS_UNITS = (
     "mail-sync.timer",

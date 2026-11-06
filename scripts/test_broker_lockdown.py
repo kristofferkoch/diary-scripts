@@ -77,6 +77,7 @@ def isolated_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     runtime = tmp_path / "runtime"
     runtime.mkdir()
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    monkeypatch.setattr(sync, "COLLECT_LOCK_DIR", str(runtime / "diary-collect"))
 
 
 @pytest.fixture

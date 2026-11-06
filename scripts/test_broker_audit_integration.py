@@ -90,6 +90,7 @@ def test_sync_socket_allow_would_deny_unknown_and_no_enforcement(
     runtime = tmp_path / "runtime"
     runtime.mkdir()
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    monkeypatch.setattr(sync, "COLLECT_LOCK_DIR", str(runtime / "diary-collect"))
     path = str(tmp_path / "sync.sock")
     ran = []
 

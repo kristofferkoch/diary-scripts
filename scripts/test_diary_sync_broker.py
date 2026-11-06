@@ -14,6 +14,7 @@ def isolated_runtime(tmp_path, monkeypatch: pytest.MonkeyPatch):
     runtime = tmp_path / "runtime"
     runtime.mkdir()
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    monkeypatch.setattr(broker, "COLLECT_LOCK_DIR", str(runtime / "diary-collect"))
     return runtime
 
 
@@ -123,6 +124,17 @@ def test_fresh_boot_fallback_creates_owner_writable_lock_dir(isolated_runtime):
     assert lock_dir.is_dir()
     assert argv[1] == str(lock_dir / "spond.lock")
     assert lock_dir.stat().st_mode & 0o777 == 0o700
+
+
+def test_user_bus_runtime_cannot_move_the_shared_collector_lock(
+    isolated_runtime, tmp_path, monkeypatch: pytest.MonkeyPatch,
+):
+    user_bus_runtime = tmp_path / "broker-user-bus"
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(user_bus_runtime))
+    argv = broker.sync_argv("vigilo")
+    assert argv is not None
+    assert argv[1] == str(isolated_runtime / "diary-collect" / "vigilo.lock")
+    assert not user_bus_runtime.exists()
 
 
 def test_start_accepts_only_mail_sync():

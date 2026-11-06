@@ -188,8 +188,11 @@ def test_shell_installer_requires_root_config_and_uses_approved_units(
         path.mkdir(parents=True, exist_ok=True)
     collector_units = ("diary-collect@.service",)
     rebind_units = ("diary-sync-rebind.path", "diary-sync-rebind.service")
-    for name in ("diary-sync-broker.service", "diary-sync-runtime.service",
-                 *collector_units, *rebind_units):
+    unit_names = (
+        "diary-sync-broker.service", "diary-sync-runtime.service",
+        *collector_units, *rebind_units,
+    )
+    for name in unit_names:
         (integration / "sync" / name).write_text("unreviewed\n")
         (approved_diary / "sync" / name).write_text("reviewed\n")
     for name in (
@@ -269,6 +272,7 @@ printf '%s\n' "$SYNC_INSTALL_TEST_CONFIG_UID"
             check=False,
             timeout=30,
         )
+    assert log.exists(), proc.stderr
     operations = log.read_text().splitlines()
     if config_uid != 0:
         assert proc.returncode != 0
@@ -283,8 +287,7 @@ printf '%s\n' "$SYNC_INSTALL_TEST_CONFIG_UID"
         f"{approved_diary}/sync/diary-sync-broker.service "
         f"{approved_diary}/sync/diary-collect@.service"
     ) in operations
-    for name in ("diary-sync-runtime.service", "diary-sync-broker.service",
-                 *collector_units, *rebind_units):
+    for name in unit_names:
         assert (
             "install -o root -g root -m 0644 "
             f"{approved_diary}/sync/{name} /etc/systemd/system/{name}"
@@ -323,15 +326,19 @@ def test_pipe01_units_pin_trusted_state_spool_and_shared_lock():
     collector = (root / "sync/diary-collect@.service").read_text()
     runtime = (root / "sync/diary-sync-runtime.service").read_text()
     mail = (root / "systemd/units/diary-mail-event-export.service").read_text()
+    mail_timer = (root / "systemd/units/diary-mail-event-export.timer").read_text()
+    install_user = (root / "systemd/install-user").read_text()
     for unit in (broker, collector):
         assert "SupplementaryGroups=kek" in unit
         assert "BindPaths=/var/lib/diary/events" in unit
         assert "BindPaths=/var/lib/diary/collector-state" in unit
         assert "BindPaths=/var/lib/diary/legacy-state" in unit
         assert "BindPaths=/run/user/1000/diary-collect" in unit
-        assert "Environment=XDG_RUNTIME_DIR=/run/user/1000" in unit
         assert "Environment=DIARY_LEGACY_STATE_DIR=/var/lib/diary/legacy-state" in unit
         assert "/home/kek/diary/memory" not in unit
+    assert "Environment=XDG_RUNTIME_DIR=/run/diary-sync" in broker
+    assert "Environment=XDG_RUNTIME_DIR=/run/user/1000" in collector
+    assert "[Install]" not in collector
     assert "ExecStart=/usr/bin/flock /run/user/1000/diary-collect/%i.lock" in collector
     assert "--event-spool /var/lib/diary/events" in collector
     assert "--state-dir /var/lib/diary/collector-state" in collector
@@ -339,6 +346,15 @@ def test_pipe01_units_pin_trusted_state_spool_and_shared_lock():
     assert "diary-event-export mail --state-dir /var/lib/diary/collector-state" in mail
     assert "--spool /var/lib/diary/events" in mail
     assert "mail-sync.service" not in mail
+    assert "OnCalendar=*:1/2" in mail_timer
+    assert "Persistent=yes" in mail_timer
+    assert "Unit=diary-mail-event-export.service" in mail_timer
+    assert (
+        "systemctl --user enable mail-reader-token.service diary-mail-event-export.timer"
+        in install_user
+    )
+    assert "systemctl --user restart diary-mail-event-export.timer" in install_user
+    assert 'rm -f "$UNIT_DIR/mail-sync.service.d/20-event-spool.conf"' in install_user
     assert not (root / "systemd/units/mail-sync.service.d/20-event-spool.conf").exists()
     for source in ("spond", "vigilo", "skolemelding"):
         assert not (root / f"sync/diary-collect-{source}.timer").exists()

@@ -1,7 +1,8 @@
 # Legacy collector runtime state
 
 Spond, Vigilo, and Skolemelding are **manual/on-demand collectors only**. Their
-old periodic timers are removed and disabled by `sync/install`; manual
+old periodic timers are disabled with `disable --now` by `sync/install`; the
+installed unit files may remain, but stay disabled and inactive. Manual
 `diary-collect@target.service` runs and broker verbs remain available. Mail
 collection and mail event export keep their schedules.
 
