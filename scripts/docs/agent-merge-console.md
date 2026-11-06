@@ -130,6 +130,15 @@ failure, and missing/stale/malformed/failed advisory fallback. Queue tests also
 inject a base advance between the initial locked freshness check and the final
 pre-merge recheck. No test contacts the real queue.
 
+The unprivileged L1–L3 harness adds two-queue acceptance against scratch
+repositories. L1 binds every snapshot, merge, stale-pair refusal, and denial to
+the selected repository and exact queue/base pair, and checks queue, approved,
+integration, and remote OIDs. L2 clicks both queues' rendered Merge and Deny
+forms and refuses grants crossing in either direction. L3 repeats a real
+Chromium merge for each queue through Caddy, Authelia, and a virtual WebAuthn
+authenticator. These checks mark the executor locked but do not replace a real
+general-agent lock window or owner acceptance.
+
 Before marking LATER-01 done, integrate with the completed CTL-07 UI and
 rebased CTL-09 dashboard, then pass controlled owner-approved live tests using
 a scratch queue:

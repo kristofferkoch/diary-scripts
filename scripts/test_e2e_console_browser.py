@@ -120,21 +120,68 @@ def head(paths) -> str:
     return harness.git(paths.approved, "rev-parse", "HEAD")
 
 
-def test_rendered_form_submits_the_button_field(stack: browser.BrowserStack) -> None:
-    """The bug hand-built requests missed: the browser sends name="confirm"."""
-    queued = harness.enqueue_change(stack.harness_stack.scripts)
+@pytest.mark.parametrize("repo", ["scripts", "diary"])
+def test_rendered_form_submits_the_button_field(
+    stack: browser.BrowserStack, repo: str,
+) -> None:
+    """The browser submits the named queue, exact pair, and button field."""
+    paths = stack.harness_stack.paths_by_repo[repo]
+    queued = harness.enqueue_change(paths)
+    base = head(paths)
     session = stack.session()
-    transaction = stack.preauthorize("scripts", "merge", queued, head(stack.harness_stack.scripts))
+    transaction = stack.preauthorize(repo, "merge", queued, base)
 
     result = run_browser(
         stack, session,
-        [{"goto": stack.origin + "/lock/merge/"}, {"click": 'button[value="merge"]'}],
+        [{"goto": stack.origin + "/lock/merge/?repo=" + repo}, {"click": 'button[value="merge"]'}],
         transaction=transaction,
     )
 
     assert "Merged" in result["text"]
-    assert head(stack.harness_stack.scripts) == queued
-    assert wait_reason(stack, "merge_completed")["DIARY_AUDIT_EVENT_ID"] == queued
+    assert head(paths) == queued
+    event = wait_reason(stack, "merge_completed")
+    assert event["DIARY_AUDIT_REPOSITORY"] == repo
+    assert event["DIARY_AUDIT_EVENT_ID"] == queued
+    assert event["DIARY_AUDIT_BASE_OID"] == base
+
+
+@pytest.mark.parametrize("repo", ["scripts", "diary"])
+def test_page_names_the_repository_and_exact_reviewed_pair(
+    stack: browser.BrowserStack, repo: str,
+) -> None:
+    paths = stack.harness_stack.paths_by_repo[repo]
+    queued = harness.enqueue_change(paths)
+    base = head(paths)
+
+    result = run_browser(
+        stack, stack.session(), [{"goto": stack.origin + "/lock/merge/?repo=" + repo}],
+    )
+
+    assert f"Queue: {repo}" in result["text"]
+    assert queued in result["text"]
+    assert base in result["text"]
+
+
+@pytest.mark.parametrize(
+    ("repo", "grant_repo"), [("scripts", "diary"), ("diary", "scripts")],
+)
+def test_cross_queue_grant_is_refused_by_the_browser_path(
+    stack: browser.BrowserStack, repo: str, grant_repo: str,
+) -> None:
+    paths = stack.harness_stack.paths_by_repo[repo]
+    queued = harness.enqueue_change(paths)
+    base = head(paths)
+    transaction = stack.preauthorize(grant_repo, "merge", queued, base)
+
+    result = run_browser(
+        stack, stack.session(),
+        [{"goto": stack.origin + "/lock/merge/?repo=" + repo}, {"click": 'button[value="merge"]'}],
+        transaction=transaction,
+    )
+
+    assert "Fresh authorization required" in result["text"]
+    assert head(paths) == base
+    assert merge_events(stack) == []
 
 
 def test_opaque_origin_is_accepted(stack: browser.BrowserStack) -> None:
@@ -239,23 +286,28 @@ def test_replayed_grant_cannot_publish_twice(stack: browser.BrowserStack) -> Non
     assert harness.git(stack.harness_stack.scripts.queue, "rev-parse", "HEAD") == second
 
 
-def test_deny_publishes_nothing_and_audits(stack: browser.BrowserStack) -> None:
-    queued = harness.enqueue_change(stack.harness_stack.scripts)
-    before = head(stack.harness_stack.scripts)
+@pytest.mark.parametrize("repo", ["scripts", "diary"])
+def test_deny_publishes_nothing_and_audits(stack: browser.BrowserStack, repo: str) -> None:
+    paths = stack.harness_stack.paths_by_repo[repo]
+    queued = harness.enqueue_change(paths)
+    before = head(paths)
     session = stack.session()
-    transaction = stack.preauthorize("scripts", "deny", queued, before)
+    transaction = stack.preauthorize(repo, "deny", queued, before)
 
     result = run_browser(
         stack, session,
-        [{"goto": stack.origin + "/lock/merge/"}, {"click": 'button[value="deny"]'}],
+        [{"goto": stack.origin + "/lock/merge/?repo=" + repo}, {"click": 'button[value="deny"]'}],
         transaction=transaction,
     )
 
     assert "Denied" in result["text"]
-    assert head(stack.harness_stack.scripts) == before
+    assert head(paths) == before
+    assert harness.git(paths.queue, "rev-parse", "HEAD") == queued
+    assert harness.git(paths.integration, "rev-parse", "HEAD") == before
     event = wait_reason(stack, "owner_denied")
-    assert event["DIARY_AUDIT_REPOSITORY"] == "scripts"
+    assert event["DIARY_AUDIT_REPOSITORY"] == repo
     assert event["DIARY_AUDIT_EVENT_ID"] == queued
+    assert event["DIARY_AUDIT_BASE_OID"] == before
 
 
 def test_stale_pair_costs_a_re_review_not_a_new_ceremony(

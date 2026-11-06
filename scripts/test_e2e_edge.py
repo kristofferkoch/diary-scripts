@@ -82,12 +82,26 @@ def test_full_password_and_passkey_reaches_the_console(stack: edge.EdgeStack) ->
 
 
 @pytest.mark.skipif(not _browser_ready(), reason="browser tooling is not provisioned")
-def test_browser_decision_through_the_real_edge_publishes_once(stack: edge.EdgeStack) -> None:
-    """The whole seam: Caddy, Authelia, the console, the grant, and publication."""
-    queued = harness.enqueue_change(stack.harness_stack.scripts)
-    transaction = stack.preauthorize("scripts", "merge", queued, head(stack.harness_stack.scripts))
+@pytest.mark.parametrize("repo", ["scripts", "diary"])
+def test_browser_decision_through_the_real_edge_publishes_once(
+    stack: edge.EdgeStack, repo: str,
+) -> None:
+    """Both queues cross Caddy, Authelia, the console, grant, and publication."""
+    paths = stack.harness_stack.paths_by_repo[repo]
+    queued = harness.enqueue_change(paths)
+    base = head(paths)
+    transaction = stack.preauthorize(repo, "merge", queued, base)
 
-    result = edge.run_driver(stack, transaction=transaction)
+    result = edge.run_driver(stack, transaction=transaction, repo=repo)
 
     decided = [step for step in result["steps"] if step["step"] == "decided"][-1]
     assert "Merged" in decided["text"], result
+    assert head(paths) == queued
+    completed = harness.wait_for(lambda: [
+        event for event in stack.harness_stack.audit.events()
+        if event.get("DIARY_AUDIT_REASON") == "merge_completed"
+    ] or None)
+    assert completed is not None
+    assert completed[-1]["DIARY_AUDIT_REPOSITORY"] == repo
+    assert completed[-1]["DIARY_AUDIT_EVENT_ID"] == queued
+    assert completed[-1]["DIARY_AUDIT_BASE_OID"] == base

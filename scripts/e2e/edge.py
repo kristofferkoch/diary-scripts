@@ -303,7 +303,7 @@ def _certificate(root: Path) -> None:
     )
 
 
-def run_driver(stack: EdgeStack, transaction: str = "") -> dict:
+def run_driver(stack: EdgeStack, transaction: str = "", repo: str = "scripts") -> dict:
     """Drive the real browser through login, the passkey ceremony, and a decision."""
     core = os.environ.get("E2E_PLAYWRIGHT_CORE")
     chrome = os.environ.get("E2E_CHROMIUM")
@@ -322,7 +322,7 @@ def run_driver(stack: EdgeStack, transaction: str = "") -> dict:
         "XDG_DATA_HOME": str(xdg / "data"),
     }
     proc = subprocess.run(
-        ["node", str(driver), stack.origin, HOST, transaction or "-"],
+        ["node", str(driver), stack.origin, HOST, transaction or "-", repo],
         capture_output=True, text=True, check=False, env=env, timeout=180,
     )
     if proc.returncode != 0:

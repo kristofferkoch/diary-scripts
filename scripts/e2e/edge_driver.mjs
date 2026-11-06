@@ -3,7 +3,8 @@
 const { chromium } = await import(process.env.E2E_PLAYWRIGHT_CORE);
 const { readFileSync } = await import("node:fs");
 
-const [origin, host, transaction] = process.argv.slice(2);
+const [origin, host, transaction, repo] = process.argv.slice(2);
+const reviewUrl = origin + "/lock/merge/" + (repo === "diary" ? "?repo=diary" : "");
 const notifierFile = process.env.E2E_NOTIFIER_FILE;
 
 const readCode = () => {
@@ -53,7 +54,7 @@ await cdp.send("WebAuthn.addVirtualAuthenticator", {
 
 const result = { steps: [], errors };
 
-await page.goto(origin + "/lock/merge/", { waitUntil: "domcontentloaded" });
+await page.goto(reviewUrl, { waitUntil: "domcontentloaded" });
 await page.waitForSelector("#username-textfield", { timeout: 20000 });
 await page.fill("#username-textfield", "owner");
 await page.fill("#password-textfield", "owner-password");
@@ -82,7 +83,7 @@ if (page.url().includes("/2fa/webauthn")) {
   result.steps.push({ step: "registered", url: page.url() });
 }
 
-await page.goto(origin + "/lock/merge/", { waitUntil: "domcontentloaded" });
+await page.goto(reviewUrl, { waitUntil: "domcontentloaded" });
 await page.waitForTimeout(1500);
 result.steps.push({ step: "console", url: page.url(), text: (await page.locator("body").innerText()).slice(0, 300) });
 

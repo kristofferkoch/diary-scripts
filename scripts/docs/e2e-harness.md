@@ -49,8 +49,8 @@ Deliberately different from production, and why:
 | Production failure | Covered by |
 | --- | --- |
 | Audit daemon dropped `repository` (KeyError, empty reply, "unknown outcome") | **L1**: `test_audit_daemon_journals_the_decision_repository` fails with the exact `KeyError` on the pre-fix code and passes after the field map fix |
-| Merge published nothing / stale pair accepted | **L1**: `test_merge_publishes_the_scratch_queue`, `test_stale_queue_oid_is_refused_without_publication` |
-| Cross-repository grant accepted | **L1**: `test_scripts_grant_cannot_decide_the_diary_queue` |
+| Merge published nothing / stale pair accepted | **L1**: `test_merge_publishes_the_scratch_queue`, `test_stale_queue_oid_is_refused_without_publication`, `test_stale_base_oid_is_refused_without_publication` |
+| Cross-repository grant accepted | **L1**: `test_grant_cannot_decide_the_other_queue` |
 | Audit state lost or refusing writes after a restart | **L1**: `test_audit_restart_keeps_state_and_accepts_writes` |
 | Installed helper missing (`agent_merge_pii`), module-level `mail_reader` import | installer smoke test in `install-owner-ui-root` (deployment); L1 imports from the worktree and cannot see the installed layout |
 | `AuthorizationError` rendered as 503 | **L2** (browser): needs the console server and the fake Authelia backend |
@@ -103,8 +103,8 @@ Deliberately different, and why:
 | Production failure | Covered by |
 | --- | --- |
 | Audit daemon dropped `repository` (KeyError, empty reply, "unknown outcome") | **L1**: `test_audit_daemon_journals_the_decision_repository` fails with the exact `KeyError` on the pre-fix code and passes after the field map fix |
-| Merge published nothing / stale pair accepted | **L1**: `test_merge_publishes_the_scratch_queue`, `test_stale_queue_oid_is_refused_without_publication` |
-| Cross-repository grant accepted | **L1**: `test_scripts_grant_cannot_decide_the_diary_queue`; **L2** replays it through the console |
+| Merge published nothing / stale pair accepted | **L1**: `test_merge_publishes_the_scratch_queue`, `test_stale_queue_oid_is_refused_without_publication`, `test_stale_base_oid_is_refused_without_publication` |
+| Cross-repository grant accepted | **L1**: `test_grant_cannot_decide_the_other_queue`; **L2** replays it through the console |
 | Audit state lost or refusing writes after a restart | **L1**: `test_audit_restart_keeps_state_and_accepts_writes` |
 | `AuthorizationError` rendered as 503 | **L2**: every scenario asserts the page, not an outage |
 | `Origin` missing and `Origin: null` | **L2**: `test_opaque_origin_is_accepted`; the missing-header path is the same code branch |

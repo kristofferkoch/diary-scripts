@@ -87,48 +87,149 @@ def test_audit_daemon_journals_the_decision_repository(
     assert recorded["DIARY_AUDIT_REASON"] == "owner_authorized"
 
 
-def test_merge_publishes_the_scratch_queue(stack: harness.Stack) -> None:
-    reviewed = harness.enqueue_change(stack.scripts)
-    base = base_oid(stack.scripts)
+def repository_state(paths) -> dict[str, str]:
+    origin = harness.git(paths.approved, "remote", "get-url", "origin")
+    return {
+        "queue": harness.git(paths.queue, "rev-parse", "HEAD"),
+        "approved": harness.git(paths.approved, "rev-parse", "HEAD"),
+        "integration": harness.git(paths.integration, "rev-parse", "HEAD"),
+        "remote": harness.git(Path(origin), "rev-parse", "master"),
+    }
 
-    reply = stack.decide("scripts", "merge", reviewed, base)
+
+@pytest.mark.parametrize("repo", ["scripts", "diary"])
+def test_snapshot_binds_the_repository_and_exact_reviewed_pair(
+    stack: harness.Stack, repo: str,
+) -> None:
+    from scripts import diary_merge_console_service as executor
+
+    paths = stack.paths_by_repo[repo]
+    reviewed = harness.enqueue_change(paths)
+    base = base_oid(paths)
+
+    reply = executor.handle_request(
+        {"cmd": "snapshot", "repo": repo},
+        stack.paths_by_repo,
+        stack.verifier,
+        auditor=harness.decision_audit(stack.audit),
+        publisher=harness.publish_without_venv,
+    )
+
+    snapshot = reply["snapshot"]
+    assert snapshot["repo"] == repo
+    assert snapshot["queue_oid"] == reviewed
+    assert snapshot["base_oid"] == base
+    assert "queued" in snapshot["diff"]
+
+
+@pytest.mark.parametrize("repo", ["scripts", "diary"])
+def test_merge_publishes_the_scratch_queue(stack: harness.Stack, repo: str) -> None:
+    paths = stack.paths_by_repo[repo]
+    stack.verifier.repo = repo
+    reviewed = harness.enqueue_change(paths)
+    base = base_oid(paths)
+
+    reply = stack.decide(repo, "merge", reviewed, base)
 
     assert reply == {"ok": True, "action": "merge", "outcome": "merged"}
-    assert harness.git(stack.scripts.approved, "rev-parse", "HEAD") == reviewed
-    origin = harness.git(stack.scripts.approved, "remote", "get-url", "origin")
-    assert harness.git(Path(origin), "rev-parse", "master") == reviewed
-    assert harness.git(stack.scripts.integration, "rev-parse", "HEAD") == reviewed
+    assert repository_state(paths) == {
+        "queue": reviewed,
+        "approved": reviewed,
+        "integration": reviewed,
+        "remote": reviewed,
+    }
 
     events = wait_events(stack.audit, 2)
     reasons = [event["DIARY_AUDIT_REASON"] for event in events]
     assert reasons == ["owner_authorized", "merge_completed"]
     for event in events:
-        assert event["DIARY_AUDIT_REPOSITORY"] == "scripts"
+        assert event["DIARY_AUDIT_REPOSITORY"] == repo
         assert event["DIARY_AUDIT_EVENT_ID"] == reviewed
         assert event["DIARY_AUDIT_BASE_OID"] == base
 
 
-def test_stale_queue_oid_is_refused_without_publication(stack: harness.Stack) -> None:
-    harness.enqueue_change(stack.scripts)
-    base = base_oid(stack.scripts)
+@pytest.mark.parametrize("repo", ["scripts", "diary"])
+def test_stale_queue_oid_is_refused_without_publication(
+    stack: harness.Stack, repo: str,
+) -> None:
+    paths = stack.paths_by_repo[repo]
+    stack.verifier.repo = repo
+    harness.enqueue_change(paths)
+    base = base_oid(paths)
+    before = repository_state(paths)
 
-    reply = stack.decide("scripts", "merge", base, base)
+    reply = stack.decide(repo, "merge", base, base)
 
     assert reply["error"] == "queue_changed"
-    assert harness.git(stack.scripts.approved, "rev-parse", "HEAD") == base
-    reasons = [event["DIARY_AUDIT_REASON"] for event in wait_events(stack.audit)]
-    assert reasons == ["queue_changed"]
+    assert repository_state(paths) == before
+    events = wait_events(stack.audit)
+    assert [event["DIARY_AUDIT_REASON"] for event in events] == ["queue_changed"]
+    assert events[0]["DIARY_AUDIT_REPOSITORY"] == repo
+    assert events[0]["DIARY_AUDIT_EVENT_ID"] == base
+    assert events[0]["DIARY_AUDIT_BASE_OID"] == base
 
 
-def test_scripts_grant_cannot_decide_the_diary_queue(stack: harness.Stack) -> None:
-    stack.verifier.repo = "scripts"
-    reviewed = harness.enqueue_change(stack.diary, "board.md", "record\n")
-    base = base_oid(stack.diary)
+@pytest.mark.parametrize("repo", ["scripts", "diary"])
+def test_stale_base_oid_is_refused_without_publication(
+    stack: harness.Stack, repo: str,
+) -> None:
+    paths = stack.paths_by_repo[repo]
+    stack.verifier.repo = repo
+    reviewed = harness.enqueue_change(paths)
+    reviewed_base = base_oid(paths)
+    harness.commit_file(paths.approved, "base-only.txt", "base moved\n")
+    harness.git(paths.approved, "push", "origin", "master")
+    harness.git(paths.queue, "fetch", "origin", "master")
+    before = repository_state(paths)
 
-    reply = stack.decide("diary", "merge", reviewed, base)
+    reply = stack.decide(repo, "merge", reviewed, reviewed_base)
+
+    assert reply["error"] == "base_changed"
+    assert repository_state(paths) == before
+    events = wait_events(stack.audit)
+    assert [event["DIARY_AUDIT_REASON"] for event in events] == ["base_changed"]
+    assert events[0]["DIARY_AUDIT_REPOSITORY"] == repo
+    assert events[0]["DIARY_AUDIT_EVENT_ID"] == reviewed
+    assert events[0]["DIARY_AUDIT_BASE_OID"] == reviewed_base
+
+
+@pytest.mark.parametrize("repo", ["scripts", "diary"])
+def test_deny_changes_no_repository_and_audits_the_exact_pair(
+    stack: harness.Stack, repo: str,
+) -> None:
+    paths = stack.paths_by_repo[repo]
+    stack.verifier.repo = repo
+    reviewed = harness.enqueue_change(paths)
+    base = base_oid(paths)
+    before = repository_state(paths)
+
+    reply = stack.decide(repo, "deny", reviewed, base)
+
+    assert reply == {"ok": True, "action": "deny", "outcome": "denied"}
+    assert repository_state(paths) == before
+    events = wait_events(stack.audit)
+    assert [event["DIARY_AUDIT_REASON"] for event in events] == ["owner_denied"]
+    assert events[0]["DIARY_AUDIT_REPOSITORY"] == repo
+    assert events[0]["DIARY_AUDIT_EVENT_ID"] == reviewed
+    assert events[0]["DIARY_AUDIT_BASE_OID"] == base
+
+
+@pytest.mark.parametrize(
+    ("repo", "grant_repo"), [("scripts", "diary"), ("diary", "scripts")],
+)
+def test_grant_cannot_decide_the_other_queue(
+    stack: harness.Stack, repo: str, grant_repo: str,
+) -> None:
+    paths = stack.paths_by_repo[repo]
+    stack.verifier.repo = grant_repo
+    reviewed = harness.enqueue_change(paths)
+    base = base_oid(paths)
+    before = repository_state(paths)
+
+    reply = stack.decide(repo, "merge", reviewed, base)
 
     assert reply["error"] == "unauthorized"
-    assert harness.git(stack.diary.approved, "rev-parse", "HEAD") == base
+    assert repository_state(paths) == before
     assert decision_events(stack.audit) == []
 
 
