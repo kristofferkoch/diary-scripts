@@ -193,6 +193,87 @@ def test_stale_base_oid_is_refused_without_publication(
     assert events[0]["DIARY_AUDIT_BASE_OID"] == reviewed_base
 
 
+def test_agent_supplied_oids_and_transaction_have_no_authority(
+    stack: harness.Stack,
+) -> None:
+    reviewed = harness.enqueue_change(stack.scripts)
+    base = base_oid(stack.scripts)
+    before = repository_state(stack.scripts)
+    stack.verifier.transaction = "owner-authorization"
+
+    reply = stack.decide(
+        "scripts", "merge", reviewed, base, transaction="agent-supplied",
+    )
+
+    assert reply["error"] == "unauthorized"
+    assert repository_state(stack.scripts) == before
+    assert decision_events(stack.audit) == []
+
+
+def test_audit_outage_before_merge_prevents_publication(stack: harness.Stack) -> None:
+    reviewed = harness.enqueue_change(stack.scripts)
+    base = base_oid(stack.scripts)
+    before = repository_state(stack.scripts)
+
+    def unavailable(_value: object, _peer: dict[str, int]) -> dict:
+        raise OSError("injected audit outage")
+
+    stack.audit.service.write = unavailable  # ty: ignore[invalid-assignment]
+    reply = stack.decide("scripts", "merge", reviewed, base)
+
+    assert reply["error"] == "not_published"
+    assert repository_state(stack.scripts) == before
+    assert decision_events(stack.audit) == []
+
+
+def test_completion_audit_outage_reports_published_without_retry(
+    stack: harness.Stack,
+) -> None:
+    reviewed = harness.enqueue_change(stack.scripts)
+    base = base_oid(stack.scripts)
+    original_write = stack.audit.service.write
+    writes = 0
+
+    def fail_completion(value: object, peer: dict[str, int]) -> dict:
+        nonlocal writes
+        writes += 1
+        if writes == 2:
+            raise OSError("injected completion audit outage")
+        return original_write(value, peer)
+
+    stack.audit.service.write = fail_completion  # ty: ignore[invalid-assignment]
+    reply = stack.decide("scripts", "merge", reviewed, base)
+
+    assert reply["error"] == "published_unconfirmed"
+    assert writes == 2, "the console must not retry after an uncertain completion audit"
+    assert repository_state(stack.scripts) == {
+        "queue": reviewed,
+        "approved": reviewed,
+        "integration": reviewed,
+        "remote": reviewed,
+    }
+    events = wait_events(stack.audit)
+    assert [event["DIARY_AUDIT_REASON"] for event in events] == ["owner_authorized"]
+    assert events[0]["DIARY_AUDIT_EVENT_ID"] == reviewed
+    assert events[0]["DIARY_AUDIT_BASE_OID"] == base
+
+
+def test_local_owner_approval_fallback_still_publishes_exact_oid(
+    stack: harness.Stack,
+) -> None:
+    reviewed = harness.enqueue_change(stack.scripts)
+
+    assert harness.publish_without_venv(reviewed, stack.scripts) is True
+
+    assert repository_state(stack.scripts) == {
+        "queue": reviewed,
+        "approved": reviewed,
+        "integration": reviewed,
+        "remote": reviewed,
+    }
+    assert decision_events(stack.audit) == []
+
+
 @pytest.mark.parametrize("repo", ["scripts", "diary"])
 def test_deny_changes_no_repository_and_audits_the_exact_pair(
     stack: harness.Stack, repo: str,

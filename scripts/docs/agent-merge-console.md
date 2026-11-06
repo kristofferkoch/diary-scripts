@@ -139,6 +139,16 @@ Chromium merge for each queue through Caddy, Authelia, and a virtual WebAuthn
 authenticator. These checks mark the executor locked but do not replace a real
 general-agent lock window or owner acceptance.
 
+The unprivileged L1–L3 acceptance adds scratch evidence for base-only staleness,
+denial leaving all four repository OIDs unchanged, ungranted executor and
+browser requests, replay, and both audit-down gates. A pre-merge outage publishes
+nothing; a completion-record outage reports `published_unconfirmed` after one
+publication and does not retry. The local fallback check calls the same
+`approve_queue` path as `agent-merge-approve`, without a console grant or audit,
+and publishes the exact scratch OID. Advisory non-authority and all report
+fallback states remain covered by the unit matrix above. These checks simulate
+a locked executor and do not replace owner acceptance or a real lock window.
+
 Before marking LATER-01 done, integrate with the completed CTL-07 UI and
 rebased CTL-09 dashboard, then pass controlled owner-approved live tests using
 a scratch queue:

@@ -184,6 +184,29 @@ def test_cross_queue_grant_is_refused_by_the_browser_path(
     assert merge_events(stack) == []
 
 
+def test_session_and_reviewed_oids_without_a_grant_cannot_publish(
+    stack: browser.BrowserStack,
+) -> None:
+    queued = harness.enqueue_change(stack.harness_stack.scripts)
+    before = head(stack.harness_stack.scripts)
+
+    session = stack.session()
+    review = run_browser(
+        stack, session, [{"goto": stack.origin + "/lock/merge/"}],
+    )
+    assert "The report is advisory only" in review["text"]
+
+    result = run_browser(
+        stack, session,
+        [{"goto": stack.origin + "/lock/merge/"}, {"click": 'button[value="merge"]'}],
+    )
+
+    assert "Fresh authorization required" in result["text"]
+    assert head(stack.harness_stack.scripts) == before
+    assert harness.git(stack.harness_stack.scripts.queue, "rev-parse", "HEAD") == queued
+    assert merge_events(stack) == []
+
+
 def test_opaque_origin_is_accepted(stack: browser.BrowserStack) -> None:
     """Firefox sends Origin: null on a same-origin form post."""
     queued = harness.enqueue_change(stack.harness_stack.scripts)
