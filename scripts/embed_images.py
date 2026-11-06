@@ -552,7 +552,7 @@ def process(conn: psycopg.Connection, sources: tuple[str, ...], limit: int,
                 print(f"  {n}/{len(rows)} {row['source']} {row['filename']} "
                       f"— skipped:no-blob ({e})", file=sys.stderr)
             continue
-        except (OSError, ValueError, TypeError, RuntimeError, KeyError, AssertionError, psycopg.Error, subprocess.SubprocessError) as e:
+        except (OSError, http.client.HTTPException, ValueError, TypeError, RuntimeError, KeyError, AssertionError, psycopg.Error, subprocess.SubprocessError) as e:
             failed += 1
             print(f"  !! {row['mid']} {row['filename']}: {e}", file=sys.stderr)
             try:

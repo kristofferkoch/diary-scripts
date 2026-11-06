@@ -512,3 +512,25 @@ class TestProcess:
         attempts = [p for s, p in conn.executed
                     if s.startswith("UPDATE attachments SET vlm_attempts")]
         assert attempts == [(1, None, 7)]
+
+    def test_incomplete_read_describing_image_marks_attempt_and_continues(
+            self, monkeypatch):
+        conn = _FakeConn()
+        rows = [_pending_row(), _pending_row(att_id=8, mid="id-2")]
+        _patch_pipeline(monkeypatch, rows, blob=_png_bytes(300, 300))
+        calls = []
+
+        def flaky_post(payload):
+            calls.append(payload)
+            if len(calls) == 1:
+                raise http.client.IncompleteRead(b"truncated")
+            return {"choices": [{"message": {"content": "A receipt."}}]}
+
+        monkeypatch.setattr(ei, "_post_chat", flaky_post)
+        done, skipped, failed = ei.process(cast(Any, conn), ("mail",), 25, False)
+
+        assert (done, skipped, failed) == (1, 0, 1)
+        assert len(calls) == 2
+        attempts = [p for s, p in conn.executed
+                    if s.startswith("UPDATE attachments SET vlm_attempts")]
+        assert attempts == [(1, None, 7)]

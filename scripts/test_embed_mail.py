@@ -679,6 +679,9 @@ class TestEmbedBatch:
 
 class TestProcessTransportFailures:
     class _Cursor:
+        def __init__(self, rows=()):
+            self.rows = rows
+
         def __enter__(self):
             return self
 
@@ -691,9 +694,15 @@ class TestProcessTransportFailures:
         def fetchone(self):
             return None
 
+        def fetchall(self):
+            return self.rows
+
     class _Conn:
+        def __init__(self, rows=()):
+            self.rows = rows
+
         def cursor(self):
-            return TestProcessTransportFailures._Cursor()
+            return TestProcessTransportFailures._Cursor(self.rows)
 
     @staticmethod
     def _patch_messages(monkeypatch, message_ids):
@@ -735,6 +744,25 @@ class TestProcessTransportFailures:
         error = capsys.readouterr().err
         assert "final batch embed failed (1 msgs)" in error
         assert "[tier 1] done=0 skipped=0 failed=1" in error
+
+    def test_incomplete_read_in_reembed_batch_continues(self, monkeypatch, capsys):
+        from scripts import embed_mail
+        self._patch_messages(monkeypatch, [])
+        monkeypatch.setattr(embed_mail, "BATCH_CHUNKS", 1)
+        calls = []
+
+        def flush(conn, pending, verbose):
+            calls.append([(row_id, payload["mid"]) for row_id, payload in pending])
+            if len(calls) == 1:
+                raise http.client.IncompleteRead(b"truncated")
+            return 1, 0
+
+        monkeypatch.setattr(embed_mail, "_flush_reembed", flush)
+        rows = [(1, "first"), (2, "second")]
+        embed_mail.process_reembed(cast(Any, self._Conn(rows)), None, False)
+
+        assert calls == [[(1, "first")], [(2, "second")]]
+        assert "[reembed] done=1 skipped=0 failed=1" in capsys.readouterr().err
 
 
 # ---------- end-to-end with real notmuch (skipped if mail not present) ----------

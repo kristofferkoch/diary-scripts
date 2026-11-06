@@ -822,7 +822,7 @@ def process_reembed(conn: psycopg.Connection, limit: int | None,
         try:
             d, f = _flush_reembed(conn, pending, verbose)
             done += d; failed += f
-        except (OSError, ValueError, TypeError, RuntimeError, KeyError, AssertionError, psycopg.Error, subprocess.SubprocessError, MessageError) as e:
+        except (OSError, http.client.HTTPException, ValueError, TypeError, RuntimeError, KeyError, AssertionError, psycopg.Error, subprocess.SubprocessError, MessageError) as e:
             failed += len(pending)
             print(f"  !! batch embed failed ({len(pending)} msgs): {e}",
                   file=sys.stderr)
