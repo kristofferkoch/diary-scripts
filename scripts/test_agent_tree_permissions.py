@@ -119,18 +119,69 @@ def test_unexpected_owner_is_rejected_before_any_mutation(tmp_path: Path):
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
 
 
-def test_symlink_is_rejected_during_preflight(tmp_path: Path):
+def test_venv_and_node_symlinks_are_skipped_without_touching_links_or_targets(
+    tmp_path: Path, monkeypatch
+):
     root = tmp_path / "tree"
-    root.mkdir()
-    outside = tmp_path / "outside"
-    outside.write_text("outside")
-    outside.chmod(0o600)
-    (root / "link").symlink_to(outside)
+    (root / ".venv/bin").mkdir(parents=True)
+    (root / ".venv/lib").mkdir()
+    (root / "node_modules/.bin").mkdir(parents=True)
+    (root / "node_modules/package").mkdir()
+    python = tmp_path / "outside-python"
+    lib64 = tmp_path / "outside-lib64"
+    node_tool = tmp_path / "outside-node-tool"
+    python.write_text("python")
+    lib64.mkdir()
+    node_tool.write_text("node")
+    for target in (python, lib64, node_tool):
+        target.chmod(0o600)
+    script = root / "node_modules/package/cli.js"
+    script.write_text("cli")
+    script.chmod(0o600)
+    links = {
+        root / ".venv/bin/python": python,
+        root / ".venv/lib64": lib64,
+        root / "node_modules/.bin/tool": node_tool,
+    }
+    for link, target in links.items():
+        link.symlink_to(target, target_is_directory=target.is_dir())
+    before = {
+        link: (
+            os.readlink(link),
+            link.lstat().st_mode,
+            link.lstat().st_uid,
+            link.lstat().st_gid,
+            link.lstat().st_nlink,
+            link.lstat().st_mtime_ns,
+            link.lstat().st_ctime_ns,
+        )
+        for link in links
+    }
+    monkeypatch.setattr(permissions, "_drop_privileges", lambda account: None)
+    desired_mode = permissions._desired_mode
+    # This namespace rejects setgid; its computation and privileged application
+    # remain separate checks while the complete traversal runs here.
+    monkeypatch.setattr(
+        permissions,
+        "_desired_mode",
+        lambda entry: desired_mode(entry) & ~stat.S_ISGID if entry.is_dir else desired_mode(entry),
+    )
 
-    with pytest.raises(permissions.TreeError, match="symlink"):
-        permissions.inspect_tree(root, {os.getuid()})
+    counts = permissions.repair_tree(root, [_account()], os.getgid())
 
-    assert stat.S_IMODE(outside.stat().st_mode) == 0o600
+    assert counts == {"current": 8}
+    assert stat.S_IMODE(script.stat().st_mode) == 0o660
+    for link, target in links.items():
+        assert (
+            os.readlink(link),
+            link.lstat().st_mode,
+            link.lstat().st_uid,
+            link.lstat().st_gid,
+            link.lstat().st_nlink,
+            link.lstat().st_mtime_ns,
+            link.lstat().st_ctime_ns,
+        ) == before[link]
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
 
 
 def test_nested_mount_table_entry_is_rejected_without_path_traversal(tmp_path: Path):

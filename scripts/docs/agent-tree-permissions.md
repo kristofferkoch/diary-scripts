@@ -15,10 +15,13 @@ UID, supplementary groups, and GID before changing anything. The root parent
 only traverses directories and opens descriptors; it never changes ownership or
 mode.
 
-Preflight rejects the whole tree without mutation if it finds a symlink,
-special file, nested mount (including a mount listed only in mountinfo),
-unexpected owner, or regular file with more than one hard link. These checks
-prevent metadata changes from escaping the selected tree.
+Preflight skips existing symlinks without opening, following, or mutating them;
+this permits ordinary virtualenv and Node package-manager links. It rejects the
+whole tree without mutation if it finds a special file, nested mount (including
+a mount listed only in mountinfo), unexpected owner, or regular file with more
+than one hard link. These checks prevent metadata changes from escaping the
+selected tree. The tree root itself must still be a real directory opened with
+`O_NOFOLLOW`.
 
 Traversal opens every path component relative to a directory descriptor with
 `O_NOFOLLOW`. Before each change, the parent reopens the entry relative to the
@@ -36,4 +39,6 @@ setuid/setgid bits on regular files are not restored after `fchown`.
 
 The normal invocation is the console entry point. Privileged deployment uses a
 root-owned installed copy of this stdlib-only module, not an agent-writable
-checkout or virtualenv.
+checkout or virtualenv. A controlled two-UID run with real mixed ownership,
+directory setgid, and live symlink fixtures remains an explicit deployment gate;
+unprivileged tests do not replace that verification.
