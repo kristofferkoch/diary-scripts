@@ -142,6 +142,32 @@ def test_prescan_reports_unapproved_values_without_mutating_input():
     assert all("person@private-mail.no" not in item.detail for item in findings)
 
 
+def test_prescan_allows_trusted_collector_units_but_not_service_email():
+    units = "".join([
+        "+systemctl start " + "diary-collect@" + "spond.service\n",
+        "+systemctl start `" + "diary-collect@" + "vigilo.service`\n",
+        "+Enable " + "diary-collect@" + "skolemelding.service, then check it.\n",
+    ])
+    findings = review.prescan(
+        units + "+Contact " + "person@" + "example.service\n", "", (), ()
+    )
+    assert [(item.kind, item.path) for item in findings] == [("email", "<diff>")]
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "diary-collect@" + "spond.service-evil",
+        "diary-collect@" + "spond.service-1",
+        "DIARY-COLLECT@" + "spond.service",
+        "diary-collect@" + "ſpond.service",
+    ],
+)
+def test_prescan_rejects_collector_unit_lookalikes(address: str):
+    findings = review.prescan(f"+systemctl start {address}\n", "", (), ())
+    assert [(item.kind, item.path) for item in findings] == [("email", "<diff>")]
+
+
 def test_review_once_calls_local_http_model_and_binds_exact_oid(tmp_path: Path):
     queue, base = make_queue(
         tmp_path,

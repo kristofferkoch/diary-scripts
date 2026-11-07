@@ -24,6 +24,7 @@ DEFAULT_FAKE_IDENTITIES = (
 )
 MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,127}\Z")
 EMAIL_RE = re.compile(r"(?i)\b[A-Z0-9._%+-]+@([A-Z0-9.-]+\.[A-Z]{2,63})\b")
+TRUSTED_COLLECTOR_UNIT_RE = re.compile(r"diary-collect@[a-z0-9_.-]+\.service")
 URL_RE = re.compile(r"(?i)\bhttps?://[^\s<>\"')\]}]+")
 IPV4_RE = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
 ASSIGNMENT_RE = re.compile(
@@ -144,7 +145,11 @@ def scan_identities(
             if not _allowed_url(match.group(0), allowed):
                 add("url")
         for match in EMAIL_RE.finditer(line):
-            if not _allowed_email(match.group(0), allowed):
+            trusted_unit = (
+                TRUSTED_COLLECTOR_UNIT_RE.fullmatch(match.group(0)) is not None
+                and (match.end() == len(line) or line[match.end()] != "-")
+            )
+            if not (trusted_unit or _allowed_email(match.group(0), allowed)):
                 add("email")
         for match in IPV4_RE.finditer(line):
             if not _allowed_ipv4(match.group(0)):
