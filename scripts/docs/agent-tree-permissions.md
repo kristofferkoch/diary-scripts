@@ -15,13 +15,14 @@ UID, supplementary groups, and GID before changing anything. The root parent
 only traverses directories and opens descriptors; it never changes ownership or
 mode.
 
-Preflight skips existing symlinks without opening, following, or mutating them;
-this permits ordinary virtualenv and Node package-manager links. It rejects the
-whole tree without mutation if it finds a special file, nested mount (including
-a mount listed only in mountinfo), unexpected owner, or regular file with more
-than one hard link. These checks prevent metadata changes from escaping the
-selected tree. The tree root itself must still be a real directory opened with
-`O_NOFOLLOW`.
+Preflight skips existing symlinks and Unix-domain socket entries without
+opening, following, or mutating them; this permits ordinary virtualenv and Node
+package-manager links as well as executor and journal sockets. It rejects the
+whole tree without mutation if it finds a device node, FIFO, or other special
+file, nested mount (including a mount listed only in mountinfo), unexpected
+owner, or regular file with more than one hard link. These checks prevent
+metadata changes from escaping the selected tree. The tree root itself must
+still be a real directory opened with `O_NOFOLLOW`.
 
 Traversal opens every path component relative to a directory descriptor with
 `O_NOFOLLOW`. Before each change, the parent reopens the entry relative to the

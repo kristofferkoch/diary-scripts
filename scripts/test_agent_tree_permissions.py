@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import stat
 from pathlib import Path
 
@@ -115,6 +116,64 @@ def test_unexpected_owner_is_rejected_before_any_mutation(tmp_path: Path):
 
     with pytest.raises(permissions.TreeError, match="unexpected owner"):
         permissions.repair_tree(root, [permissions.Account("other", os.getuid() + 1, os.getgid())], os.getgid())
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+def test_unix_socket_is_skipped_during_complete_repair(tmp_path: Path, monkeypatch):
+    root = tmp_path / "tree"
+    (root / "e2e").mkdir(parents=True)
+    payload = root / "e2e/payload"
+    payload.write_text("data")
+    payload.chmod(0o600)
+    socket_path = root / "e2e/journal.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        listener.bind(str(socket_path))
+        socket_path.chmod(0o600)
+        before = socket_path.stat()
+        monkeypatch.setattr(permissions, "_drop_privileges", lambda account: None)
+        desired_mode = permissions._desired_mode
+        monkeypatch.setattr(
+            permissions,
+            "_desired_mode",
+            lambda entry: desired_mode(entry) & ~stat.S_ISGID if entry.is_dir else desired_mode(entry),
+        )
+
+        counts = permissions.repair_tree(root, [_account()], os.getgid())
+
+        after = socket_path.stat()
+        assert counts == {"current": 3}
+        assert stat.S_IMODE(payload.stat().st_mode) == 0o660
+        assert (
+            after.st_ino,
+            after.st_mode,
+            after.st_uid,
+            after.st_gid,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ) == (
+            before.st_ino,
+            before.st_mode,
+            before.st_uid,
+            before.st_gid,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+    finally:
+        listener.close()
+
+
+def test_fifo_is_rejected_before_any_mutation(tmp_path: Path):
+    root = tmp_path / "tree"
+    root.mkdir()
+    target = root / "file"
+    target.write_text("data")
+    target.chmod(0o600)
+    os.mkfifo(root / "fifo")
+
+    with pytest.raises(permissions.TreeError, match="special file"):
+        permissions.repair_tree(root, [_account()], os.getgid())
 
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
 

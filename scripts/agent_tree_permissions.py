@@ -134,7 +134,7 @@ def _scan_directory(
     for name in os.listdir(fd):
         child_components = (*components, name)
         value = os.stat(name, dir_fd=fd, follow_symlinks=False)
-        if stat.S_ISLNK(value.st_mode):
+        if stat.S_ISLNK(value.st_mode) or stat.S_ISSOCK(value.st_mode):
             continue
         entry = _entry(child_components, value)
         _validate(entry, root, root_dev, allowed_uids)
