@@ -101,6 +101,51 @@ def test_unarmed_dark_policy_preserves_audit_only_resolution() -> None:
     assert lock.calls == 0
 
 
+def test_audit_write_times_out_before_policy_client() -> None:
+    with patch.object(policy, "request", side_effect=OSError("frozen audit")) as request:
+        with pytest.raises(OSError):
+            policy.AuditClient("unused.sock").write({})
+    audit_timeout = request.call_args.kwargs.get("timeout", 2.0)
+    assert audit_timeout < policy.PolicyClient().timeout
+
+
+def test_dark_audit_timeout_preserves_policy_reply(tmp_path: Path) -> None:
+    audit_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    audit_listener.bind(str(tmp_path / "audit.sock"))
+    audit_listener.listen(1)
+    release_audit = threading.Event()
+
+    def freeze_audit() -> None:
+        try:
+            conn, _ = audit_listener.accept()
+            with conn:
+                conn.recv(policy.MAX_REQUEST_BYTES)
+                release_audit.wait(1)
+        finally:
+            audit_listener.close()
+
+    audit_thread = threading.Thread(target=freeze_audit, daemon=True)
+    audit_thread.start()
+    svc, _, _ = service("LOCKED")
+    svc.armed = lambda: False
+    svc.audit = policy.AuditClient(str(tmp_path / "audit.sock"))
+    server = policy.PolicyDaemon(str(tmp_path / "policy.sock"), svc, os.geteuid(), os.getegid())
+    policy_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    policy_thread.start()
+    try:
+        reply = policy.PolicyClient(str(tmp_path / "policy.sock")).authorize("example.test", "udp")
+        assert reply.allow is True and reply.rcode == policy.NOERROR
+        assert (reply.decision, reply.lock_state, reply.reason) == (
+            "would_allow", "not_applicable", "audit_only",
+        )
+    finally:
+        release_audit.set()
+        server.shutdown()
+        server.server_close()
+        policy_thread.join(timeout=5)
+        audit_thread.join(timeout=5)
+
+
 def test_arm_state_uncertainty_fails_closed() -> None:
     svc, lock, _ = service("ATTENDED")
 

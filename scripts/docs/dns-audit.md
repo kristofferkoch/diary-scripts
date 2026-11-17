@@ -80,10 +80,15 @@ returns resolution to the direct path instead of breaking it.
 
 Policy loss fails closed: the proxy answers `REFUSED` whenever
 `diary-dns-policyd`'s socket is unavailable, so a policy-daemon outage suspends
-agent resolution until it returns. The policy daemon only wants, and does not
-require, `diary-auditd`: while dark it tolerates a failed audit write and still
-forwards, and while armed the same failure becomes `audit_unavailable` and
-refuses. Bounded recovery while dark is `systemctl stop
+agent resolution until it returns. The proxy only wants, and does not require,
+the policy daemon, so stopping that daemon does not stop the proxy or remove
+its redirect. The policy daemon likewise only wants, and does not require,
+`diary-auditd`: while dark it tolerates a failed audit write and still forwards,
+and while armed the same failure becomes `audit_unavailable` and refuses. Its
+one-second audit-write timeout expires before the proxy's two-second policy
+timeout, so a frozen audit writer cannot turn a dark allowance into a client
+timeout. NFLOG forwarder failure recovery restarts the DNS observation rules
+after the forwarder. Bounded recovery while dark is `systemctl stop
 diary-dns-audit-rules.service`, which returns resolution to the configured
 resolver and loses query evidence until the unit is started again. After ACT-01
 the same behavior is intended to fail closed.

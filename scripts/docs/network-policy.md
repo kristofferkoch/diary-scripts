@@ -193,9 +193,11 @@ is mandatory even when a check fails.
    network failsafe before forwarder restart, the forwarder is active, and
    `diary-lock status` is `LOCKED` before any 30-second poll is required. Verify
    the loaded forwarder has `Restart=no` and
-   `OnFailure=diary-network-audit-failure.service`. Repeat in dark mode after
-   cleanup preparation and confirm the same containment-first recovery does not
-   stop agents.
+   `OnFailure=diary-network-audit-failure.service`. Confirm the failure unit
+   then starts `diary-dns-audit-rules.service` and that its audit table and
+   normal query evidence return without a manual rules restart. Repeat in dark
+   mode after cleanup preparation and confirm the same containment-first
+   recovery does not stop agents.
 
 8. Inspect the trusted evidence:
 
