@@ -144,7 +144,7 @@ class AuditClient:
         self.socket_path = socket_path
 
     def write(self, event: dict[str, Any]) -> None:
-        request(self.socket_path, {"cmd": "write", "event": event})
+        request(self.socket_path, {"cmd": "write", "event": event}, timeout=1.0)
 
 
 class DNSPolicyService:

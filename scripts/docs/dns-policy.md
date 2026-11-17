@@ -14,9 +14,11 @@ loopback port 1053 and redirecting only the configured upstream's port-53
 traffic. AUD-03 already installs `diary-dns-policyd` in its unarmed
 `audit_only` mode, so the proxy has a policy source and `dns.query` writer
 before CTL-04 exists. CTL-04 then installs
-`diary-dns-auditd.service.d/50-dns-policy.conf` to make the policy daemon a hard
-requirement and activate the lock failsafe on proxy failure. The
-proxy calls `PolicyClient.authorize` exactly once for every UDP/TCP message
+`diary-dns-auditd.service.d/50-dns-policy.conf` to order the proxy after the
+policy daemon and activate the lock failsafe on proxy failure. The proxy only
+wants, and does not require, the policy daemon: policy loss leaves the proxy
+running to return `REFUSED` rather than removing the redirect and failing open.
+The proxy calls `PolicyClient.authorize` exactly once for every UDP/TCP message
 before any upstream exchange and emits no separate query-decision audit event.
 
 For every UDP or TCP query, after validating the DNS message and extracting its
