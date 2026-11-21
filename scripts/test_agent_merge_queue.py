@@ -356,6 +356,26 @@ def test_already_queued_request_still_cleans_source(paths: amq.QueuePaths):
     assert not retry.exists()
 
 
+def test_approve_can_use_the_existing_nix_environment(
+    paths: amq.QueuePaths, monkeypatch: pytest.MonkeyPatch
+):
+    calls = []
+
+    def approve(reviewed, actual_paths, *, sync_environment):
+        calls.append((reviewed, actual_paths, sync_environment))
+        return True
+
+    monkeypatch.setattr(amq, "peer_uid", lambda fd: amq.os.geteuid())
+    monkeypatch.setattr(amq, "paths_for", lambda repo: paths)
+    monkeypatch.setattr(amq, "approve_queue", approve)
+    reviewed = "0" * 40
+
+    assert amq.queue_main([
+        "approve", "--no-sync-environment", "--peer-fd", "0", reviewed,
+    ]) == 0
+    assert calls == [(reviewed, paths, False)]
+
+
 def test_peer_uid_comes_from_the_kernel_socket_credentials():
     left, right = amq.socket.socketpair()
     try:

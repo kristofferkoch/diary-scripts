@@ -244,9 +244,12 @@ The service invokes a root-owned copy of the queue module from the standalone
 approved scripts repository. Automatic trees are for review only and are never
 execution sources. Privileged sync services, token units, timers, and installers
 use approved repositories or root-owned installed copies, never integration or
-agent source checkouts. Scripts approval runs `uv sync --frozen` in approved so
-the environment matches the reviewed lockfile before GitHub publication. Secret
-lookups are fixed `pass` argv, not shell commands read from unattended diary
+agent source checkouts. Scripts approval normally runs `uv sync --frozen` in
+approved so the environment matches the reviewed lockfile before GitHub
+publication. A service with a Nix-built environment instead passes
+`--no-sync-environment`; its `uv2nix` environment is immutable and is replaced
+by the NixOS rebuild, so no runtime virtualenv sync is needed. Secret lookups
+are fixed `pass` argv, not shell commands read from unattended diary
 configuration.
 
 ## Refresh the installed queue module after a change

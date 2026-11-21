@@ -999,6 +999,11 @@ def queue_main(argv: list[str] | None = None) -> int:
     approved.add_argument("--repo", choices=("scripts", "diary"), default="scripts")
     approved.add_argument("reviewed")
     approved.add_argument("--peer-fd", type=int, required=True)
+    approved.add_argument(
+        "--no-sync-environment",
+        action="store_true",
+        help="use the existing Nix-built environment instead of refreshing virtualenvs",
+    )
     status = sub.add_parser("status", help="observe one exact queue OID for an authorized peer")
     status.add_argument("--repo", choices=("scripts", "diary"), required=True)
     status.add_argument("reviewed")
@@ -1067,7 +1072,7 @@ def queue_main(argv: list[str] | None = None) -> int:
             approve_queue(
                 args.reviewed,
                 paths_for(args.repo),
-                sync_environment=args.repo == "scripts",
+                sync_environment=args.repo == "scripts" and not args.no_sync_environment,
             )
     except BadRequest as exc:
         print(f"agent-merge: {exc}", file=sys.stderr)
