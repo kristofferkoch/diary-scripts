@@ -92,6 +92,7 @@ immich = "server.example:2283"
 tailnet_base = "https://server.example"
 dsh_web = "https://server.example:8444"
 kimi_web = "https://server.example:8446"
+opencode_web = "https://server.example:8447"
 """
 
 
@@ -115,6 +116,7 @@ def assert_host_urls() -> None:
     assert config.mail_web_url() == "https://server.example/mail"
     assert config.dsh_web_url() == "https://server.example:8444"
     assert config.kimi_web_url() == "https://server.example:8446"
+    assert config.opencode_web_url() == "https://server.example:8447"
 
 
 def test_host_urls_come_from_public_hosts_config(with_hosts_config):

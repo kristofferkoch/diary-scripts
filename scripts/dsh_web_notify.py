@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Send a web UI's login URL (with its token) to Signal note-to-self.
+"""Send a web UI's login details to Signal note-to-self.
 
-Works for both web UIs behind Caddy:
+Works for the three web UIs behind Caddy:
 
 * ``dsh-web`` — random token per process start (can't be disabled or pinned),
   printed as a login URL with ``?token=``. Phone bookmarks die on every
@@ -10,11 +10,17 @@ Works for both web UIs behind Caddy:
   *fragment*, which the browser never sends to the server). The link is
   stable, but sending it on restart is still the quickest way to confirm the
   service came back.
+* ``opencode-web`` — HTTP Basic auth with a *static* password. Nothing is
+  printed to the journal (a startup warning appears only when the password is
+  missing), so this mode reads the password out of the unit's env file
+  (``--password-from``) and sends the credentials next to the plain link.
+  There is no token to rotate while the server is down, which is why the
+  bookmark survives restarts.
 
 The tool polls the unit's journal for the URL printed by the current boot,
 rewrites the loopback authority to the public Caddy/tailnet base
-(``hosts.dsh_web`` / ``hosts.kimi_web`` in the root-owned
-``/etc/diary/hosts.toml``), and sends it to the user's own
+(``hosts.dsh_web`` / ``hosts.kimi_web`` / ``hosts.opencode_web`` in the
+root-owned ``/etc/diary/hosts.toml``), and sends it to the user's own
 note-to-self chat via the signal-cli daemon's JSON-RPC socket.
 
 The socket call is a plain JSON-RPC *client* request — it runs no receive
@@ -39,12 +45,21 @@ import sys
 import time
 from collections.abc import Callable
 from typing import TypedDict
+from urllib import error as urlerror
+from urllib import request as urlrequest
 from urllib.parse import urlsplit, urlunsplit
 
-from mail_reader.config import dsh_web_url, kimi_web_url
+from mail_reader.config import dsh_web_url, kimi_web_url, opencode_web_url
 
 DEFAULT_UNIT = "dsh-web"
 TOKEN_RE = re.compile(r"https?://\S*?token=\S+")
+
+# Units that authenticate with HTTP Basic + a static password instead of a
+# token URL in the journal. The username is fixed by the server, only the
+# password is configurable.
+BASIC_AUTH_UNITS = frozenset({"opencode-web"})
+BASIC_AUTH_USER = "opencode"
+DEFAULT_PASSWORD_KEY = "OPENCODE_SERVER_PASSWORD"
 
 
 class UnitDefaults(TypedDict):
@@ -56,6 +71,7 @@ class UnitDefaults(TypedDict):
 UNIT_DEFAULTS: dict[str, UnitDefaults] = {
     "dsh-web": {"base": dsh_web_url, "label": "dsh web"},
     "kimi-web": {"base": kimi_web_url, "label": "kimi web"},
+    "opencode-web": {"base": opencode_web_url, "label": "opencode web"},
 }
 
 DEFAULT_SOCKET_ENV = "SIGNAL_CLI_SOCKET"
@@ -120,6 +136,50 @@ def public_url(login_url: str, base: str) -> str:
     return urlunsplit((b.scheme, b.netloc, p.path or "/", p.query, p.fragment))
 
 
+def env_value(path: str, key: str) -> str:
+    """Last ``key=value`` in a shell-style env file (comments and quotes are
+    tolerated). Returns ``""`` when the key is absent — the caller decides
+    whether that is fatal."""
+    value = ""
+    with open(path, encoding="utf-8") as handle:
+        for raw in handle:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, _, rest = line.partition("=")
+            if name.strip() == key:
+                value = rest.strip().strip('"').strip("'")
+    return value
+
+
+def wait_for_http(url: str, timeout: float = 60.0, poll: float = 1.0) -> bool:
+    """Poll until ``url`` answers with *any* HTTP status.
+
+    A 401 counts as ready: for a Basic-auth UI it means the server is
+    listening and already enforcing the password, which is exactly what the
+    message is about to report.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            urlrequest.urlopen(url, timeout=5).close()
+            return True
+        except urlerror.HTTPError:
+            return True
+        except OSError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(poll)
+
+
+def basic_auth_message(label: str, base: str, user: str, password: str) -> str:
+    """Signal body for a static-password UI: link plus the credentials."""
+    return (
+        f"{label} (re)started — login from phone:\n{base}/"
+        f"\nuser: {user}  password: {password}"
+    )
+
+
 def signal_note(message: str, socket_path: str | None = None,
                 recv_timeout: float = 15.0) -> dict:
     """Send `message` to note-to-self via the daemon's JSON-RPC socket.
@@ -159,7 +219,16 @@ def main() -> None:
     p = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     p.add_argument("--unit", default=DEFAULT_UNIT,
                    help="systemd unit whose journal carries the URL "
-                        "(dsh-web, kimi-web)")
+                        "(dsh-web, kimi-web, opencode-web)")
+    p.add_argument("--password-from", default=None,
+                   help="env file holding the Basic-auth password; required "
+                        "for units in BASIC_AUTH_UNITS (opencode-web)")
+    p.add_argument("--password-key", default=DEFAULT_PASSWORD_KEY,
+                   help=f"variable to read from --password-from "
+                        f"(default: {DEFAULT_PASSWORD_KEY})")
+    p.add_argument("--probe", default=None,
+                   help="HTTP URL polled until it answers (any status) before "
+                        "sending; a 401 counts as ready")
     p.add_argument("--scope", choices=("user", "system"), default="user",
                    help="current agent user units, or LATER-03 system units")
     p.add_argument("--base-url", default=None,
@@ -179,6 +248,29 @@ def main() -> None:
     defaults = UNIT_DEFAULTS.get(args.unit, {"base": dsh_web_url, "label": args.unit})
     base = args.base_url or defaults["base"]()
     label = args.label or defaults["label"]
+
+    if args.probe and not wait_for_http(args.probe, timeout=args.timeout):
+        print(f"!! '{args.unit}' is not answering {args.probe} within "
+              f"{args.timeout:.0f}s", file=sys.stderr)
+        sys.exit(1)
+
+    if args.unit in BASIC_AUTH_UNITS:
+        if not args.password_from:
+            print(f"!! --password-from is required for '{args.unit}'",
+                  file=sys.stderr)
+            sys.exit(2)
+        password = env_value(args.password_from, args.password_key)
+        if not password:
+            print(f"!! no {args.password_key} in {args.password_from}",
+                  file=sys.stderr)
+            sys.exit(2)
+        message = basic_auth_message(label, base, BASIC_AUTH_USER, password)
+        if args.dry_run:
+            print(message)
+            return
+        signal_note(message, socket_path=args.socket)
+        print(f"sent to note-to-self: {base}/ ({BASIC_AUTH_USER} + password)")
+        return
 
     url = find_token_url(unit=args.unit, scope=args.scope, timeout=args.timeout)
     if url is None:
