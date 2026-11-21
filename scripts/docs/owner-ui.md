@@ -9,7 +9,7 @@
 > unlock/extend while that file is absent. This module is no longer installed by
 > `install-owner-ui-root`.
 
-`diary-lock-ui` is the CTL-07 state-changing extension behind Caddy and Authelia.
+`diary-lock-ui` is the CTL-07 state-changing extension behind Caddy and owner passkey authentication.
 It consumes the existing trusted audit reports and CTL-08 fresh authorization;
 it does not implement a separate read-only dashboard or controller. General-agent
 enforcement remains dark until its own cards and ACT-01 are complete.
@@ -46,9 +46,9 @@ socket. The controller accepts `unlock` and `extend` only from that kernel UID;
 root and the local owner retain `lock` and initial break-glass but cannot use the
 UI-only commands. Agent and pipeline identities are not authorized.
 
-Caddy applies Authelia `two_factor` to the UI routes, but the service does not
+Caddy requires an owner passkey session on the UI routes, but the service does not
 trust client-supplied `Remote-*` headers. It independently sends only the
-configured Authelia session cookie to the loopback forward-auth endpoint and
+configured session cookie to the loopback forward-auth endpoint and
 requires the configured owner and `lock-owner` group. A direct loopback request
 with spoofed headers, a DSH/Kimi cookie, or a bearer token therefore has no
 authority.
@@ -68,8 +68,8 @@ routine-failure rule. The empty example classifies no exceptions and therefore
 fails safe until the accepted AUD-05 classifications are installed. A truncated
 review is incomplete and blocks both acknowledgement and unlock.
 
-The owner begins a CTL-08 transaction, completes fresh password + user-verified
-WebAuthn authentication, and then acknowledges each current attention group or
+The owner begins a CTL-08 transaction, completes a fresh user-verified passkey
+ceremony, and then acknowledges each current attention group or
 all listed groups together. Acknowledgements are in-memory, bounded to 32
 transactions, expire within five minutes, and are keyed by the random transaction
 ID. The browser secret remains only in the CTL-08 HttpOnly cookie. Acknowledging
@@ -90,7 +90,7 @@ retry, or blocked-operation replay queue.
   reauthentication is not required to make the system safer.
 - **Unlock confirmation** first requires locked state, a complete current report,
   and acknowledgement of every required group for the same transaction. The UI
-  then forwards only the Authelia and transaction cookies to CTL-08's
+  then forwards only the owner-session and transaction cookies to CTL-08's
   `/lock/unlock/consume`. Only a 204 response permits the separate controller
   `unlock` request. A controller failure returns 502, leaves restrictions in
   place through the controller failsafe, and consumes the proof so it cannot be
@@ -102,10 +102,9 @@ retry, or blocked-operation replay queue.
   never call it. Repeating local break-glass while attended is rejected rather
   than serving as another renewal path. Controller restart and expiry still lock.
 
-The UI consumes but does not replace CTL-08 freshness proof. An ordinary
-Authelia two-factor cookie can view reports, lock, or explicitly extend existing
-attendance, but cannot unlock without the forced-login, session-bound,
-single-use transaction.
+The UI consumes but does not replace CTL-08 freshness proof. An ordinary owner
+passkey read session can view reports, lock, or explicitly extend existing
+attendance, but cannot unlock without the transaction-bound, single-use ceremony.
 
 ## Isolated validation
 
@@ -113,7 +112,7 @@ single-use transaction.
 uv run pytest scripts/test_diary_lock.py scripts/test_diary_lock_ui.py scripts/test_diary_fresh_unlock.py
 ```
 
-The UI tests use loopback fake Authelia, the real CTL-08 transaction service,
+The UI tests use explicitly constructed owner sessions, the real CTL-08 transaction service,
 and fake controller/report boundaries. They cover full grouped review, missing
 and changed acknowledgement, truncated reports, stale/pending/substituted and
 agent sessions, single-use replay, expiry, failed unlock, explicit lock and
@@ -139,7 +138,7 @@ The deployed acceptance checks must demonstrate:
 2. lock-now works and every current novel/suspicious network, DNS, and broker
    group blocks unlock until acknowledged, while routine groups need no
    individual dismissal;
-3. an ordinary old two-factor cookie, pending/stale/substituted fresh session,
+3. an ordinary old read session, pending/stale/substituted fresh session,
    replayed transaction, and expired transaction cannot unlock;
 4. a real fresh owner ceremony plus explicit review and confirmation enters
    attended mode for approximately 15 minutes;

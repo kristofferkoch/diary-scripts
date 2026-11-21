@@ -53,7 +53,7 @@ Deliberately different from production, and why:
 | Cross-repository grant accepted | **L1**: `test_grant_cannot_decide_the_other_queue` |
 | Audit state lost or refusing writes after a restart | **L1**: `test_audit_restart_keeps_state_and_accepts_writes` |
 | Installed helper missing (`agent_merge_pii`), module-level `mail_reader` import | installer smoke test in `install-owner-ui-root` (deployment); L1 imports from the worktree and cannot see the installed layout |
-| `AuthorizationError` rendered as 503 | **L2** (browser): needs the console server and the fake Authelia backend |
+| `AuthorizationError` rendered as 503 | **L2** (browser): needs the console server and the fake owner-auth backend |
 | `Origin` missing and `Origin: null` | **L2** (browser): only a real browser sends these |
 | Submit button field (`confirm`) rejected | **L2** (browser): the rendered form must be submitted as a browser submits it |
 | Stale verifier socket, installer ordering | **L4** (root rehearsal): the fresh service chowns its socket and the installers must run as root |
@@ -86,11 +86,11 @@ What is real in this layer:
 | Browser | Chromium via `playwright-core`; the rendered forms are clicked, not posted by hand |
 | Same-origin front | a loopback proxy; it rewrites `Origin` only for the opaque-origin scenario |
 | Ceremony | a stand-in service that issues the transaction cookie and accepts exactly one consume, so the two-click flow, replay, and stale grants are exercised |
-| Authelia | a forward-auth stand-in answering only for a registered owner session |
+| Owner auth | a forward-auth stand-in answering only for a registered owner session |
 
 Deliberately different, and why:
 
-- **Real Authelia and Caddy are L3.** This layer checks the console's own
+- **Real owner-auth and Caddy are L3.** This layer checks the console's own
   browser-facing behaviour; redirects, cookies, and forward-auth seams are L3.
 - **The genuine WebAuthn ceremony is not performed.** The stand-in plays the
   service, not the authenticator; the virtual-authenticator ceremony is an L3
@@ -163,7 +163,7 @@ Today's bugs and the tests that keep them fixed:
 
 ## Still missing
 
-1. **L3**: real Caddy and Authelia, including a virtual-authenticator WebAuthn
+1. **L3**: real Caddy and owner-auth, including a virtual-authenticator passkey
    ceremony and the forward-auth redirect seams.
 2. **L4**: the VM rehearsal runs the installers in order with a real kernel and
    SELinux enforcing, but socket peer authorization, the host's exact package
@@ -171,33 +171,31 @@ Today's bugs and the tests that keep them fixed:
 
 ## Layer 3 — the real edge
 
-Layers 1 and 2 stand in for the edge. This layer runs the edge itself: the
-pinned Authelia build with a generated scratch configuration (file backend,
-`two_factor` on `/lock`, the production cookie name and flags), real Caddy with
-`forward_auth` in front of the console, a self-signed certificate for a scratch
-host, and Chromium with a CDP virtual authenticator. The passkey is registered
-through Authelia's own UI — including the one-time-code identity verification,
-read from the scratch notifier file — so a real WebAuthn assertion reaches the
-server and the session really becomes two-factor.
+Layers 1 and 2 stand in for the edge. This layer runs the real root-owned
+passkey service with a generated scratch configuration and one-time enrollment
+code, real Caddy with `forward_auth` in front of the console, a self-signed
+certificate for a scratch host, and Chromium with a CDP virtual authenticator.
+The passkey is enrolled through the new service's own UI, so a real assertion
+reaches the server before the console session is accepted. Repository decisions
+still use the layer-2 grant stand-in; `owner-auth/test-local` covers real fresh
+action grants separately.
 
 `scripts/e2e/edge.py` builds the stack; `scripts/e2e/edge_driver.mjs` drives the
 browser; `scripts/test_e2e_edge.py` holds the scenarios:
 
-- anonymous request to `/lock/merge/` → 302 to the portal, never the console;
-- password-only session → still denied;
-- session cookie carries `Secure`, `HttpOnly`, and `SameSite=Strict`;
-- full password + passkey → the console page renders;
-- a browser `Merge` through Caddy and Authelia → exactly one publication.
+- anonymous request to `/lock/merge/` → redirect to passkey login, never the console;
+- invalid session → still denied;
+- login page has no password form;
+- full passkey enrollment and login → the console page renders;
+- a browser `Merge` through Caddy and passkey auth → exactly one publication.
 
-Provisioning: `caddy`, `authelia`, `openssl`, `node`, and `playwright-core`
-against a cached Chromium. The tests skip when `E2E_PLAYWRIGHT_CORE` or
-`E2E_CHROMIUM` are unset, and skip the whole module when the binaries are
-missing.
+Provisioning: `caddy`, `openssl`, `node`, and `playwright-core` against a cached
+Chromium. The tests skip when `E2E_PLAYWRIGHT_CORE` or `E2E_CHROMIUM` are unset,
+and skip the whole module when Caddy is missing.
 
 Not covered: the installed units, socket peer authorization, SELinux labels,
-installer ordering, and the fresh-authorization service's own session proof
-against Authelia (the layer-3 stack uses the layer-2 ceremony stand-in, so the
-grant is minted by the harness). Those are L4.
+installer ordering, and real action grants in this particular stack. Those are
+covered by L4 and the dedicated passkey integration test respectively.
 
 ## Red-green rule
 
@@ -247,8 +245,8 @@ scripts/e2e/installer_rehearsal.sh \
 ```
 
 It needs qemu on the host (`qemu-system-aarch64`, `qemu-img`, `cloud-utils`,
-`edk2-aarch64`) and network access, because the fresh-authorization installer
-downloads and builds pinned Authelia. Run it as the owner account: it reads the
+`edk2-aarch64`) and network access, because the owner-auth installer downloads
+hash-pinned Python wheels. Run it as the owner account: it reads the
 approved checkouts' private `.git` metadata.
 
 ### Substrate
@@ -272,13 +270,9 @@ nothing is written back to the checkouts.
   so a slow TCG run is never mistaken for a hang.
 - **Interface.** The rehearsal keeps `--approved-diary`, `--approved-scripts` and
   `--keep`, and adds `--accel`, `--cache-dir` and `--case both|happy|negative`.
-  The negative case needs no Authelia build, so it is the cheap one to run while
-  debugging.
-- **Measured (TCG, no `/dev/kvm`, 4 vCPU / 2 GiB).** Prepared base, once: ~10
-  minutes. Happy path: ~55 minutes, almost all of it Authelia's `go test` and
-  `go build`. Negative case: ~12 minutes. With KVM these should return to the
-  15–25-minute figure the container rehearsal quoted, but that is unmeasured
-  here.
+  The negative case needs no WebAuthn runtime download, so it is the cheap one to run while
+  debugging. Timing depends on the guest and package cache; TCG is not a
+  production performance measurement.
 
 What it does:
 
@@ -291,7 +285,7 @@ What it does:
    kernel), and a working nftables.
 4. Runs, in order: `systemd/install-audit-root`,
    `systemd/install-network-audit-root`, `systemd/install-controller-root`,
-   `authelia/install`, `systemd/install-owner-ui-root` — from the approved tree,
+   `owner-auth/install`, `systemd/install-owner-ui-root` — from the approved tree,
    with each installer bounded by a timeout and its output kept in the scratch
    directory. AUD-02 precedes CTL-01 because the controller's startup failsafe
    verifies the NFLOG forwarder, and a *missing* unit answers `systemctl
@@ -326,9 +320,9 @@ and scratch directory for inspection.
 - **Socket peer authorization** is exercised only as root inside the guest; the
   host's UID mapping and group policy are not.
 - **No host services are touched**: this is not a reboot, lock-transition, or
-  tailnet test, and Caddy/Authelia's live routing stays with L3.
-- The fresh-authorization service's own session proof against Authelia is L3's
-  stand-in, not the installed unit.
+  tailnet test, and Caddy/owner-auth live routing stays with L3.
+- The installed unit's owner enrollment and a real action grant require the dedicated
+  browser integration and deployed owner acceptance.
 - **TCG says nothing about performance.** Without `/dev/kvm` the guest runs in
   software emulation, so the runtime is not a production measurement.
 - **The guest's SELinux policy is what makes the run slow-sensitive.** The
@@ -343,7 +337,7 @@ The rehearsal cannot cover these; verify them by hand after deploying:
 
 1. `systemctl is-active` for the audit daemon, controller, console and executor
    socket, then `/lock/health` through Caddy over the tailnet origin.
-2. The console page renders behind two-factor Authelia, and an anonymous request
+2. The console page renders behind passkey authentication, and an anonymous request
    is redirected, not served.
 3. One real merge through the page: the root-served confirmation page names the
    repository and both OIDs; the trusted journal shows `merge_console.decision`

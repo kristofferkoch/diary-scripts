@@ -54,7 +54,7 @@ unless both installed services carry the repository-aware code.
 1. Approve the `diary-scripts` change and synchronize the approved checkout.
 2. `install-audit-root` — the audit daemon must accept the `repository` field, or
    every decision fails closed before any repository operation.
-3. `authelia/install` — the fresh service must bind the repository on begin and
+3. `owner-auth/install` — the fresh service must bind the repository on begin and
    consume, or the ceremony is rejected.
 4. Approve the diary pointer so the executor unit's `AGENT_MERGE_DIARY_*`
    environment exists in the approved checkout.
@@ -68,7 +68,7 @@ The local `agent-merge-approve` commands remain available throughout.
 CTL-07 must inject an owner-authorization callable. Every Merge or Deny decision
 must return an `OwnerGrant` for the requested action, exact queue OID, and exact
 approved-base OID before this module reads the queue for a decision. Browser
-fields, DSH/Kimi sessions or tokens, an ordinary two-factor cookie, and
+fields, DSH/Kimi sessions or tokens, an ordinary read-session cookie, and
 agent-supplied OIDs must not be translated into a grant. The existing CTL-08
 transaction is unlock-specific; CTL-07 must provide an
 action-queue-and-base-bound fresh authorization flow rather than presenting an
@@ -189,14 +189,14 @@ publication authority:
    the console.
 3. **Fresh grant** (root-owned `diary-fresh-unlock`, CTL-08 pattern). A merge or
    deny transaction is created with `purpose=merge` and bound to the action plus
-   the exact queue and approved-base OIDs. The owner must complete a forced
-   password + user-verified WebAuthn ceremony (`/lock/merge/begin` →
-   Authelia → `/lock/merge/return`). At decision time the host consumes it
+   the exact queue and approved-base OIDs. The owner must complete a fresh
+   user-verified passkey ceremony (`/lock/merge/begin` →
+   `/lock/auth/` → `/lock/merge/return`). At decision time the host consumes it
    (`/lock/merge/consume`), which is single-use and session-bound, and the
    executor independently asks the root-owned verifier socket whether that exact
    grant was consumed. An unlock transaction cannot be consumed as a merge
    grant, and a merge grant cannot be consumed at the unlock endpoint.
-   `begin` requires a live owner two-factor session, so an anonymous caller
+   `begin` requires a live owner passkey session, so an anonymous caller
    cannot fill the bounded live-transaction table and starve the owner's only
    merge path; it accepts either the JSON API call or the console's plain
    same-origin form. `return` renders a page from the root-owned service that

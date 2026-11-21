@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Independent Authelia-protected review, unlock, and attendance UI."""
+"""Independent passkey-protected review, unlock, and attendance UI."""
 from __future__ import annotations
 
 import argparse
@@ -162,7 +162,7 @@ class UnlockFailed(OwnerUIError):
 class Config:
     owner_username: str
     public_origin: str
-    authelia_backend: str
+    auth_backend: str
     fresh_backend: str
     session_cookie: str
 
@@ -183,10 +183,10 @@ def load_config(
     with Path(path).open("rb") as handle:
         raw = tomllib.load(handle)
     allowed = {
-        "owner_username", "public_origin", "authelia_backend",
-        "session_cookie", "transaction_ttl_seconds",
+        "owner_username", "public_origin", "auth_backend",
+        "session_cookie", "transaction_ttl_seconds", "session_ttl_seconds",
     }
-    required = allowed - {"transaction_ttl_seconds"}
+    required = allowed - {"transaction_ttl_seconds", "session_ttl_seconds"}
     if set(raw) - allowed or not required <= set(raw):
         raise OwnerUIError("unknown or incomplete lock UI configuration")
     values = {key: raw[key] for key in required}
@@ -197,11 +197,11 @@ def load_config(
         raise OwnerUIError("public origin must be an HTTPS origin without a path")
     cookie = values["session_cookie"]
     if not cookie.isascii() or not cookie.replace("_", "a").replace("-", "a").isalnum():
-        raise OwnerUIError("invalid Authelia session cookie name")
+        raise OwnerUIError("invalid session cookie name")
     return Config(
         owner_username=values["owner_username"],
         public_origin=values["public_origin"].rstrip("/"),
-        authelia_backend=_loopback_http_origin(values["authelia_backend"], "Authelia backend"),
+        auth_backend=_loopback_http_origin(values["auth_backend"], "owner authorization backend"),
         fresh_backend=_loopback_http_origin(fresh_backend, "fresh authorization backend"),
         session_cookie=cookie,
     )
@@ -235,7 +235,7 @@ def _request(
         connection.close()
 
 
-class AutheliaClient:
+class OwnerAuthClient:
     def __init__(self, config: Config):
         self.config = config
         self.public = urllib.parse.urlsplit(config.public_origin)
@@ -243,7 +243,7 @@ class AutheliaClient:
     def verify_owner(self, cookie_header: str | None, method: str, uri: str) -> None:
         session = _cookies(cookie_header).get(self.config.session_cookie, "")
         if not session:
-            raise AuthorizationError("an owner Authelia session is required")
+            raise AuthorizationError("an owner passkey session is required")
         headers = {
             "X-Forwarded-Method": method,
             "X-Forwarded-Proto": "https",
@@ -251,9 +251,8 @@ class AutheliaClient:
             "X-Forwarded-URI": uri,
             "Cookie": f"{self.config.session_cookie}={session}",
         }
-        query = urllib.parse.urlencode({"authelia_url": f"{self.config.public_origin}/authelia/"})
         status, response_headers, _ = _request(
-            self.config.authelia_backend, "GET", f"/api/authz/forward-auth?{query}", headers,
+            self.config.auth_backend, "GET", "/lock/auth/forward-auth", headers,
         )
         groups = {item.strip() for item in response_headers.get("remote-groups", "").split(",")}
         if (
@@ -261,7 +260,7 @@ class AutheliaClient:
             or response_headers.get("remote-user") != self.config.owner_username
             or "lock-owner" not in groups
         ):
-            raise AuthorizationError("an owner two-factor Authelia session is required")
+            raise AuthorizationError("an owner passkey session is required")
 
 
 class FreshAuthorizationClient:
@@ -467,7 +466,7 @@ class OwnerUIServer(ThreadingHTTPServer):
         self.config = config
         self.controller = controller
         self.reports = reports
-        self.authelia = AutheliaClient(config)
+        self.auth = OwnerAuthClient(config)
         self.fresh = fresh or FreshAuthorizationClient(config)
         self.acknowledgements = AcknowledgementStore(acknowledgement_clock)
         self.request_slots = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
@@ -497,7 +496,7 @@ class OwnerUIServer(ThreadingHTTPServer):
 
 
 class OwnerUIHandler(BaseHTTPRequestHandler):
-    server: OwnerUIServer  # ty: ignore[invalid-mutable-override]
+    server: OwnerUIServer
     protocol_version = "HTTP/1.1"
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -628,7 +627,7 @@ class OwnerUIHandler(BaseHTTPRequestHandler):
             if method == "GET" and self.path == "/lock/health":
                 self._json(200, {"status": "ok"})
                 return
-            self.server.authelia.verify_owner(self.headers.get("Cookie"), method, self.path)
+            self.server.auth.verify_owner(self.headers.get("Cookie"), method, self.path)
             if method == "GET" and self.path == "/lock/workflow.js":
                 self._response(200, "text/javascript; charset=utf-8", WORKFLOW_JS.encode("utf-8"))
             elif method == "POST" and self.path == "/lock/api/lock":

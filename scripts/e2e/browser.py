@@ -38,7 +38,7 @@ def loopback_origin(port: int) -> str:
     return "http://" + LOOPBACK_HOST + ":" + str(port)
 
 
-SESSION_COOKIE = "diary_lock_authelia_session"
+SESSION_COOKIE = "diary_lock_session"
 TRANSACTION_COOKIE = ui.TRANSACTION_COOKIE
 OWNER = "owner"
 OWNER_GROUPS = "lock-owner"
@@ -47,8 +47,8 @@ OWNER_GROUPS = "lock-owner"
 # --------------------------------------------------------------------- services
 
 
-class FakeAuthelia:
-    """Forward-auth stand-in: 200 only for the owner's two-factor session."""
+class FakeOwnerAuth:
+    """Forward-auth stand-in: 200 only for the owner's passkey session."""
 
     def __init__(self) -> None:
         self.sessions: set[str] = set()
@@ -139,7 +139,7 @@ class Grants:
 class FakeFresh:
     """The merge ceremony service: begin issues a transaction, consume burns it."""
 
-    def __init__(self, grants: Grants, sessions: set[str], public_origin: str) -> None:
+    def __init__(self, grants: Grants, sessions: Any, public_origin: str) -> None:
         self.grants = grants
         self.sessions = sessions
         self.public_origin = public_origin
@@ -179,7 +179,11 @@ class FakeFresh:
                     queue_oid = (fields.get("queue_oid") or [""])[0]
                     base_oid = (fields.get("base_oid") or [""])[0]
                     session = _cookie_value(self.headers.get("Cookie", ""), SESSION_COOKIE)
-                    if session not in state.sessions or repo not in {"scripts", "diary"}:
+                    valid_session = (
+                        state.sessions(session) if callable(state.sessions)
+                        else session in state.sessions
+                    )
+                    if not valid_session or repo not in {"scripts", "diary"}:
                         self._send(403, b'{"error":"fresh authorization required"}')
                         return
                     grant = state.grants.mint(repo, action, queue_oid, base_oid)
@@ -346,7 +350,7 @@ class BrowserStack:
     scratch: Path
     harness_stack: harness.Stack
     grants: Grants
-    authelia: FakeAuthelia
+    owner_auth: FakeOwnerAuth
     fresh: FakeFresh
     console: ui.ConsoleServer
     executor_server: ExecutorServer
@@ -358,7 +362,7 @@ class BrowserStack:
 
     def session(self) -> str:
         value = uuid.uuid4().hex
-        self.authelia.sessions.add(value)
+        self.owner_auth.sessions.add(value)
         return value
 
     def preauthorize(self, repo: str, action: str, queue_oid: str, base_oid: str) -> str:
@@ -377,7 +381,7 @@ class BrowserStack:
         self.executor_server.shutdown()
         self.executor_server.server_close()
         self.fresh.close()
-        self.authelia.close()
+        self.owner_auth.close()
         self.harness_stack.close()
 
 
@@ -386,11 +390,11 @@ def start(base: Path) -> BrowserStack:
     stack = harness.build_stack(base)
     try:
         grants = Grants()
-        authelia = FakeAuthelia()
+        owner_auth = FakeOwnerAuth()
         # The console needs the proxy origin before the proxy exists; bind the
         # proxy first so its port is known, then point the config at it.
         proxy = FrontProxy(0, 0)
-        fresh = FakeFresh(grants, authelia.sessions, loopback_origin(proxy.server_port))
+        fresh = FakeFresh(grants, owner_auth.sessions, loopback_origin(proxy.server_port))
         proxy.fresh_port = fresh.server.server_port
 
         socket_path = str(stack.scratch.path("executor.sock"))
@@ -400,7 +404,7 @@ def start(base: Path) -> BrowserStack:
         config = ui.Config(
             owner_username=OWNER,
             public_origin=loopback_origin(proxy.server_port),
-            authelia_backend=authelia.url,
+            auth_backend=owner_auth.url,
             fresh_backend=fresh.url,
             session_cookie=SESSION_COOKIE,
         )
@@ -416,6 +420,6 @@ def start(base: Path) -> BrowserStack:
         stack.close()
         raise
     return BrowserStack(
-        stack.scratch.root, stack, grants, authelia, fresh, console,
+        stack.scratch.root, stack, grants, owner_auth, fresh, console,
         executor_server, proxy,
     )

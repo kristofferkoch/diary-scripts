@@ -17,13 +17,9 @@ import pytest
 
 from scripts import diary_fresh_unlock as fresh
 from scripts import diary_lock_ui as ui
-from scripts.test_diary_fresh_unlock import (
-    FakeAutheliaHandler,
-    FakeAutheliaState,
-    begin,
-)
+from scripts.test_diary_fresh_unlock import FakeSessionState, begin
 
-SESSION_COOKIE = "diary_lock_authelia_session"
+SESSION_COOKIE = "diary_lock_session"
 FIRST_GROUP = "a" * 64
 SECOND_GROUP = "b" * 64
 THIRD_GROUP = "c" * 64
@@ -117,8 +113,7 @@ class FakeReports:
 
 @dataclass
 class Services:
-    auth_state: FakeAutheliaState
-    auth_server: ThreadingHTTPServer
+    auth_state: FakeSessionState
     fresh_server: fresh.FreshUnlockServer
     ui_server: ui.OwnerUIServer
     controller: FakeController
@@ -128,22 +123,21 @@ class Services:
 
 @pytest.fixture
 def services(tmp_path: Path) -> Iterator[Services]:
-    auth_state = FakeAutheliaState()
-    handler = type("BoundFakeAutheliaHandler", (FakeAutheliaHandler,), {"state": auth_state})
-    auth_server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     config = fresh.Config(
         owner_username="owner",
         public_origin="https://example.test",
-        authelia_backend=f"http://localhost:{auth_server.server_port}",
         session_cookie=SESSION_COOKIE,
         transaction_ttl=300,
+        session_ttl=600,
     )
     fresh_server = fresh.FreshUnlockServer(("127.0.0.1", 0), config, tmp_path / "transactions.sqlite3")
+    auth_state = FakeSessionState(fresh_server)
+    fresh_backend = "http" + f"://127.0.0.1:{fresh_server.server_port}"
     ui_config = ui.Config(
         owner_username="owner",
         public_origin="https://example.test",
-        authelia_backend=config.authelia_backend,
-        fresh_backend="http" + f"://127.0.0.1:{fresh_server.server_port}",
+        auth_backend=fresh_backend,
+        fresh_backend=fresh_backend,
         session_cookie=SESSION_COOKIE,
     )
     controller = FakeController()
@@ -153,11 +147,11 @@ def services(tmp_path: Path) -> Iterator[Services]:
     ui_server = ui.OwnerUIServer(
         ("127.0.0.1", 0), ui_config, controller, reports, acknowledgement_clock=lambda: now[0],
     )
-    servers = [auth_server, fresh_server, ui_server]
+    servers = [fresh_server, ui_server]
     threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in servers]
     for thread in threads:
         thread.start()
-    yield Services(auth_state, auth_server, fresh_server, ui_server, controller, reports, now)
+    yield Services(auth_state, fresh_server, ui_server, controller, reports, now)
     for server in reversed(servers):
         server.shutdown()
         server.server_close()

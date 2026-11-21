@@ -29,8 +29,8 @@ from typing import Any
 from scripts import agent_merge_console as console
 from scripts import diary_lock_ui as owner_ui
 from scripts.diary_lock_ui import (
-    AutheliaClient,
     Config,
+    OwnerAuthClient,
     _cookies,
     load_config,
 )
@@ -156,12 +156,12 @@ class FreshGrantClient:
             connection.close()
         if status != 204:
             raise AuthorizationError(
-                "a fresh password + WebAuthn authorization for this exact decision is required"
+                "a fresh passkey authorization for this exact decision is required"
             )
 
 
 class CsrfStore:
-    """Bounded, expiring CSRF tokens bound to the owner's Authelia session."""
+    """Bounded, expiring CSRF tokens bound to the owner's passkey session."""
 
     def __init__(self, clock: Callable[[], float] = time.time) -> None:
         self.clock = clock
@@ -280,7 +280,7 @@ def render_authorize(action: str, queue_oid: str, base_oid: str, repo: str) -> s
 </head>
 <body>
 <h1>Fresh authorization required</h1>
-<p>This decision needs a password + user-verified WebAuthn ceremony bound to
+<p>This decision needs a passkey ceremony bound to
 exactly this action and OID pair:</p>
 <dl>
 <dt>Action</dt><dd><strong>{html.escape(verb)}</strong></dd>
@@ -295,7 +295,7 @@ own page. Nothing is merged until you confirm here again.</p>
 <input type="hidden" name="action" value="{html.escape(action, quote=True)}">
 <input type="hidden" name="queue_oid" value="{html.escape(queue_oid, quote=True)}">
 <input type="hidden" name="base_oid" value="{html.escape(base_oid, quote=True)}">
-<button type="submit">Sign in with password + passkey</button>
+<button type="submit">Tap passkey to authorize</button>
 </form>
 <p><a href="{PAGE_PATH}">Cancel</a></p>
 </body>
@@ -353,7 +353,7 @@ class ConsoleServer(ThreadingHTTPServer):
         self.config = config
         self.executor = executor
         self.fresh = fresh
-        self.authelia = AutheliaClient(config)
+        self.auth = OwnerAuthClient(config)
         self.csrf = csrf or CsrfStore()
         self.request_slots = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
         super().__init__(address, ConsoleHandler)
@@ -382,7 +382,7 @@ class ConsoleServer(ThreadingHTTPServer):
 
 
 class ConsoleHandler(BaseHTTPRequestHandler):
-    server: ConsoleServer  # ty: ignore[invalid-mutable-override]
+    server: ConsoleServer
     protocol_version = "HTTP/1.1"
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -444,7 +444,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
     def _page(self, notice: str | None = None, repo: str | None = None) -> None:
         cookie = self.headers.get("Cookie")
-        self.server.authelia.verify_owner(cookie, "GET", self.path)
+        self.server.auth.verify_owner(cookie, "GET", self.path)
         repo = repo or _selected_repo(self.path)
         if repo not in REPOS:
             raise AuthorizationError("review repository must be scripts or diary")
@@ -468,7 +468,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
     def _decide(self) -> None:
         cookie = self.headers.get("Cookie")
-        self.server.authelia.verify_owner(cookie, "POST", self.path)
+        self.server.auth.verify_owner(cookie, "POST", self.path)
         fields = self._require_form_action()
         # A browser submits the submit button's name/value too, and the reviewed
         # form uses name="confirm" on both buttons. Accept exactly the fields the
@@ -490,7 +490,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             raise AuthorizationError("decision requires full reviewed OIDs")
         digest = session_digest(cookie, self.server.config.session_cookie)
         if not self.server.csrf.consume(fields["csrf"], digest):
-            # A ceremony signs the Authelia session out and back in, so a form
+            # A ceremony replaces the owner session, so a form
             # rendered before it carries a token bound to the old session. That
             # is a stale form, not an attack: re-render the same reviewed pair
             # with a fresh token instead of dead-ending on "Refused".
@@ -501,7 +501,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             )
             return
         # Check the reviewed pair before spending the one-time grant. A stale
-        # queue or base must cost a re-review, not a fresh password+passkey.
+        # queue or base must cost a re-review, not another fresh passkey tap.
         snapshot_reply = self.server.executor.request({"cmd": "snapshot", "repo": repo})
         if not snapshot_reply.ok or snapshot_reply.snapshot is None:
             raise DecisionUnavailable("the merge review is unavailable")
@@ -548,7 +548,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._html(exc.status, render_result(exc.code))
         except owner_ui.AuthorizationError:
             # The owner-UI client raises its own authorization error when the
-            # presented session is missing or not a two-factor owner session.
+            # presented session is missing or not an owner passkey session.
             # Mapping it to "unavailable" told the browser the service was down
             # instead of asking for authorization.
             self._html(403, render_result("unauthorized"))

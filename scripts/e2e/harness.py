@@ -41,7 +41,6 @@ FORBIDDEN_PREFIXES = (
     "/home/kek/diary",
     "/home/kek/diary-scripts-approved",
     "/etc/diary",
-    "/etc/authelia",
     "/run/diary-",
     "/run/systemd/journal",
     "/var/lib/diary",

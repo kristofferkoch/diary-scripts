@@ -24,6 +24,7 @@ dependencies = [
     "playwright>=1.49",
     "astral>=3.2",
     "grpcio>=1.76",
+    "webauthn>=2.7,<3",
 ]
 
 # Console entry points — run as `uv run <name>` (no more `uv run scripts/foo.py`),

@@ -1,14 +1,14 @@
 # Read-only lock dashboard
 
 `diary-lock-dashboard` serves the CTL-09 owner dashboard at `/lock/` and its JSON
-snapshot at `/lock/api/status`. Caddy forwards both only after the existing
-Authelia `lock-owner` `two_factor` policy succeeds. There is no TCP listener:
+snapshot at `/lock/api/status`. Caddy forwards both only after the owner-auth
+service verifies the `lock-owner` passkey session. There is no TCP listener:
 Caddy connects to `/run/diary-lock-dashboard/http.sock`. The runtime directory is
 `diary-lock-dashboard:caddy` mode `0750`, the socket is mode `0660`, and the
 service verifies the kernel `SO_PEERCRED` UID against the actual `caddy` account
 before trusting `Remote-User` and `Remote-Groups`. A non-Caddy local process
 cannot forge those headers to read the dashboard, and even Caddy must supply the
-owner headers established by Authelia. DSH/Kimi cookies and tokens are not
+owner headers established by passkey authentication. DSH/Kimi cookies and tokens are not
 accepted.
 
 The page prominently states **Enforcement: dark / audit-only**. Controller state
@@ -77,7 +77,7 @@ rejects forged owner headers from root and owner peers and rejects a Caddy peer
 that lacks authenticated owner headers. Denial checks alone also pass when Caddy
 cannot reach the socket at all (mode, SELinux label, or a dead snapshot reader),
 so the installer additionally proves the positive Caddy path: as the `caddy`
-account, with the owner headers Caddy forwards after Authelia, it must read
+account, with the owner headers Caddy forwards after passkey authentication, it must read
 `/lock/api/status` and render `/lock/` with the dark enforcement label. The owner
 peer probe proves filesystem denial, because that account cannot traverse the
 runtime directory. That positive probe is still a DAC/functionality check: the
@@ -96,13 +96,13 @@ script can abort the status path or the rest of the page.
 
 Complete these deployed checks before deleting CTL-09:
 
-1. Complete password + user-verified WebAuthn authentication and open `/lock/`.
+1. Complete a user-verified passkey ceremony and open `/lock/`.
    Compare the displayed state, expiry, counts, and grouped metadata with
    `diary-lock status` and `diary-audit baseline --since 24h --json` run as the
    owner. Compare `/lock/api/status` with the same trusted responses.
-2. Verify anonymous, first-factor-only, non-owner, DSH, and Kimi sessions cannot
-   retrieve the page or API through Caddy. Confirm the existing Authelia policy
-   still requires `lock-owner` and `two_factor` for every `/lock/` path. Repeat
+2. Verify anonymous, invalid, non-owner, DSH, and Kimi sessions cannot
+   retrieve the page or API through Caddy. Confirm the owner-auth policy
+   still requires `lock-owner` and a live passkey session for every `/lock/` path. Repeat
    the installer's forged-header probes as unauthorized root/owner peers and
    verify a Caddy peer without owner headers is also denied.
 3. Stop or disconnect each source in a controlled window. The corresponding

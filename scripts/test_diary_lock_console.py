@@ -11,7 +11,6 @@ import time
 import urllib.parse
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -21,9 +20,9 @@ from scripts import agent_merge_console as console
 from scripts import diary_fresh_unlock as fresh
 from scripts import diary_lock_console_ui as ui
 from scripts import diary_merge_console_service as executor
-from scripts.test_diary_fresh_unlock import FakeAutheliaHandler, FakeAutheliaState
+from scripts.test_diary_fresh_unlock import FakeSessionState
 
-SESSION_COOKIE = "diary_lock_authelia_session"
+SESSION_COOKIE = "diary_lock_session"
 QUEUE_OID = "a" * 40
 BASE_OID = "b" * 40
 OTHER_OID = "c" * 40
@@ -59,7 +58,7 @@ class FakeExecutor(ui.ExecutorClient):
 
 @dataclass
 class Services:
-    auth_state: FakeAutheliaState
+    auth_state: FakeSessionState
     fresh_server: fresh.FreshUnlockServer
     ui_server: ui.ConsoleServer
     executor: FakeExecutor
@@ -68,30 +67,29 @@ class Services:
 
 @pytest.fixture
 def services(tmp_path: Path) -> Iterator[Services]:
-    auth_state = FakeAutheliaState()
-    handler = type("BoundFakeAutheliaHandler", (FakeAutheliaHandler,), {"state": auth_state})
-    auth_server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     config = fresh.Config(
         owner_username="owner",
         public_origin="https://example.test",
-        authelia_backend=f"http://localhost:{auth_server.server_port}",
         session_cookie=SESSION_COOKIE,
         transaction_ttl=300,
+        session_ttl=600,
     )
     fresh_server = fresh.FreshUnlockServer(("127.0.0.1", 0), config, tmp_path / "transactions.sqlite3")
+    auth_state = FakeSessionState(fresh_server)
     fake = FakeExecutor()
+    fresh_backend = "http" + f"://127.0.0.1:{fresh_server.server_port}"
     ui_config = ui.Config(
         owner_username="owner",
         public_origin="https://example.test",
-        authelia_backend=config.authelia_backend,
-        fresh_backend="http" + f"://127.0.0.1:{fresh_server.server_port}",
+        auth_backend=fresh_backend,
+        fresh_backend=fresh_backend,
         session_cookie=SESSION_COOKIE,
     )
     ui_server = ui.ConsoleServer(
         ("127.0.0.1", 0), ui_config, fake,
         ui.FreshGrantClient(ui_config.public_origin, ui_config.fresh_backend, SESSION_COOKIE),
     )
-    servers = [auth_server, fresh_server, ui_server]
+    servers = [fresh_server, ui_server]
     threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in servers]
     for thread in threads:
         thread.start()
@@ -639,7 +637,7 @@ def test_anonymous_page_asks_for_authorization_instead_of_reporting_an_outage(
 
 
 def test_first_factor_session_is_refused_as_unauthorized(services: Services) -> None:
-    """Password-only Authelia sessions must read as 403, not 503."""
+    """Requests without a valid owner passkey session must read as 403, not 503."""
     services.auth_state.add("first", level=1, second=0)
     status, body = http_request(
         services.ui_server, "GET", "/lock/merge/",

@@ -372,9 +372,9 @@ def test_expired_ceremony_renders_a_page_not_json(
     config = fresh.Config(
         owner_username=browser.OWNER,
         public_origin=stack.origin,
-        authelia_backend=stack.authelia.url,
         session_cookie=SESSION,
         transaction_ttl=300,
+        session_ttl=600,
     )
     server = fresh.FreshUnlockServer(
         ("127.0.0.1", 0), config, stack.scratch / "fresh-return.sqlite3",

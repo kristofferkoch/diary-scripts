@@ -51,13 +51,13 @@ Usage: installer_rehearsal.sh --approved-diary DIR --approved-scripts DIR [optio
                            host exposes /dev/kvm
   --cache-dir DIR          guest image cache (default: $XDG_CACHE_HOME/diary-e2e)
   --case WHICH             both (default), happy, or negative; the negative case
-                           needs no Authelia build, so it is the cheap one to run
+                           needs no WebAuthn runtime download, so it is the cheap one to run
                            while debugging
   --keep                   keep the guest disks, console logs and scratch directory
   -h, --help               this text
 
 Needs qemu-system-aarch64, qemu-img, cloud-utils and network access (the
-fresh-authorization installer downloads and builds pinned Authelia). Nothing on
+fresh-authorization installer downloads hash-pinned Python wheels). Nothing on
 this host is modified: the guest is a throwaway overlay of a cached prepared
 image, the approved checkouts are mounted read-only, and all state lives in the
 scratch directory.
@@ -249,7 +249,7 @@ positive_case() {
     run_installer "$HAPPY_VM" controller \
         "$TARGET_DIARY/systemd/install-controller-root"
     run_installer "$HAPPY_VM" fresh \
-        "$TARGET_DIARY/authelia/install"
+        "$TARGET_DIARY/owner-auth/install"
     # dsh/agent-uid/install normally provides the root-owned approval client and
     # its helper module; the rehearsal runs only the installers, so lay down the
     # same pair. Installing only the entry point leaves the console unable to
@@ -270,6 +270,8 @@ positive_case() {
         systemctl is-active diary-network-auditd
     expect_in_guest "$HAPPY_VM" "controller active and locked" \
         systemctl is-active diary-lockd diary-locked
+    expect_in_guest "$HAPPY_VM" "passkey authorization active" systemctl is-active diary-fresh-unlock
+    expect_status "$HAPPY_VM" "passkey health" 200 http://localhost:9092/lock/health
     expect_in_guest "$HAPPY_VM" "console host active" systemctl is-active diary-lock-ui
     expect_status "$HAPPY_VM" "console health" 200 http://localhost:9093/lock/health
     expect_status "$HAPPY_VM" "no unlock route on the console" 404 \

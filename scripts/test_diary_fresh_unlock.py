@@ -1,149 +1,95 @@
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
+import secrets
 import sqlite3
+import struct
 import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+import cbor2
 import pytest
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
 
 from scripts import diary_fresh_unlock as fresh
 
 
-@dataclass
-class FakeSession:
-    username: str = "owner"
-    groups: str = "lock-owner"
-    level: int = 2
-    first: int = 1
-    second: int = 1
-    password: bool = True
-    webauthn: bool = True
-    user_verified: bool = True
-
-
-class FakeAutheliaState:
-    def __init__(self) -> None:
-        self.sessions: dict[str, FakeSession] = {}
+class FakeSessionState:
+    def __init__(self, server: fresh.FreshUnlockServer) -> None:
+        self.server = server
+        self.sessions: dict[str, str] = {}
         self.logout_calls = 0
-        self.logout_status = 200
-        self.logout_body: dict[str, Any] | None = None
-        self.destroy_on_logout = True
-        self.forward_auth_status: int | None = None
         self.logout_entered = threading.Event()
         self.logout_release = threading.Event()
         self.logout_release.set()
+        original_logout = server.passkeys.logout
 
-    def add(self, name: str, **values: Any) -> None:
-        self.sessions[name] = FakeSession(**values)
+        def logout(cookie_header: str | None) -> None:
+            self.logout_calls += 1
+            self.logout_entered.set()
+            self.logout_release.wait(timeout=5)
+            name = fresh._cookies(cookie_header).get(server.config.session_cookie, "")
+            original_logout(cookie_header)
+            self.sessions.pop(name, None)
 
-    def add_fresh(self, name: str, **values: Any) -> None:
-        now = int(time.time())
-        self.add(name, **{"first": now + 1, "second": now + 2, **values})
+        server.passkeys.logout = logout
 
-
-class FakeAutheliaHandler(BaseHTTPRequestHandler):
-    state: FakeAutheliaState
-
-    def log_message(self, format: str, *args: Any) -> None:
-        pass
-
-    def _session(self) -> str:
-        header = self.headers.get("Cookie", "")
-        for item in header.split(";"):
-            name, separator, value = item.strip().partition("=")
-            if separator and name == "diary_lock_authelia_session":
-                return value
-        return ""
-
-    def _reply(self, status: int, value: dict[str, Any], headers: dict[str, str] | None = None) -> None:
-        body = json.dumps(value).encode("ascii")
-        self.send_response(status)
-        for name, item in (headers or {}).items():
-            self.send_header(name, item)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_POST(self) -> None:
-        self.rfile.read(int(self.headers.get("Content-Length", "0")))
-        if self.path != "/authelia/api/logout":
-            self._reply(404, {"status": "KO"})
+    def add(
+        self, name: str, username: str = "owner", level: int = 2,
+        authenticated_at: float | None = None, transaction_id: str | None = None,
+        **values: Any,
+    ) -> None:
+        self.sessions[name] = username
+        if level != 2:
             return
-        self.state.logout_calls += 1
-        self.state.logout_entered.set()
-        self.state.logout_release.wait(timeout=5)
-        if self.state.destroy_on_logout:
-            self.state.sessions.pop(self._session(), None)
-        body = self.state.logout_body or {"status": "OK", "data": {"safeTargetURL": False}}
-        self._reply(self.state.logout_status, body)
-
-    def do_GET(self) -> None:
-        session_name = self._session()
-        session = self.state.sessions.get(session_name)
-        if self.path.startswith("/api/authz/forward-auth?"):
-            if self.state.forward_auth_status is not None:
-                self._reply(self.state.forward_auth_status, {"status": "KO"})
-                return
-            if session is None or session.level != 2:
-                self._reply(401, {"status": "KO"})
-                return
-            self._reply(
-                200, {"status": "OK"},
-                {"Remote-User": session.username, "Remote-Groups": session.groups},
+        now = time.time()
+        if "second" in values:
+            authenticated_at = values["second"]
+        with sqlite3.connect(self.server.transactions.path) as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO passkey_sessions "
+                "(token_hash, owner, authenticated_at, expires_at, transaction_id) VALUES (?, ?, ?, ?, ?)",
+                (
+                    fresh._digest(name), username,
+                    authenticated_at if authenticated_at is not None else now - 10,
+                    now + 600, transaction_id,
+                ),
             )
-            return
-        if self.path == "/authelia/api/state":
-            if session is None:
-                self._reply(403, {"status": "KO"})
-                return
-            self._reply(200, {"status": "OK", "data": {
-                "username": session.username,
-                "authentication_level": session.level,
-                "factor_knowledge": session.password,
-                "first_factor_authn_timestamp": session.first,
-                "second_factor_authn_timestamp": session.second,
-                "username_and_password": session.password,
-                "webauthn": session.webauthn,
-                "webauthn_user_verified": session.user_verified,
-            }})
-            return
-        self._reply(404, {"status": "KO"})
+
+    def add_fresh(self, name: str, transaction_id: str | None = None, **values: Any) -> None:
+        if transaction_id is None:
+            with sqlite3.connect(self.server.transactions.path) as connection:
+                row = connection.execute(
+                    "SELECT id FROM transactions WHERE state = 'pending' ORDER BY created_at DESC LIMIT 1"
+                ).fetchone()
+            transaction_id = row[0] if row else None
+        self.add(
+            name, transaction_id=transaction_id,
+            authenticated_at=values.pop("first", time.time() + 1), **values,
+        )
 
 
 @pytest.fixture
-def authelia() -> Iterator[tuple[FakeAutheliaState, ThreadingHTTPServer]]:
-    state = FakeAutheliaState()
-    handler = type("BoundFakeAutheliaHandler", (FakeAutheliaHandler,), {"state": state})
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield state, server
-    server.shutdown()
-    server.server_close()
-    thread.join()
-
-
-@pytest.fixture
-def service(
-    tmp_path: Path, authelia: tuple[FakeAutheliaState, ThreadingHTTPServer],
-) -> Iterator[tuple[fresh.FreshUnlockServer, FakeAutheliaState]]:
-    state, auth_server = authelia
+def service(tmp_path: Path) -> Iterator[tuple[fresh.FreshUnlockServer, FakeSessionState]]:
     config = fresh.Config(
         owner_username="owner",
         public_origin="https://example.test",
-        authelia_backend=f"http://localhost:{auth_server.server_port}",
-        session_cookie="diary_lock_authelia_session",
+        session_cookie="diary_lock_session",
         transaction_ttl=300,
+        session_ttl=600,
     )
-    server = fresh.FreshUnlockServer(("127.0.0.1", 0), config, tmp_path / "transactions.sqlite3")
+    server = fresh.FreshUnlockServer(
+        ("127.0.0.1", 0), config, tmp_path / "transactions.sqlite3",
+        enrollment_code="test-enrollment-code",
+    )
+    state = FakeSessionState(server)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield server, state
@@ -155,12 +101,13 @@ def service(
 def request(
     server: fresh.FreshUnlockServer, method: str, path: str,
     cookies: dict[str, str] | None = None, headers: dict[str, str] | None = None,
+    body: bytes | str | None = None,
 ) -> tuple[int, dict[str, str], list[tuple[str, str]], bytes]:
     connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=6)
     all_headers = dict(headers or {})
     if cookies:
         all_headers["Cookie"] = "; ".join(f"{key}={value}" for key, value in cookies.items())
-    connection.request(method, path, headers=all_headers)
+    connection.request(method, path, headers=all_headers, body=body)
     response = connection.getresponse()
     body = response.read()
     result = response.status, dict(response.getheaders()), response.getheaders(), body
@@ -195,27 +142,27 @@ def begin(
 
 
 def test_full_flow_binds_session_and_rejects_substitution_and_replay(
-    service: tuple[fresh.FreshUnlockServer, FakeAutheliaState],
+    service: tuple[fresh.FreshUnlockServer, FakeSessionState],
 ) -> None:
     server, state = service
     state.add("old")
-    transaction, headers = begin(server, {"diary_lock_authelia_session": "old"})
+    transaction, headers = begin(server, {"diary_lock_session": "old"})
     assert state.logout_calls == 1
     assert "old" not in state.sessions
     location = dict(headers)["Location"]
-    assert location.startswith("https://example.test/authelia/?rd=")
+    assert location.startswith("https://example.test/lock/auth/?rd=")
     assert "%2Flock%2Funlock%2Freturn" in location
 
-    stale = {"diary_lock_authelia_session": "old", fresh.TRANSACTION_COOKIE: transaction}
+    stale = {"diary_lock_session": "old", fresh.TRANSACTION_COOKIE: transaction}
     assert request(server, "GET", "/lock/unlock/return", stale)[0] == 403
 
     state.add_fresh("new")
     state.add_fresh("alternate")
-    current = {"diary_lock_authelia_session": "new", fresh.TRANSACTION_COOKIE: transaction}
+    current = {"diary_lock_session": "new", fresh.TRANSACTION_COOKIE: transaction}
     status, _, _, body = request(server, "GET", "/lock/unlock/return", current)
     assert status == 200
     assert json.loads(body) == {"status": "fresh"}
-    substituted = {"diary_lock_authelia_session": "alternate", fresh.TRANSACTION_COOKIE: transaction}
+    substituted = {"diary_lock_session": "alternate", fresh.TRANSACTION_COOKIE: transaction}
     assert request(
         server, "POST", "/lock/unlock/consume", substituted,
         browser_headers("X-Diary-Unlock-Confirm"),
@@ -231,42 +178,55 @@ def test_full_flow_binds_session_and_rejects_substitution_and_replay(
 
 
 def test_omitted_and_alternate_preexisting_sessions_never_become_fresh(
-    service: tuple[fresh.FreshUnlockServer, FakeAutheliaState],
+    service: tuple[fresh.FreshUnlockServer, FakeSessionState],
 ) -> None:
     server, state = service
     state.add("preexisting")
     transaction, _ = begin(server)
-    cookies = {"diary_lock_authelia_session": "preexisting", fresh.TRANSACTION_COOKIE: transaction}
+    cookies = {"diary_lock_session": "preexisting", fresh.TRANSACTION_COOKIE: transaction}
     assert request(server, "GET", "/lock/unlock/return", cookies)[0] == 403
 
     state.add("a")
-    transaction, _ = begin(server, {"diary_lock_authelia_session": "a"})
+    transaction, _ = begin(server, {"diary_lock_session": "a"})
     assert "a" not in state.sessions and "preexisting" in state.sessions
-    cookies = {"diary_lock_authelia_session": "preexisting", fresh.TRANSACTION_COOKIE: transaction}
+    cookies = {"diary_lock_session": "preexisting", fresh.TRANSACTION_COOKIE: transaction}
     assert request(server, "GET", "/lock/unlock/return", cookies)[0] == 403
 
 
-def test_stale_second_factor_or_missing_user_verification_fails(
-    service: tuple[fresh.FreshUnlockServer, FakeAutheliaState],
+def test_stale_or_transaction_unbound_session_fails(
+    service: tuple[fresh.FreshUnlockServer, FakeSessionState],
 ) -> None:
     server, state = service
     transaction, _ = begin(server)
-    state.add_fresh("stale-webauthn", second=1)
-    cookies = {"diary_lock_authelia_session": "stale-webauthn", fresh.TRANSACTION_COOKIE: transaction}
+    transaction_id = transaction.split(".", 1)[0]
+    state.add("stale-passkey", transaction_id=transaction_id, authenticated_at=1)
+    cookies = {"diary_lock_session": "stale-passkey", fresh.TRANSACTION_COOKIE: transaction}
     assert request(server, "GET", "/lock/unlock/return", cookies)[0] == 403
-    state.add_fresh("no-uv", user_verified=False)
-    cookies = {"diary_lock_authelia_session": "no-uv", fresh.TRANSACTION_COOKIE: transaction}
+    state.add("unbound")
+    cookies = {"diary_lock_session": "unbound", fresh.TRANSACTION_COOKIE: transaction}
+    assert request(server, "GET", "/lock/unlock/return", cookies)[0] == 403
+
+
+def test_session_from_one_transaction_cannot_authorize_another(
+    service: tuple[fresh.FreshUnlockServer, FakeSessionState],
+) -> None:
+    server, state = service
+    first, _ = begin(server)
+    first_id = first.split(".", 1)[0]
+    state.add_fresh("first-session", transaction_id=first_id)
+    second, _ = begin(server)
+    cookies = {"diary_lock_session": "first-session", fresh.TRANSACTION_COOKIE: second}
     assert request(server, "GET", "/lock/unlock/return", cookies)[0] == 403
 
 
 def test_cookie_only_agent_sessions_and_spoofed_headers_fail(
-    service: tuple[fresh.FreshUnlockServer, FakeAutheliaState],
+    service: tuple[fresh.FreshUnlockServer, FakeSessionState],
 ) -> None:
     server, state = service
     transaction, _ = begin(server)
     state.add_fresh("new")
     for cookies in (
-        {"diary_lock_authelia_session": "new"},
+        {"diary_lock_session": "new"},
         {fresh.TRANSACTION_COOKIE: transaction},
         {"dsh_session": "stolen", "kimi_session": "stolen"},
         {"dsh_session": "stolen", fresh.TRANSACTION_COOKIE: transaction},
@@ -277,50 +237,13 @@ def test_cookie_only_agent_sessions_and_spoofed_headers_fail(
         )[0] == 403
     assert request(
         server, "GET", "/lock/unlock/return",
-        {"diary_lock_authelia_session": "new", fresh.TRANSACTION_COOKIE: transaction},
+        {"diary_lock_session": "new", fresh.TRANSACTION_COOKIE: transaction},
         {"Remote-User": "owner", "Remote-Groups": "lock-owner"},
     )[0] == 200
 
 
-@pytest.mark.parametrize(
-    "body,destroy",
-    [
-        ({"status": "KO", "message": "Operation failed"}, True),
-        ({"status": "OK", "data": {"safeTargetURL": False}}, False),
-    ],
-)
-def test_http_200_logout_failure_creates_no_transaction(
-    service: tuple[fresh.FreshUnlockServer, FakeAutheliaState],
-    body: dict[str, Any], destroy: bool,
-) -> None:
-    server, state = service
-    state.add("old")
-    state.logout_body = body
-    state.destroy_on_logout = destroy
-    assert request(
-        server, "POST", "/lock/unlock/begin", {"diary_lock_authelia_session": "old"},
-        browser_headers("X-Diary-Unlock-Begin"),
-    )[0] == 403
-    with sqlite3.connect(server.transactions.path) as connection:
-        assert connection.execute("SELECT count(*) FROM transactions").fetchone()[0] == 0
-
-
-def test_logout_probe_error_creates_no_transaction(
-    service: tuple[fresh.FreshUnlockServer, FakeAutheliaState],
-) -> None:
-    server, state = service
-    state.add("old")
-    state.forward_auth_status = 500
-    assert request(
-        server, "POST", "/lock/unlock/begin", {"diary_lock_authelia_session": "old"},
-        browser_headers("X-Diary-Unlock-Begin"),
-    )[0] == 403
-    with sqlite3.connect(server.transactions.path) as connection:
-        assert connection.execute("SELECT count(*) FROM transactions").fetchone()[0] == 0
-
-
 def test_global_creation_rate_limit_and_live_capacity(
-    service: tuple[fresh.FreshUnlockServer, FakeAutheliaState],
+    service: tuple[fresh.FreshUnlockServer, FakeSessionState],
 ) -> None:
     server, _ = service
     server.begin_rate.limit = 2
@@ -342,7 +265,7 @@ def test_global_creation_rate_limit_and_live_capacity(
 
 
 def test_bounded_request_concurrency(
-    service: tuple[fresh.FreshUnlockServer, FakeAutheliaState],
+    service: tuple[fresh.FreshUnlockServer, FakeSessionState],
 ) -> None:
     server, state = service
     server.request_slots = threading.BoundedSemaphore(1)
@@ -404,12 +327,12 @@ def test_legacy_transactions_are_invalidated_on_schema_upgrade(tmp_path: Path) -
         store.consume("legacy", "secret", "owner", fresh._digest("session"))
 
 
-def test_config_rejects_non_loopback_and_long_lived(tmp_path: Path) -> None:
+def test_config_rejects_long_lived_transactions_and_sessions(tmp_path: Path) -> None:
     base = {
         "owner_username": "owner",
         "public_origin": "https://example.test",
-        "authelia_backend": "http://localhost:9091",
-        "session_cookie": "diary_lock_authelia_session",
+        "auth_backend": "http://localhost:9092",
+        "session_cookie": "diary_lock_session",
     }
     path = tmp_path / "config.toml"
     path.write_text("\n".join(f'{key} = "{value}"' for key, value in base.items()))
@@ -417,7 +340,7 @@ def test_config_rejects_non_loopback_and_long_lived(tmp_path: Path) -> None:
     path.write_text(path.read_text() + "\ntransaction_ttl_seconds = 301\n")
     with pytest.raises(fresh.AuthorizationError):
         fresh.load_config(path)
-    path.write_text(path.read_text().replace("http://localhost:9091", "http://example.test"))
+    path.write_text(path.read_text().replace("transaction_ttl_seconds = 301", "session_ttl_seconds = 3601"))
     with pytest.raises(fresh.AuthorizationError):
         fresh.load_config(path)
 
@@ -516,7 +439,7 @@ def test_existing_rows_gain_the_scripts_repository_on_migration(tmp_path: Path) 
 
 
 def test_merge_return_failure_renders_html_for_the_browser(
-    service: tuple[fresh.FreshUnlockServer, FakeAutheliaState],
+    service: tuple[fresh.FreshUnlockServer, FakeSessionState],
 ) -> None:
     """A missing transaction is a page for the owner, not a JSON API error."""
     server, _ = service
@@ -531,7 +454,7 @@ def test_merge_return_failure_renders_html_for_the_browser(
 
 
 def test_merge_confirmation_page_states_the_expiry(
-    service: tuple[fresh.FreshUnlockServer, FakeAutheliaState],
+    service: tuple[fresh.FreshUnlockServer, FakeSessionState],
 ) -> None:
     server, state = service
     state.add("old")
@@ -546,7 +469,7 @@ def test_merge_confirmation_page_states_the_expiry(
             "Content-Type": "application/json",
             "Origin": "https://example.test",
             "Sec-Fetch-Site": "same-origin",
-            "Cookie": "diary_lock_authelia_session=old",
+            "Cookie": "diary_lock_session=old",
         },
     )
     response = connection.getresponse()
@@ -559,12 +482,182 @@ def test_merge_confirmation_page_states_the_expiry(
     value = transaction.split("=", 1)[1].split(";", 1)[0]
     connection.close()
 
+    status, _, _, login_page = request(
+        server, "GET", "/lock/auth/", {fresh.TRANSACTION_COOKIE: value},
+    )
+    assert status == 200
+    assert b"Merge and publish" in login_page
+    assert b"a" * 40 in login_page and b"b" * 40 in login_page
+
     state.add_fresh("new")
     status, _, _, page = request(
         server, "GET", "/lock/merge/return",
-        {"diary_lock_authelia_session": "new", fresh.TRANSACTION_COOKIE: value},
+        {"diary_lock_session": "new", fresh.TRANSACTION_COOKIE: value},
     )
 
     assert status == 200
     assert b"expires on its own after" in page
     assert b"5 minutes" in page
+
+
+@dataclass
+class VirtualPasskey:
+    key: Any
+    credential_id: bytes
+    sign_count: int = 0
+
+    @classmethod
+    def create(cls) -> VirtualPasskey:
+        return cls(ec.generate_private_key(ec.SECP256R1()), secrets.token_bytes(32))
+
+    def registration(self, options: dict[str, Any], user_verified: bool = True) -> dict[str, Any]:
+        challenge = options["challenge"]
+        client_data = json.dumps({
+            "type": "webauthn.create", "challenge": challenge,
+            "origin": "https://example.test", "crossOrigin": False,
+        }, separators=(",", ":")).encode()
+        numbers = self.key.public_key().public_numbers()
+        cose_key = cbor2.dumps({
+            1: 2, 3: -7, -1: 1,
+            -2: numbers.x.to_bytes(32, "big"), -3: numbers.y.to_bytes(32, "big"),
+        })
+        flags = 0x41 | (0x04 if user_verified else 0)
+        auth_data = (
+            hashlib.sha256(b"example.test").digest() + bytes([flags]) + struct.pack(">I", 0)
+            + bytes(16) + struct.pack(">H", len(self.credential_id)) + self.credential_id + cose_key
+        )
+        attestation = cbor2.dumps({"fmt": "none", "attStmt": {}, "authData": auth_data})
+        return {
+            "id": fresh.bytes_to_base64url(self.credential_id),
+            "rawId": fresh.bytes_to_base64url(self.credential_id),
+            "type": "public-key",
+            "response": {
+                "clientDataJSON": fresh.bytes_to_base64url(client_data),
+                "attestationObject": fresh.bytes_to_base64url(attestation),
+            },
+        }
+
+    def authentication(self, options: dict[str, Any]) -> dict[str, Any]:
+        client_data = json.dumps({
+            "type": "webauthn.get", "challenge": options["challenge"],
+            "origin": "https://example.test", "crossOrigin": False,
+        }, separators=(",", ":")).encode()
+        self.sign_count += 1
+        auth_data = (
+            hashlib.sha256(b"example.test").digest() + b"\x05" + struct.pack(">I", self.sign_count)
+        )
+        signature = self.key.sign(auth_data + hashlib.sha256(client_data).digest(), ec.ECDSA(hashes.SHA256()))
+        return {
+            "id": fresh.bytes_to_base64url(self.credential_id),
+            "rawId": fresh.bytes_to_base64url(self.credential_id),
+            "type": "public-key",
+            "response": {
+                "clientDataJSON": fresh.bytes_to_base64url(client_data),
+                "authenticatorData": fresh.bytes_to_base64url(auth_data),
+                "signature": fresh.bytes_to_base64url(signature),
+                "userHandle": None,
+            },
+        }
+
+
+def passkey_request(
+    server: fresh.FreshUnlockServer, path: str, action: str,
+    cookies: dict[str, str] | None = None, body: dict[str, Any] | None = None,
+) -> tuple[int, dict[str, str], list[tuple[str, str]], bytes]:
+    headers = {
+        "Origin": "https://example.test", "Sec-Fetch-Site": "same-origin",
+        "X-Diary-Passkey-Action": action,
+    }
+    encoded = None
+    if body is not None:
+        encoded = json.dumps(body)
+        headers["Content-Type"] = "application/json"
+    return request(server, "POST", path, cookies, headers, encoded)
+
+
+def cookie_value(headers: list[tuple[str, str]], name: str) -> str:
+    value = next(
+        item for key, item in headers
+        if key.lower() == "set-cookie" and item.startswith(f"{name}=")
+    )
+    assert "Secure" in value and "HttpOnly" in value and "SameSite=Strict" in value
+    assert "Path=/lock" in value
+    return value.split("=", 1)[1].split(";", 1)[0]
+
+
+def test_real_webauthn_enrollment_login_and_single_use_unlock(
+    service: tuple[fresh.FreshUnlockServer, FakeSessionState],
+) -> None:
+    server, _ = service
+    passkey = VirtualPasskey.create()
+    status, _, headers, body = passkey_request(
+        server, "/lock/enroll/options", "options", body={"code": "test-enrollment-code"},
+    )
+    assert status == 200
+    ceremony = cookie_value(headers, fresh.CEREMONY_COOKIE)
+    options = json.loads(body)["publicKey"]
+    status, _, headers, _ = passkey_request(
+        server, "/lock/enroll/complete", "complete",
+        {fresh.CEREMONY_COOKIE: ceremony}, passkey.registration(options),
+    )
+    assert status == 200
+    enrolled_session = cookie_value(headers, server.config.session_cookie)
+    assert request(
+        server, "GET", "/lock/auth/forward-auth", {"diary_lock_session": enrolled_session},
+    )[0] == 200
+    assert passkey_request(
+        server, "/lock/enroll/options", "options", body={"code": "test-enrollment-code"},
+    )[0] == 403
+
+    transaction, _ = begin(server, {"diary_lock_session": enrolled_session})
+    status, _, _, page = request(
+        server, "GET", "/lock/auth/", {fresh.TRANSACTION_COOKIE: transaction},
+    )
+    assert status == 200 and b"Authorize unlock" in page
+    status, _, headers, body = passkey_request(
+        server, "/lock/auth/options", "options", {fresh.TRANSACTION_COOKIE: transaction},
+    )
+    assert status == 200
+    login_ceremony = cookie_value(headers, fresh.CEREMONY_COOKIE)
+    assertion = passkey.authentication(json.loads(body)["publicKey"])
+    login_cookies = {
+        fresh.CEREMONY_COOKIE: login_ceremony, fresh.TRANSACTION_COOKIE: transaction,
+    }
+    status, _, headers, _ = passkey_request(
+        server, "/lock/auth/complete", "complete", login_cookies, assertion,
+    )
+    assert status == 200
+    session = cookie_value(headers, server.config.session_cookie)
+    assert passkey_request(
+        server, "/lock/auth/complete", "complete", login_cookies, assertion,
+    )[0] == 403
+    current = {"diary_lock_session": session, fresh.TRANSACTION_COOKIE: transaction}
+    assert request(server, "GET", "/lock/unlock/return", current)[0] == 200
+    assert request(
+        server, "POST", "/lock/unlock/consume", current,
+        browser_headers("X-Diary-Unlock-Confirm"),
+    )[0] == 204
+    assert request(
+        server, "POST", "/lock/unlock/consume", current,
+        browser_headers("X-Diary-Unlock-Confirm"),
+    )[0] == 403
+
+
+def test_webauthn_requires_user_verification_and_valid_enrollment_code(
+    service: tuple[fresh.FreshUnlockServer, FakeSessionState],
+) -> None:
+    server, _ = service
+    passkey = VirtualPasskey.create()
+    assert passkey_request(
+        server, "/lock/enroll/options", "options", body={"code": "wrong"},
+    )[0] == 403
+    status, _, headers, body = passkey_request(
+        server, "/lock/enroll/options", "options", body={"code": "test-enrollment-code"},
+    )
+    ceremony = cookie_value(headers, fresh.CEREMONY_COOKIE)
+    options = json.loads(body)["publicKey"]
+    assert status == 200
+    assert passkey_request(
+        server, "/lock/enroll/complete", "complete",
+        {fresh.CEREMONY_COOKIE: ceremony}, passkey.registration(options, user_verified=False),
+    )[0] == 403

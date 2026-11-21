@@ -1,68 +1,72 @@
-# Fresh single-use unlock authorization
+# Passkey sessions and fresh single-use authorization
 
-`diary-fresh-unlock` is the CTL-08 authorization boundary. It does not contain
-review UI, report acknowledgement, attendance expiry, or a controller client.
-The CTL-07 `diary-lock-ui` service consumes a fresh transaction only after those
-independent checks, then makes its separate controller request. CTL-01 remains
-the only lock-state authority; see `owner-ui.md`.
+`diary-fresh-unlock` is the owner authentication and CTL-08 authorization
+boundary. It contains no review UI, report acknowledgement, attendance expiry,
+controller client, or executor authority. CTL-07 consumes a fresh transaction
+only after its independent checks; CTL-01 remains the lock-state authority.
 
-The daemon is stdlib-only and installed as a root-owned file. It reads fixed
-root-owned `/etc/diary/lock-auth.toml`; there is no environment or working-tree
-configuration override. Transactions live in a service-owned SQLite database,
-which stores only SHA-256 digests of the 256-bit browser and Authelia session
-secrets. Upgrading from the original cookie-only schema invalidates all legacy
-transactions.
+The daemon reads fixed root-owned `/etc/diary/lock-auth.toml`; production has no
+environment or working-tree configuration override. A root-owned systemd
+credential supplies the initial one-time enrollment code. The WebAuthn runtime
+comes from the hash-pinned diary `owner-auth/requirements.txt`, not the agent
+workspace.
 
-## Trusted freshness proof
+## Passkeys and sessions
 
-Stock Authelia forward-auth establishes only a current `two_factor` level, not
-when either factor completed. The pinned Authelia build therefore includes the
-reviewed `session-proof.patch`, which exposes the session's existing password,
-WebAuthn, user-verification, and first/second-factor timestamp fields through
-`StateGET`. The daemon calls that API directly over loopback with the exact
-session cookie. Client-supplied `Remote-*` headers are never trusted.
+Enrollment requires discoverable credentials and user verification. A one-time
+code can register exactly one credential; a successful registration consumes
+its digest and creates an owner session. The owner can issue another code with
+the installed recovery command without revoking existing passkeys.
 
-Both factor timestamps must be strictly later than transaction creation, and
-password, WebAuthn, and WebAuthn user verification must all be present. Return
-stores a SHA-256 digest of that exact session cookie. Consume must present the
-same session and prove both timestamps again. An omitted preexisting cookie, a
-different session left valid by logout, or a session substituted after return
-therefore cannot satisfy the transaction.
+Authentication uses a random 256-bit challenge held in a bounded, expiring
+server-side ceremony. The browser receives a separate random ceremony cookie;
+only its SHA-256 digest is stored. Completion atomically removes the challenge
+before verifying the assertion, verifies the RP ID, HTTPS origin, signature,
+user presence, user verification, and credential sign count, then creates a
+ten-minute session. Session tokens and transaction secrets are stored only as
+SHA-256 digests. Credential records contain public keys and sign counts, never
+private keys.
 
-## Protocol
+`GET /lock/auth/forward-auth` is the loopback Caddy and owner-UI boundary. It
+returns owner headers only for a live session. Anonymous browser requests get a
+fixed local login redirect; client-supplied `Remote-*` headers are never trusted.
 
-1. `POST /lock/unlock/begin` requires the configured HTTPS `Origin` and
-   `X-Diary-Unlock-Begin: yes`. A global creation rate limit runs before any
-   Authelia call. The daemon forwards only the presented Authelia session
-   cookie to logout, requires an HTTP 200 `status=OK` JSON response, and, when
-   a cookie was presented, independently verifies that exact cookie no longer
-   passes forward-auth. Any failure creates no transaction.
-2. Successful invalidation creates a pending transaction, a strict Secure
-   HttpOnly browser cookie, and a redirect to the fixed Authelia portal with a
-   fixed return URL. Cookie-less begin is safe because every old session still
-   fails the trusted timestamp proof.
-3. `GET /lock/unlock/return` requires the transaction secret and trusted fresh
-   session proof, then atomically changes the matching unexpired transaction
-   from `pending` to `fresh` and records its session binding.
-4. After CTL-07 completes its review and explicit confirmation,
-   `POST /lock/unlock/consume` requires the configured HTTPS `Origin`,
-   `X-Diary-Unlock-Confirm: yes`, the same browser transaction and Authelia
-   session, and fresh trusted proof. An atomic `fresh` to `consumed` transition
-   returns 204. Only then may CTL-07 call the controller. Replays, pending
-   transactions, stale cookies, DSH/Kimi cookies or tokens, wrong-owner
-   sessions, expired transactions, and cookie-only requests fail.
+## Fresh action protocol
 
-The transaction cookie has `Path=/lock/unlock`, `SameSite=Strict`, and a maximum
-five-minute lifetime. No secret appears in a URL, response body, or database.
-All endpoints use `Cache-Control: no-store`. The local `/lock/health` endpoint
-is read-only and is not exposed through Caddy.
+1. `POST /lock/merge/begin` requires a live owner session and same-origin action
+   fields. The service stores the repository, merge/deny action, full queue OID,
+   and full approved-base OID. Unlock has its own purpose and cannot carry merge
+   bindings. The old session is invalidated after the reservation succeeds.
+2. The redirect to `/lock/auth/` shows the trusted stored action before the
+   passkey tap. The options request binds the challenge to the pending
+   transaction. A successful assertion creates a session whose authentication
+   timestamp and transaction ID match that ceremony.
+3. `/lock/merge/return` or `/lock/unlock/return` requires the transaction secret
+   and a session created after transaction creation by that exact transaction's
+   ceremony. It atomically changes `pending` to `fresh` and records the session
+   digest. Merge return displays the same details again.
+4. Consume requires the same transaction and session, rechecks freshness and
+   transaction binding, and atomically changes `fresh` to `consumed`. Merge also
+   requires the repository to match. The executor independently asks the Unix
+   verifier whether that exact grant was consumed before any repository change.
 
-Creation is globally limited to 8 transactions per 60 seconds, with at most 32
-live transactions and 16 concurrent HTTP requests. Expired rows are pruned on
-each creation. These limits do not use source-IP headers or any other
-client-controlled identity.
+Replays, pending transactions, stale or ordinary login sessions, sessions for a
+different transaction, DSH/Kimi cookies or tokens, expired transactions, wrong
+owners, cross-purpose grants, and altered repository/action/OID fields fail.
 
-Run tests with `uv run pytest scripts/test_diary_fresh_unlock.py`. The diary
-`authelia/test-local` integration test additionally exercises the patched real
-Authelia APIs, two isolated Chromium clients, actual user-verified WebAuthn
-ceremonies, preexisting-session substitution, and replay rejection.
+The transaction and ceremony cookies have `Path=/lock`, `SameSite=Strict`, and a
+maximum five-minute lifetime. No secret appears in a URL, response body, or
+database. All endpoints use `Cache-Control: no-store`. `/lock/health` is local
+and read-only. Creation is globally limited to 8 per 60 seconds, with at most 32
+live transactions, 32 ceremonies, and 16 concurrent HTTP requests.
+
+Run tests with:
+
+```bash
+uv run pytest scripts/test_diary_fresh_unlock.py
+```
+
+The suite's software authenticator performs real ES256 WebAuthn registration and
+assertion signatures. The diary `owner-auth/test-local` integration test adds
+real Caddy and two Chromium processes with virtual authenticators for browser
+enrollment, session substitution, and replay rejection.

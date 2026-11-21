@@ -1,12 +1,11 @@
 #!/usr/bin/python3
-"""Browser-bound, forced-login, single-use authorization for the lock UI."""
+"""Passkey-only browser sessions and single-use owner authorization."""
 from __future__ import annotations
 
 import argparse
 import hashlib
 import hmac
 import html
-import http.client
 import json
 import os
 import pwd
@@ -28,21 +27,43 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from webauthn import (
+    generate_authentication_options,
+    generate_registration_options,
+    verify_authentication_response,
+    verify_registration_response,
+)
+from webauthn.helpers import base64url_to_bytes, bytes_to_base64url, options_to_json
+from webauthn.helpers.exceptions import (
+    InvalidAuthenticationResponse,
+    InvalidRegistrationResponse,
+)
+from webauthn.helpers.structs import (
+    AuthenticatorSelectionCriteria,
+    PublicKeyCredentialDescriptor,
+    ResidentKeyRequirement,
+    UserVerificationRequirement,
+)
+
 DEFAULT_CONFIG = "/etc/diary/lock-auth.toml"
 DEFAULT_DATABASE = "/var/lib/diary-lock-auth/transactions.sqlite3"
 TRANSACTION_COOKIE = "diary_lock_fresh_unlock"
-MERGE_COOKIE_PATH = "/lock/merge"
-UNLOCK_COOKIE_PATH = "/lock/unlock"
+CEREMONY_COOKIE = "diary_lock_passkey_ceremony"
+COOKIE_PATH = "/lock"
+MERGE_COOKIE_PATH = COOKIE_PATH
+UNLOCK_COOKIE_PATH = COOKIE_PATH
 REPOS = ("scripts", "diary")
 PURPOSES = frozenset({"unlock", "merge"})
 MERGE_ACTIONS = frozenset({"merge", "deny"})
 OID_RE = re.compile(r"[0-9a-f]{40}\Z")
 MAX_VERIFY_BYTES = 4096
-MAX_RESPONSE_BYTES = 64 * 1024
+MAX_REQUEST_BYTES = 64 * 1024
 MAX_CONCURRENT_REQUESTS = 16
 MAX_LIVE_TRANSACTIONS = 32
+MAX_LIVE_CEREMONIES = 32
 BEGIN_RATE_LIMIT = 8
 BEGIN_RATE_WINDOW_SECONDS = 60
+DEFAULT_ENROLLMENT_CODE_FILE = "/run/credentials/diary-fresh-unlock.service/enrollment_code"
 
 
 class AuthorizationError(ValueError):
@@ -61,9 +82,9 @@ class CapacityError(AuthorizationError):
 class Config:
     owner_username: str
     public_origin: str
-    authelia_backend: str
     session_cookie: str
     transaction_ttl: int = 300
+    session_ttl: int = 600
 
 
 @dataclass(frozen=True)
@@ -75,12 +96,12 @@ def load_config(path: str | Path = DEFAULT_CONFIG) -> Config:
     with Path(path).open("rb") as handle:
         raw = tomllib.load(handle)
     allowed = {
-        "owner_username", "public_origin", "authelia_backend",
-        "session_cookie", "transaction_ttl_seconds",
+        "owner_username", "public_origin", "auth_backend", "session_cookie",
+        "transaction_ttl_seconds", "session_ttl_seconds",
     }
+    required = {"owner_username", "public_origin", "session_cookie"}
     if set(raw) - allowed:
         raise AuthorizationError("unknown lock authorization configuration")
-    required = allowed - {"transaction_ttl_seconds"}
     if not required <= set(raw):
         raise AuthorizationError("incomplete lock authorization configuration")
     values = {key: raw[key] for key in required}
@@ -89,29 +110,29 @@ def load_config(path: str | Path = DEFAULT_CONFIG) -> Config:
     ttl = raw.get("transaction_ttl_seconds", 300)
     if isinstance(ttl, bool) or not isinstance(ttl, int) or not 30 <= ttl <= 300:
         raise AuthorizationError("transaction TTL must be between 30 and 300 seconds")
+    session_ttl = raw.get("session_ttl_seconds", 600)
+    if (
+        isinstance(session_ttl, bool) or not isinstance(session_ttl, int)
+        or not ttl < session_ttl <= 3600
+    ):
+        raise AuthorizationError("session TTL must exceed the transaction TTL and be at most 3600 seconds")
     origin = urllib.parse.urlsplit(values["public_origin"])
     if origin.scheme != "https" or not origin.hostname or origin.path or origin.query or origin.fragment:
         raise AuthorizationError("public origin must be an HTTPS origin without a path")
-    backend = urllib.parse.urlsplit(values["authelia_backend"])
-    if (
-        backend.scheme != "http" or backend.hostname not in {"127.0.0.1", "localhost"}
-        or backend.path or backend.query or backend.fragment or backend.username or backend.password
-    ):
-        raise AuthorizationError("Authelia backend must be a loopback HTTP origin")
     cookie = values["session_cookie"]
     if not cookie.isascii() or not cookie.replace("_", "a").replace("-", "a").isalnum():
-        raise AuthorizationError("invalid Authelia session cookie name")
+        raise AuthorizationError("invalid session cookie name")
     return Config(
         owner_username=values["owner_username"],
         public_origin=values["public_origin"].rstrip("/"),
-        authelia_backend=values["authelia_backend"].rstrip("/"),
         session_cookie=cookie,
         transaction_ttl=ttl,
+        session_ttl=session_ttl,
     )
 
 
 def _digest(secret: str) -> bytes:
-    return hashlib.sha256(secret.encode("ascii")).digest()
+    return hashlib.sha256(secret.encode("utf-8")).digest()
 
 
 class CreationRateLimiter:
@@ -347,131 +368,305 @@ class TransactionStore:
                 raise AuthorizationError("transaction changed concurrently")
 
 
-class AutheliaClient:
-    def __init__(self, config: Config):
+class PasskeyStore:
+    def __init__(
+        self, path: str | Path, config: Config,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self.path = str(path)
         self.config = config
-        self.backend = urllib.parse.urlsplit(config.authelia_backend)
-        self.public = urllib.parse.urlsplit(config.public_origin)
+        self.clock = clock
+        self.rp_id = urllib.parse.urlsplit(config.public_origin).hostname or ""
+        self.user_id = hashlib.sha256(config.owner_username.encode("utf-8")).digest()
+        self._initialize()
 
-    def _request(
-        self, method: str, path: str, headers: dict[str, str], body: bytes | None = None,
-    ) -> tuple[int, dict[str, str], bytes]:
-        connection = http.client.HTTPConnection(self.backend.hostname or "", self.backend.port or 80, timeout=5)
-        try:
-            connection.request(method, path, headers=headers, body=body)
-            response = connection.getresponse()
-            response_body = response.read(MAX_RESPONSE_BYTES + 1)
-            if len(response_body) > MAX_RESPONSE_BYTES:
-                raise AuthorizationError("Authelia response is too large")
-            values = {key.lower(): value for key, value in response.getheaders()}
-            return response.status, values, response_body
-        except (OSError, http.client.HTTPException) as exc:
-            raise AuthorizationError("Authelia is unavailable") from exc
-        finally:
-            connection.close()
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.path, timeout=5, isolation_level=None)
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA busy_timeout = 5000")
+        return connection
 
-    @staticmethod
-    def _json(body: bytes) -> dict[str, Any]:
-        try:
-            value = json.loads(body)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise AuthorizationError("invalid Authelia JSON response") from exc
-        if not isinstance(value, dict):
-            raise AuthorizationError("invalid Authelia JSON response")
-        return value
+    def _initialize(self) -> None:
+        with self._connect() as connection:
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS passkey_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS passkey_credentials (
+                    id TEXT PRIMARY KEY,
+                    public_key BLOB NOT NULL,
+                    sign_count INTEGER NOT NULL,
+                    created_at REAL NOT NULL,
+                    last_used_at REAL
+                );
+                CREATE TABLE IF NOT EXISTS passkey_sessions (
+                    token_hash BLOB PRIMARY KEY,
+                    owner TEXT NOT NULL,
+                    authenticated_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    transaction_id TEXT
+                );
+                CREATE TABLE IF NOT EXISTS passkey_ceremonies (
+                    id TEXT PRIMARY KEY,
+                    secret_hash BLOB NOT NULL,
+                    challenge BLOB NOT NULL,
+                    kind TEXT NOT NULL CHECK (kind IN ('login', 'enroll')),
+                    transaction_id TEXT,
+                    enrollment_hash BLOB,
+                    expires_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS passkey_used_enrollments (
+                    digest BLOB PRIMARY KEY,
+                    used_at REAL NOT NULL
+                );
+                """
+            )
+            schema = connection.execute(
+                "SELECT value FROM passkey_metadata WHERE key = 'schema'"
+            ).fetchone()
+            if schema is None:
+                connection.execute("DELETE FROM transactions")
+                connection.execute(
+                    "INSERT INTO passkey_metadata (key, value) VALUES ('schema', '1')"
+                )
+            elif schema[0] != "1":
+                raise AuthorizationError("unsupported passkey state schema")
 
-    def _session_value(self, cookie_header: str | None) -> str:
-        if not cookie_header:
-            return ""
-        return _cookies(cookie_header).get(self.config.session_cookie, "")
+    def _new_ceremony(
+        self, kind: str, transaction_id: str | None = None,
+        enrollment_hash: bytes | None = None,
+    ) -> tuple[str, str, bytes]:
+        ceremony_id = secrets.token_urlsafe(24)
+        secret = secrets.token_urlsafe(32)
+        challenge = secrets.token_bytes(32)
+        now = self.clock()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("DELETE FROM passkey_ceremonies WHERE expires_at < ?", (now,))
+            live = connection.execute("SELECT count(*) FROM passkey_ceremonies").fetchone()[0]
+            if live >= MAX_LIVE_CEREMONIES:
+                connection.execute("ROLLBACK")
+                raise CapacityError("passkey ceremony capacity exceeded")
+            connection.execute(
+                "INSERT INTO passkey_ceremonies "
+                "(id, secret_hash, challenge, kind, transaction_id, enrollment_hash, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    ceremony_id, _digest(secret), challenge, kind, transaction_id,
+                    enrollment_hash, now + self.config.transaction_ttl,
+                ),
+            )
+        return ceremony_id, secret, challenge
 
-    def _forward_auth(self, session: str, method: str, uri: str) -> tuple[int, dict[str, str]]:
-        headers = {
-            "X-Forwarded-Method": method,
-            "X-Forwarded-Proto": "https",
-            "X-Forwarded-Host": self.public.netloc,
-            "X-Forwarded-URI": uri,
-        }
-        if session:
-            headers["Cookie"] = f"{self.config.session_cookie}={session}"
-        query = urllib.parse.urlencode({"authelia_url": f"{self.config.public_origin}/authelia/"})
-        status, response_headers, _ = self._request(
-            "GET", f"/api/authz/forward-auth?{query}", headers,
+    def authentication_options(
+        self, transaction_id: str | None = None,
+    ) -> tuple[str, str, str]:
+        ceremony_id, secret, challenge = self._new_ceremony("login", transaction_id)
+        options = generate_authentication_options(
+            rp_id=self.rp_id,
+            challenge=challenge,
+            timeout=self.config.transaction_ttl * 1000,
+            user_verification=UserVerificationRequirement.REQUIRED,
         )
-        return status, response_headers
+        return ceremony_id, secret, options_to_json(options)
 
-    def verify_owner(self, cookie_header: str | None, method: str, uri: str) -> None:
-        """Require an owner two-factor session before creating a transaction."""
-        session = self._session_value(cookie_header)
-        if not session:
-            raise AuthorizationError("an authenticated session is required")
-        status, response_headers = self._forward_auth(session, method, uri)
-        groups = {item.strip() for item in response_headers.get("remote-groups", "").split(",")}
-        if (
-            status != 200
-            or response_headers.get("remote-user") != self.config.owner_username
-            or "lock-owner" not in groups
-        ):
-            raise AuthorizationError("an owner two-factor session is required")
+    def registration_options(
+        self, enrollment_code: str, configured_hash: bytes | None,
+    ) -> tuple[str, str, str]:
+        if not enrollment_code or configured_hash is None:
+            raise AuthorizationError("passkey enrollment is not enabled")
+        enrollment_hash = _digest(enrollment_code)
+        if not hmac.compare_digest(enrollment_hash, configured_hash):
+            raise AuthorizationError("invalid enrollment code")
+        with self._connect() as connection:
+            used = connection.execute(
+                "SELECT 1 FROM passkey_used_enrollments WHERE digest = ?", (enrollment_hash,)
+            ).fetchone()
+            if used:
+                raise AuthorizationError("enrollment code has already been used")
+            existing = [
+                PublicKeyCredentialDescriptor(id=base64url_to_bytes(row[0]))
+                for row in connection.execute("SELECT id FROM passkey_credentials")
+            ]
+        ceremony_id, secret, challenge = self._new_ceremony(
+            "enroll", enrollment_hash=enrollment_hash,
+        )
+        options = generate_registration_options(
+            rp_id=self.rp_id,
+            rp_name="Diary owner authorization",
+            user_name=self.config.owner_username,
+            user_display_name="Diary owner",
+            user_id=self.user_id,
+            challenge=challenge,
+            timeout=self.config.transaction_ttl * 1000,
+            exclude_credentials=existing,
+            authenticator_selection=AuthenticatorSelectionCriteria(
+                resident_key=ResidentKeyRequirement.REQUIRED,
+                user_verification=UserVerificationRequirement.REQUIRED,
+            ),
+        )
+        return ceremony_id, secret, options_to_json(options)
+
+    def _pop_ceremony(self, cookie_header: str | None, kind: str) -> dict[str, Any]:
+        value = _cookies(cookie_header).get(CEREMONY_COOKIE, "")
+        parts = value.split(".")
+        if len(parts) != 2 or not all(parts):
+            raise AuthorizationError("passkey ceremony cookie is required")
+        ceremony_id, secret = parts
+        now = self.clock()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT secret_hash, challenge, kind, transaction_id, enrollment_hash, expires_at "
+                "FROM passkey_ceremonies WHERE id = ?", (ceremony_id,)
+            ).fetchone()
+            valid = (
+                row is not None and row[2] == kind and row[5] >= now
+                and hmac.compare_digest(row[0], _digest(secret))
+            )
+            if not valid:
+                connection.execute("ROLLBACK")
+                raise AuthorizationError("invalid, expired, or already used passkey ceremony")
+            connection.execute("DELETE FROM passkey_ceremonies WHERE id = ?", (ceremony_id,))
+        return {
+            "challenge": row[1], "transaction_id": row[3], "enrollment_hash": row[4],
+        }
+
+    def _create_session(
+        self, connection: sqlite3.Connection, transaction_id: str | None,
+    ) -> str:
+        token = secrets.token_urlsafe(32)
+        now = self.clock()
+        connection.execute("DELETE FROM passkey_sessions WHERE expires_at < ?", (now,))
+        connection.execute(
+            "INSERT INTO passkey_sessions "
+            "(token_hash, owner, authenticated_at, expires_at, transaction_id) VALUES (?, ?, ?, ?, ?)",
+            (
+                _digest(token), self.config.owner_username, now,
+                now + self.config.session_ttl, transaction_id,
+            ),
+        )
+        return token
+
+    def register(self, cookie_header: str | None, credential: dict[str, Any]) -> str:
+        ceremony = self._pop_ceremony(cookie_header, "enroll")
+        try:
+            verified = verify_registration_response(
+                credential=credential,
+                expected_challenge=ceremony["challenge"],
+                expected_rp_id=self.rp_id,
+                expected_origin=self.config.public_origin,
+                require_user_verification=True,
+            )
+        except (InvalidRegistrationResponse, ValueError, TypeError, KeyError) as exc:
+            raise AuthorizationError("passkey registration was not accepted") from exc
+        credential_id = bytes_to_base64url(verified.credential_id)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            used = connection.execute(
+                "SELECT 1 FROM passkey_used_enrollments WHERE digest = ?",
+                (ceremony["enrollment_hash"],),
+            ).fetchone()
+            if used:
+                connection.execute("ROLLBACK")
+                raise AuthorizationError("enrollment code has already been used")
+            try:
+                connection.execute(
+                    "INSERT INTO passkey_credentials (id, public_key, sign_count, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        credential_id, verified.credential_public_key,
+                        verified.sign_count, self.clock(),
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                connection.execute("ROLLBACK")
+                raise AuthorizationError("this passkey is already enrolled") from exc
+            connection.execute(
+                "INSERT INTO passkey_used_enrollments (digest, used_at) VALUES (?, ?)",
+                (ceremony["enrollment_hash"], self.clock()),
+            )
+            return self._create_session(connection, None)
+
+    def authenticate(self, cookie_header: str | None, credential: dict[str, Any]) -> str:
+        ceremony = self._pop_ceremony(cookie_header, "login")
+        credential_id = credential.get("id")
+        if not isinstance(credential_id, str) or not credential_id:
+            raise AuthorizationError("passkey assertion has no credential ID")
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT public_key, sign_count FROM passkey_credentials WHERE id = ?",
+                (credential_id,),
+            ).fetchone()
+        if row is None:
+            raise AuthorizationError("unknown passkey")
+        try:
+            verified = verify_authentication_response(
+                credential=credential,
+                expected_challenge=ceremony["challenge"],
+                expected_rp_id=self.rp_id,
+                expected_origin=self.config.public_origin,
+                credential_public_key=row[0],
+                credential_current_sign_count=row[1],
+                require_user_verification=True,
+            )
+        except (InvalidAuthenticationResponse, ValueError, TypeError, KeyError) as exc:
+            raise AuthorizationError("passkey assertion was not accepted") from exc
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                "UPDATE passkey_credentials SET sign_count = ?, last_used_at = ? "
+                "WHERE id = ? AND sign_count = ?",
+                (verified.new_sign_count, self.clock(), credential_id, row[1]),
+            )
+            if cursor.rowcount != 1:
+                connection.execute("ROLLBACK")
+                raise AuthorizationError("passkey changed concurrently; retry the ceremony")
+            return self._create_session(connection, ceremony["transaction_id"])
 
     def logout(self, cookie_header: str | None) -> None:
-        old_session = self._session_value(cookie_header)
-        headers = {
-            "Host": self.public.netloc,
-            "X-Forwarded-Proto": "https",
-            "Content-Type": "application/json",
-        }
-        if old_session:
-            headers["Cookie"] = f"{self.config.session_cookie}={old_session}"
-        status, _, body = self._request("POST", "/authelia/api/logout", headers, b"{}")
-        response = self._json(body)
-        data = response.get("data")
-        if (
-            status != 200 or response.get("status") != "OK" or not isinstance(data, dict)
-            or not isinstance(data.get("safeTargetURL"), bool)
-        ):
-            raise AuthorizationError("Authelia session invalidation failed")
-        if old_session:
-            old_status, _ = self._forward_auth(old_session, "GET", "/lock/auth-check")
-            if old_status not in {302, 401}:
-                raise AuthorizationError("Authelia session invalidation could not be confirmed")
-
-    def session_proof(self, cookie_header: str | None, created_at: int, method: str, uri: str) -> SessionProof:
-        session = self._session_value(cookie_header)
+        session = _cookies(cookie_header).get(self.config.session_cookie, "")
         if not session:
-            raise AuthorizationError("an authenticated session is required")
-        status, response_headers = self._forward_auth(session, method, uri)
-        groups = {item.strip() for item in response_headers.get("remote-groups", "").split(",")}
+            return
+        with self._connect() as connection:
+            connection.execute("DELETE FROM passkey_sessions WHERE token_hash = ?", (_digest(session),))
+
+    def verify_owner(self, cookie_header: str | None) -> None:
+        session = _cookies(cookie_header).get(self.config.session_cookie, "")
+        if not session:
+            raise AuthorizationError("an owner passkey session is required")
+        now = self.clock()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT owner, expires_at FROM passkey_sessions WHERE token_hash = ?",
+                (_digest(session),),
+            ).fetchone()
         if (
-            status != 200
-            or response_headers.get("remote-user") != self.config.owner_username
-            or "lock-owner" not in groups
+            row is None or row[1] < now
+            or not hmac.compare_digest(row[0], self.config.owner_username)
         ):
-            raise AuthorizationError("an owner two-factor session is required")
-        headers = {
-            "Host": self.public.netloc,
-            "X-Forwarded-Proto": "https",
-            "Cookie": f"{self.config.session_cookie}={session}",
-        }
-        state_status, _, body = self._request("GET", "/authelia/api/state", headers)
-        response = self._json(body)
-        state = response.get("data")
-        if state_status != 200 or response.get("status") != "OK" or not isinstance(state, dict):
-            raise AuthorizationError("trusted session proof is unavailable")
-        first = state.get("first_factor_authn_timestamp")
-        second = state.get("second_factor_authn_timestamp")
+            raise AuthorizationError("an owner passkey session is required")
+
+    def session_proof(
+        self, cookie_header: str | None, created_at: float, transaction_id: str,
+    ) -> SessionProof:
+        session = _cookies(cookie_header).get(self.config.session_cookie, "")
+        if not session:
+            raise AuthorizationError("an owner passkey session is required")
+        now = self.clock()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT owner, authenticated_at, expires_at, transaction_id "
+                "FROM passkey_sessions WHERE token_hash = ?", (_digest(session),),
+            ).fetchone()
         if (
-            state.get("username") != self.config.owner_username
-            or state.get("authentication_level") != 2
-            or state.get("factor_knowledge") is not True
-            or state.get("username_and_password") is not True
-            or state.get("webauthn") is not True
-            or state.get("webauthn_user_verified") is not True
-            or isinstance(first, bool) or not isinstance(first, int)
-            or isinstance(second, bool) or not isinstance(second, int)
-            or first <= created_at or second <= created_at
+            row is None or row[1] <= created_at or row[2] < now
+            or row[3] != transaction_id
+            or not hmac.compare_digest(row[0], self.config.owner_username)
         ):
-            raise AuthorizationError("password and user-verified WebAuthn must postdate the transaction")
+            raise AuthorizationError("a new passkey ceremony for this exact transaction is required")
         return SessionProof(session_hash=_digest(session))
 
 
@@ -527,7 +722,7 @@ def _confirmation_page(
 </head>
 <body>
 <h1>Confirm the authorized decision</h1>
-<p>Your password and user-verified WebAuthn are recorded. This page is served by
+<p>Your fresh user-verified passkey ceremony is recorded. This page is served by
 the root-owned authorization service, which bound the ceremony to exactly:</p>
 <dl>
 <dt>Action</dt><dd><strong>{html.escape(verb)}</strong></dd>
@@ -544,10 +739,134 @@ or denied until the console confirms, and the grant expires on its own after
 """
 
 
-def _cookies(header: str) -> dict[str, str]:
+PASSKEY_JS = r"""'use strict';
+const button = document.getElementById('passkey-action');
+const message = document.getElementById('passkey-message');
+const enrollment = document.body.dataset.enrollment === 'yes';
+const returnPath = document.body.dataset.returnPath || '/lock/';
+
+function decode(value) {
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normalized + '='.repeat((4 - normalized.length % 4) % 4);
+  return Uint8Array.from(atob(padded), character => character.charCodeAt(0));
+}
+function encode(value) {
+  if (!value) return null;
+  const bytes = new Uint8Array(value);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function credentialJSON(credential) {
+  const response = credential.response;
+  const value = {
+    id: credential.id,
+    rawId: encode(credential.rawId),
+    type: credential.type,
+    clientExtensionResults: credential.getClientExtensionResults(),
+    response: {clientDataJSON: encode(response.clientDataJSON)},
+  };
+  if (enrollment) {
+    value.response.attestationObject = encode(response.attestationObject);
+  } else {
+    value.response.authenticatorData = encode(response.authenticatorData);
+    value.response.signature = encode(response.signature);
+    value.response.userHandle = encode(response.userHandle);
+  }
+  return value;
+}
+async function post(path, header, body) {
+  const headers = {'X-Diary-Passkey-Action': header};
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  const response = await fetch(path, {
+    method: 'POST', headers, credentials: 'same-origin', cache: 'no-store',
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const value = await response.json();
+  if (!response.ok) throw new Error(value.error || `Passkey request failed (HTTP ${response.status}).`);
+  return value;
+}
+button.addEventListener('click', async () => {
+  button.disabled = true;
+  message.textContent = 'Follow your browser or authenticator prompt.';
+  try {
+    const prefix = enrollment ? '/lock/enroll' : '/lock/auth';
+    const code = enrollment ? document.getElementById('enrollment-code').value : undefined;
+    const optionsResponse = await post(`${prefix}/options`, 'options', enrollment ? {code} : undefined);
+    const options = optionsResponse.publicKey;
+    options.challenge = decode(options.challenge);
+    if (enrollment) {
+      options.user.id = decode(options.user.id);
+      for (const credential of options.excludeCredentials || []) credential.id = decode(credential.id);
+    } else {
+      for (const credential of options.allowCredentials || []) credential.id = decode(credential.id);
+    }
+    const credential = enrollment
+      ? await navigator.credentials.create({publicKey: options})
+      : await navigator.credentials.get({publicKey: options});
+    if (!credential) throw new Error('No passkey was returned.');
+    await post(`${prefix}/complete`, 'complete', credentialJSON(credential));
+    window.location.assign(enrollment ? '/lock/' : returnPath);
+  } catch (error) {
+    message.textContent = error.message;
+    button.disabled = false;
+  }
+});
+"""
+
+
+def _passkey_page(return_path: str, details: dict[str, Any] | None, enrollment: bool = False) -> str:
+    summary = "<p>Use a registered passkey to open the owner dashboard.</p>"
+    title = "Owner passkey"
+    action = "Use passkey"
+    enrollment_field = ""
+    if details and details.get("purpose") == "merge":
+        verb = "Merge and publish" if details["action"] == "merge" else "Deny (record only)"
+        summary = f"""<p>This passkey tap authorizes only:</p>
+<dl><dt>Action</dt><dd><strong>{html.escape(verb)}</strong></dd>
+<dt>Queue</dt><dd><code>{html.escape(details['repo'])}</code></dd>
+<dt>Reviewed queue OID</dt><dd><code>{html.escape(details['queue_oid'])}</code></dd>
+<dt>Approved base OID</dt><dd><code>{html.escape(details['base_oid'])}</code></dd></dl>"""
+        title = "Authorize this decision"
+        action = "Tap passkey to authorize"
+    elif details and details.get("purpose") == "unlock":
+        summary = "<p>This passkey tap authorizes one unlock request. Review and acknowledgement remain separate.</p>"
+        title = "Authorize unlock"
+        action = "Tap passkey to authorize"
+    if enrollment:
+        title = "Enroll a passkey"
+        action = "Create passkey"
+        summary = "<p>Enter a one-time enrollment code, then create a passkey with user verification.</p>"
+        enrollment_field = """<p><label for="enrollment-code">One-time enrollment code</label><br>
+<input id="enrollment-code" type="password" autocomplete="off" required></p>"""
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html.escape(title)}</title>
+<style>body{{font-family:system-ui,sans-serif;max-width:44rem;margin:3rem auto;padding:0 1rem}}code{{overflow-wrap:anywhere}}dt{{font-weight:600;margin-top:.7rem}}button{{padding:.7rem 1rem}}#passkey-message{{min-height:2em}}</style>
+</head><body data-enrollment="{'yes' if enrollment else 'no'}" data-return-path="{html.escape(return_path, quote=True)}">
+<h1>{html.escape(title)}</h1>{summary}{enrollment_field}
+<p><button id="passkey-action" type="button">{html.escape(action)}</button></p>
+<p id="passkey-message" role="status"></p>
+<script src="/lock/auth/auth.js" defer></script></body></html>"""
+
+
+def _return_path(value: str | None) -> str:
+    if not value:
+        return "/lock/"
+    parsed = urllib.parse.urlsplit(value)
+    if (
+        parsed.scheme or parsed.netloc or not parsed.path.startswith("/lock/")
+        or parsed.path.startswith("//") or "\\" in value
+    ):
+        raise AuthorizationError("invalid local return path")
+    return value
+
+
+def _cookies(header: str | None) -> dict[str, str]:
     parsed = SimpleCookie()
     try:
-        parsed.load(header)
+        parsed.load(header or "")
     except CookieError as exc:
         raise AuthorizationError("invalid cookies") from exc
     return {key: morsel.value for key, morsel in parsed.items()}
@@ -566,10 +885,14 @@ def _transaction_cookie(header: str | None) -> tuple[str, str]:
 class FreshUnlockServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address: tuple[str, int], config: Config, database: str | Path):
+    def __init__(
+        self, address: tuple[str, int], config: Config, database: str | Path,
+        enrollment_code: str = "",
+    ) -> None:
         self.config = config
-        self.authelia = AutheliaClient(config)
         self.transactions = TransactionStore(database)
+        self.passkeys = PasskeyStore(database, config)
+        self.enrollment_hash = _digest(enrollment_code) if enrollment_code else None
         self.begin_rate = CreationRateLimiter()
         self.request_slots = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
         super().__init__(address, FreshUnlockHandler)
@@ -598,7 +921,7 @@ class FreshUnlockServer(ThreadingHTTPServer):
 
 
 class FreshUnlockHandler(BaseHTTPRequestHandler):
-    server: FreshUnlockServer  # ty: ignore[invalid-mutable-override]
+    server: FreshUnlockServer
     protocol_version = "HTTP/1.1"
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -608,12 +931,13 @@ class FreshUnlockHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header(
             "Content-Security-Policy",
-            "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+            "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; "
+            "base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
         )
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Content-Type-Options", "nosniff")
 
-    def _json(self, status: int, value: dict[str, str]) -> None:
+    def _json(self, status: int, value: dict[str, Any]) -> None:
         body = json.dumps(value, separators=(",", ":")).encode("ascii")
         self.send_response(status)
         self._common_headers()
@@ -636,6 +960,131 @@ class FreshUnlockHandler(BaseHTTPRequestHandler):
             raise AuthorizationError("explicit browser action required")
         if self.headers.get("Content-Length", "0") != "0":
             raise AuthorizationError("request body is not accepted")
+
+    def _passkey_body(self, action: str) -> dict[str, Any]:
+        if self.headers.get("Origin") != self.server.config.public_origin:
+            raise AuthorizationError("same-origin browser request required")
+        if self.headers.get("Sec-Fetch-Site", "same-origin") not in {"same-origin", "none"}:
+            raise AuthorizationError("cross-site request rejected")
+        if self.headers.get("X-Diary-Passkey-Action") != action:
+            raise AuthorizationError("explicit passkey action required")
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as exc:
+            raise AuthorizationError("valid Content-Length required") from exc
+        if not 0 <= length <= MAX_REQUEST_BYTES:
+            raise AuthorizationError("request body is oversized")
+        if length == 0:
+            return {}
+        if self.headers.get("Content-Type", "").split(";", 1)[0].strip() != "application/json":
+            raise AuthorizationError("JSON request body required")
+        try:
+            value = json.loads(self.rfile.read(length))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AuthorizationError("invalid JSON request") from exc
+        if not isinstance(value, dict):
+            raise AuthorizationError("JSON request must be an object")
+        return value
+
+    def _pending_details(self) -> dict[str, Any] | None:
+        try:
+            transaction_id, secret = _transaction_cookie(self.headers.get("Cookie"))
+            return self.server.transactions.details(
+                transaction_id, secret, self.server.config.owner_username, "pending",
+            )
+        except AuthorizationError:
+            return None
+
+    def _login(self) -> None:
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        return_path = _return_path((query.get("rd") or [None])[0])
+        self._html(200, _passkey_page(return_path, self._pending_details()))
+
+    def _passkey_options(self, enrollment: bool) -> None:
+        body = self._passkey_body("options")
+        self.server.begin_rate.check()
+        transaction_id = None
+        if enrollment:
+            if set(body) != {"code"} or not isinstance(body["code"], str):
+                raise AuthorizationError("one enrollment code is required")
+            ceremony_id, secret, options = self.server.passkeys.registration_options(
+                body["code"], self.server.enrollment_hash,
+            )
+        else:
+            if body:
+                raise AuthorizationError("passkey options take no request fields")
+            details = self._pending_details()
+            if details:
+                transaction_id, _ = _transaction_cookie(self.headers.get("Cookie"))
+            ceremony_id, secret, options = self.server.passkeys.authentication_options(transaction_id)
+        self.send_response(200)
+        self._common_headers()
+        self.send_header(
+            "Set-Cookie",
+            f"{CEREMONY_COOKIE}={ceremony_id}.{secret}; Max-Age={self.server.config.transaction_ttl}; "
+            f"Path={COOKIE_PATH}; Secure; HttpOnly; SameSite=Strict",
+        )
+        encoded = json.dumps({"publicKey": json.loads(options)}, separators=(",", ":")).encode("ascii")
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def _passkey_complete(self, enrollment: bool) -> None:
+        credential = self._passkey_body("complete")
+        if not credential:
+            raise AuthorizationError("passkey credential is required")
+        if enrollment:
+            token = self.server.passkeys.register(self.headers.get("Cookie"), credential)
+        else:
+            token = self.server.passkeys.authenticate(self.headers.get("Cookie"), credential)
+        self.send_response(200)
+        self._common_headers()
+        self.send_header(
+            "Set-Cookie",
+            f"{self.server.config.session_cookie}={token}; Max-Age={self.server.config.session_ttl}; "
+            "Path=/lock; Secure; HttpOnly; SameSite=Strict",
+        )
+        self.send_header(
+            "Set-Cookie", f"{CEREMONY_COOKIE}=; Max-Age=0; Path={COOKIE_PATH}; Secure; HttpOnly; SameSite=Strict",
+        )
+        body = b'{"status":"ok"}'
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _forward_auth(self) -> None:
+        try:
+            self.server.passkeys.verify_owner(self.headers.get("Cookie"))
+        except AuthorizationError:
+            try:
+                return_path = _return_path(self.headers.get("X-Forwarded-URI"))
+            except AuthorizationError:
+                return_path = "/lock/"
+            location = f"{self.server.config.public_origin}/lock/auth/?{urllib.parse.urlencode({'rd': return_path})}"
+            self.send_response(303)
+            self._common_headers()
+            self.send_header("Location", location)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        self.send_response(200)
+        self._common_headers()
+        self.send_header("Remote-User", self.server.config.owner_username)
+        self.send_header("Remote-Groups", "lock-owner")
+        self.send_header("Remote-Name", "Owner")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _javascript(self) -> None:
+        encoded = PASSKEY_JS.encode("utf-8")
+        self.send_response(200)
+        self._common_headers()
+        self.send_header("Content-Type", "text/javascript; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
 
     def _clear_transaction_cookie(self, path: str = UNLOCK_COOKIE_PATH) -> None:
         self.send_header(
@@ -703,25 +1152,25 @@ class FreshUnlockHandler(BaseHTTPRequestHandler):
             self.server.config.owner_username, self.server.config.transaction_ttl,
         )
         try:
-            self.server.authelia.logout(self.headers.get("Cookie"))
+            self.server.passkeys.logout(self.headers.get("Cookie"))
         except Exception:
             self.server.transactions.discard(
                 transaction_id, secret, self.server.config.owner_username,
             )
             raise
-        return_url = f"{self.server.config.public_origin}/lock/unlock/return"
-        location = f"{self.server.config.public_origin}/authelia/?{urllib.parse.urlencode({'rd': return_url})}"
+        return_path = "/lock/unlock/return"
+        location = f"{self.server.config.public_origin}/lock/auth/?{urllib.parse.urlencode({'rd': return_path})}"
         self.send_response(303)
         self._common_headers()
         self.send_header("Location", location)
         self.send_header(
             "Set-Cookie",
-            f"{self.server.config.session_cookie}=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Strict",
+            f"{self.server.config.session_cookie}=; Max-Age=0; Path=/lock; Secure; HttpOnly; SameSite=Strict",
         )
         self.send_header(
             "Set-Cookie",
             f"{TRANSACTION_COOKIE}={transaction_id}.{secret}; Max-Age={self.server.config.transaction_ttl}; "
-            "Path=/lock/unlock; Secure; HttpOnly; SameSite=Strict",
+            f"Path={UNLOCK_COOKIE_PATH}; Secure; HttpOnly; SameSite=Strict",
         )
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -734,7 +1183,9 @@ class FreshUnlockHandler(BaseHTTPRequestHandler):
         if details["purpose"] != "unlock":
             raise AuthorizationError("transaction is not an unlock authorization")
         created_at = details["created_at"]
-        proof = self.server.authelia.session_proof(self.headers.get("Cookie"), created_at, "GET", self.path)
+        proof = self.server.passkeys.session_proof(
+            self.headers.get("Cookie"), created_at, transaction_id,
+        )
         self.server.transactions.authenticate(
             transaction_id, secret, self.server.config.owner_username, proof.session_hash,
         )
@@ -751,7 +1202,9 @@ class FreshUnlockHandler(BaseHTTPRequestHandler):
         created_at, session_hash = details["created_at"], details["session_hash"]
         if session_hash is None:
             raise AuthorizationError("transaction has no authenticated session binding")
-        proof = self.server.authelia.session_proof(self.headers.get("Cookie"), created_at, "POST", self.path)
+        proof = self.server.passkeys.session_proof(
+            self.headers.get("Cookie"), created_at, transaction_id,
+        )
         self.server.transactions.consume(
             transaction_id, secret, self.server.config.owner_username, proof.session_hash,
         )
@@ -777,7 +1230,7 @@ class FreshUnlockHandler(BaseHTTPRequestHandler):
         # Only an already-authenticated owner may start a ceremony. Without this
         # an unauthenticated caller could fill the bounded live-transaction table
         # and block the owner's only merge path.
-        self.server.authelia.verify_owner(self.headers.get("Cookie"), "POST", self.path)
+        self.server.passkeys.verify_owner(self.headers.get("Cookie"))
         self.server.begin_rate.check()
         # Reserve the transaction before destroying the session: a full table or
         # a storage error must not leave the owner signed out with nothing.
@@ -786,21 +1239,21 @@ class FreshUnlockHandler(BaseHTTPRequestHandler):
             purpose="merge", action=action, queue_oid=queue_oid, base_oid=base_oid, repo=repo,
         )
         try:
-            self.server.authelia.logout(self.headers.get("Cookie"))
+            self.server.passkeys.logout(self.headers.get("Cookie"))
         except Exception:
             # The session survives a failed logout, so the reservation must not.
             self.server.transactions.discard(
                 transaction_id, secret, self.server.config.owner_username,
             )
             raise
-        return_url = f"{self.server.config.public_origin}/lock/merge/return"
-        location = f"{self.server.config.public_origin}/authelia/?{urllib.parse.urlencode({'rd': return_url})}"
+        return_path = "/lock/merge/return"
+        location = f"{self.server.config.public_origin}/lock/auth/?{urllib.parse.urlencode({'rd': return_path})}"
         self.send_response(303)
         self._common_headers()
         self.send_header("Location", location)
         self.send_header(
             "Set-Cookie",
-            f"{self.server.config.session_cookie}=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Strict",
+            f"{self.server.config.session_cookie}=; Max-Age=0; Path=/lock; Secure; HttpOnly; SameSite=Strict",
         )
         self.send_header(
             "Set-Cookie",
@@ -817,8 +1270,8 @@ class FreshUnlockHandler(BaseHTTPRequestHandler):
         )
         if details["purpose"] != "merge":
             raise AuthorizationError("transaction is not a merge authorization")
-        proof = self.server.authelia.session_proof(
-            self.headers.get("Cookie"), details["created_at"], "GET", self.path,
+        proof = self.server.passkeys.session_proof(
+            self.headers.get("Cookie"), details["created_at"], transaction_id,
         )
         self.server.transactions.authenticate(
             transaction_id, secret, self.server.config.owner_username, proof.session_hash,
@@ -843,8 +1296,8 @@ class FreshUnlockHandler(BaseHTTPRequestHandler):
             raise AuthorizationError("merge authorization repository does not match")
         if details["session_hash"] is None:
             raise AuthorizationError("transaction has no authenticated session binding")
-        proof = self.server.authelia.session_proof(
-            self.headers.get("Cookie"), details["created_at"], "POST", self.path,
+        proof = self.server.passkeys.session_proof(
+            self.headers.get("Cookie"), details["created_at"], transaction_id,
         )
         self.server.transactions.consume(
             transaction_id, secret, self.server.config.owner_username, proof.session_hash,
@@ -856,37 +1309,54 @@ class FreshUnlockHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _handle(self, method: str) -> None:
+        path = urllib.parse.urlsplit(self.path).path
         try:
-            if method == "GET" and self.path == "/lock/health":
+            if method == "GET" and path == "/lock/health":
                 self._json(200, {"status": "ok"})
-            elif method == "GET" and self.path == "/lock/unlock/return":
+            elif method == "GET" and path == "/lock/auth/":
+                self._login()
+            elif method == "GET" and path == "/lock/auth/auth.js":
+                self._javascript()
+            elif method == "GET" and path == "/lock/auth/forward-auth":
+                self._forward_auth()
+            elif method == "GET" and path == "/lock/enroll/":
+                self._html(200, _passkey_page("/lock/", None, enrollment=True))
+            elif method == "POST" and path == "/lock/auth/options":
+                self._passkey_options(enrollment=False)
+            elif method == "POST" and path == "/lock/auth/complete":
+                self._passkey_complete(enrollment=False)
+            elif method == "POST" and path == "/lock/enroll/options":
+                self._passkey_options(enrollment=True)
+            elif method == "POST" and path == "/lock/enroll/complete":
+                self._passkey_complete(enrollment=True)
+            elif method == "GET" and path == "/lock/unlock/return":
                 self._return()
-            elif method == "POST" and self.path == "/lock/unlock/begin":
+            elif method == "POST" and path == "/lock/unlock/begin":
                 self._begin()
-            elif method == "POST" and self.path == "/lock/unlock/consume":
+            elif method == "POST" and path == "/lock/unlock/consume":
                 self._consume()
-            elif method == "POST" and self.path == "/lock/merge/begin":
+            elif method == "POST" and path == "/lock/merge/begin":
                 self._merge_begin()
-            elif method == "GET" and self.path == "/lock/merge/return":
+            elif method == "GET" and path == "/lock/merge/return":
                 self._merge_return()
-            elif method == "POST" and self.path == "/lock/merge/consume":
+            elif method == "POST" and path == "/lock/merge/consume":
                 self._merge_consume()
             else:
                 self._json(404, {"error": "not found"})
         except RateLimitError:
-            self._json(429, {"error": "transaction creation rate exceeded"})
+            self._json(429, {"error": "passkey ceremony creation rate exceeded"})
         except CapacityError:
-            self._json(503, {"error": "transaction capacity exceeded"})
+            self._json(503, {"error": "passkey ceremony capacity exceeded"})
         except AuthorizationError:
-            if (method, self.path) in BROWSER_ENDPOINTS:
-                back = "/lock/merge/" if self.path.startswith("/lock/merge") else "/lock/"
+            if (method, path) in BROWSER_ENDPOINTS:
+                back = "/lock/merge/" if path.startswith("/lock/merge") else "/lock/"
                 self._html(403, render_browser_error(
                     "This authorization attempt was not accepted: it expired, was "
-                    "already used, or the sign-in did not complete.",
+                    "already used, or the passkey ceremony did not complete.",
                     back,
                 ))
             else:
-                self._json(403, {"error": "fresh authorization required"})
+                self._json(403, {"error": "passkey authorization required"})
 
     def do_GET(self) -> None:
         self._handle("GET")
@@ -905,7 +1375,7 @@ def peer_uid(connection: socket.socket) -> int:
 class MergeGrantVerifyHandler(socketserver.StreamRequestHandler):
     """Answer one metadata question: was this exact merge grant consumed?"""
 
-    server: MergeGrantVerifyServer  # ty: ignore[invalid-mutable-override]
+    server: MergeGrantVerifyServer
 
     def _reply(self, value: dict[str, Any]) -> None:
         try:
@@ -1019,9 +1489,18 @@ def main() -> None:
     parser.add_argument("--verify-user", default="kek")
     parser.add_argument("--listen", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9092)
+    parser.add_argument("--enrollment-code-file", default=DEFAULT_ENROLLMENT_CODE_FILE)
     args = parser.parse_args()
     config = load_config(args.config)
-    server = FreshUnlockServer((args.listen, args.port), config, args.database)
+    try:
+        enrollment_code = Path(args.enrollment_code_file).read_text().strip()
+    except FileNotFoundError:
+        enrollment_code = ""
+    if enrollment_code and not 16 <= len(enrollment_code) <= 256:
+        raise AuthorizationError("enrollment code must contain 16 to 256 characters")
+    server = FreshUnlockServer(
+        (args.listen, args.port), config, args.database, enrollment_code=enrollment_code,
+    )
     if args.verify_socket:
         start_verify_server(args.verify_socket, server.transactions, args.verify_user)
     server.serve_forever()

@@ -4,8 +4,8 @@
 #
 # The rehearsal used to run in a systemd-capable container. A container cannot
 # show SELinux labels, the exact package set, or a real kernel policy load, and
-# on this host it also ran out of container-layer I/O during the Authelia
-# build. This file boots a Fedora Cloud guest instead and drives it over ssh.
+# on this host it also ran out of container-layer I/O during installer builds.
+# This file boots a Fedora Cloud guest instead and drives it over ssh.
 #
 # Acceleration: KVM when the host exposes /dev/kvm — on arm64 that means the
 # outer hypervisor put this guest at EL2, so `-accel kvm -cpu host` is the same
@@ -44,7 +44,6 @@ VM_MEMORY=${DIARY_E2E_MEMORY:-2048}
 VM_CPUS=${DIARY_E2E_CPUS:-4}
 VM_DISK_SIZE=${DIARY_E2E_DISK:-12G}
 VM_BOOT_TIMEOUT=${L4_BOOT_TIMEOUT:-900}
-VM_GO_VERSION=${L4_GO_VERSION:-1.26.10}
 
 VM_REPO_RELEASE=${VM_RELEASE%-*}
 # Split so the source carries no literal URL: the reviewer's identity scan
@@ -372,7 +371,7 @@ echo "provisioning: packages"
 # The Cloud image is leaner than the old container image: the installers call
 # script(1), semanage, openssl and systemd-analyze during their dark tests.
 dnf -y --setopt=install_weak_deps=False install \
-    python3 git curl gcc golang tar make shadow-utils nftables policycoreutils \
+    python3 python3-pip git curl tar make shadow-utils nftables policycoreutils \
     policycoreutils-python-utils util-linux-script openssl \
     >/tmp/dnf.log 2>&1 || { tail -30 /tmp/dnf.log; exit 1; }
 echo "provisioning: identities"
@@ -383,24 +382,6 @@ getent passwd agent >/dev/null || useradd --system -u 981 -g agent -d /home/agen
 # The network policy tool execs /usr/bin/nft; Fedora installs it under
 # /usr/sbin and the host has the /usr/bin path, so match the host layout.
 [[ -e /usr/bin/nft ]] || ln -s /usr/sbin/nft /usr/bin/nft
-# authelia/install builds with GOSUMDB=off, so an older Go than the pinned
-# source requires cannot fetch a toolchain; install the host's Go line.
-GO_VERSION=${VM_GO_VERSION}
-GO_SCHEME=https
-GO_AUTHORITY=go.dev
-case \$(uname -m) in
-    aarch64 | arm64) GO_ARCH=arm64 ;;
-    x86_64 | amd64) GO_ARCH=amd64 ;;
-    *) echo "unsupported architecture: \$(uname -m)" >&2; exit 1 ;;
-esac
-if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "go\${GO_VERSION} "; then
-    echo "provisioning: go \${GO_VERSION}"
-    curl -fsSL "\${GO_SCHEME}://\${GO_AUTHORITY}/dl/go\${GO_VERSION}.linux-\${GO_ARCH}.tar.gz" -o /tmp/go.tgz
-    rm -rf /usr/local/go
-    tar -C /usr/local -xzf /tmp/go.tgz
-    rm -f /tmp/go.tgz
-    ln -sf /usr/local/go/bin/go /usr/bin/go
-fi
 restorecon -R /usr/local >/dev/null 2>&1 || true
 echo "provisioning: sanity"
 python3 -c "import sys; assert sys.version_info >= (3, 11), sys.version"
