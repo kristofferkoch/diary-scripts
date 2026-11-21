@@ -198,6 +198,12 @@ mode and the peer check in `sudo_broker.py`.
 argv is joined with spaces otherwise, so shell syntax needs quoting. `--as
 USER` (or `--as=USER`) may lead, before the command.
 
+When stdout is not a terminal, broker-generated status lines (queued, approved,
+denied, and command errors) are omitted so piped and captured output contains
+only the command's own stdout/stderr. The exit status still reports the result,
+and client-side connection errors remain on stderr. Interactive terminal use
+continues to show the broker status lines.
+
 ## Tests
 
 The prompt behaviour — bells, notification escapes, routing between stdout and

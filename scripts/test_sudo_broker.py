@@ -33,8 +33,9 @@ from pathlib import Path
 from typing import Any, cast
 
 try:  # under pytest the repo root is on sys.path (`scripts` is a package)
-    from scripts import sudo_broker
+    from scripts import sudo_ask, sudo_broker
 except ImportError:  # running this file directly: scripts/ is sys.path[0]
+    sudo_ask = cast(Any, importlib.import_module("sudo_ask"))  # type: ignore[no-redef]
     sudo_broker = cast(Any, importlib.import_module("sudo_broker"))  # type: ignore[no-redef]
 
 HERE = Path(__file__).resolve().parent
@@ -249,6 +250,34 @@ class PromptProbe:
             pass
 
 
+def test_client_status_is_suppressed_when_stdout_is_redirected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    monkeypatch.setattr(sudo_ask.sys, "stdout", stdout)
+    monkeypatch.setattr(sudo_ask.sys, "stderr", stderr)
+
+    sudo_ask.status("approved")
+
+    assert stdout.getvalue() == ""
+    assert stderr.getvalue() == ""
+
+
+def test_client_status_is_shown_when_stdout_is_a_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stdout = _TtySink()
+    stderr = io.StringIO()
+    monkeypatch.setattr(sudo_ask.sys, "stdout", stdout)
+    monkeypatch.setattr(sudo_ask.sys, "stderr", stderr)
+    try:
+        sudo_ask.status("approved")
+        assert stderr.getvalue() == "(sudo-broker: approved)\n"
+    finally:
+        stdout.close()
+
+
 def test_help_is_concise() -> None:
     res = subprocess.run(
         [sys.executable, str(DAEMON), "--help"],
@@ -301,6 +330,45 @@ def test_break_glass_client_uses_fixed_operation() -> None:
         assert request["cwd"] == os.getcwd()
         assert isinstance(request["client_pid"], int)
         assert "as" not in request
+
+
+def test_redirected_client_output_contains_only_command_streams() -> None:
+    with tempfile.TemporaryDirectory(prefix="sudo-output-test-") as directory:
+        path = os.path.join(directory, "broker.sock")
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(path)
+        server.listen(1)
+
+        def serve() -> None:
+            conn, _ = server.accept()
+            with conn:
+                data = b""
+                while not data.endswith(b"\n"):
+                    data += conn.recv(4096)
+                messages = [
+                    {"t": "state", "s": "approved", "as": "root"},
+                    {"t": "out", "fd": "out", "d": "command stdout\n"},
+                    {"t": "out", "fd": "err", "d": "command stderr\n"},
+                    {"t": "exit", "code": 0, "msg": "command finished"},
+                ]
+                for message in messages:
+                    conn.sendall(json.dumps(message).encode() + b"\n")
+            server.close()
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        res = subprocess.run(
+            [sys.executable, str(CLIENT), "ignored"],
+            capture_output=True,
+            env={**os.environ, "SUDO_BROKER_SOCK": path},
+            timeout=10,
+            check=False,
+        )
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert res.returncode == 0, res.stderr
+        assert res.stdout == b"command stdout\n"
+        assert res.stderr == b"command stderr\n"
 
 
 def test_client_escapes_arguments_so_the_shell_keeps_them_intact() -> None:
@@ -640,10 +708,10 @@ def test_nothing_is_emitted_when_neither_stream_is_a_tty() -> None:
 def test_approved_command_runs_and_streams_exit_code() -> None:
     broker = Broker()
     try:
-        res = broker.ask("echo BROKER_OK && exit 7", b"y\n")
+        res = broker.ask("echo BROKER_OK && echo BROKER_ERR >&2 && exit 7", b"y\n")
         assert res.returncode == 7, res.stderr.decode()
-        assert b"BROKER_OK" in res.stdout
-        assert b"approved" in res.stderr.lower()
+        assert res.stdout == b"BROKER_OK\n"
+        assert res.stderr == b"BROKER_ERR\n"
     finally:
         broker.stop()
 
@@ -684,7 +752,7 @@ def test_denied_command_does_not_run() -> None:
         res = broker.ask(f"touch {marker}", b"n\n")
         assert res.returncode == 1, res.stderr.decode()
         assert not marker.exists(), "a denied command was executed"
-        assert b"denied" in res.stderr.lower()
+        assert res.stderr == b""
     finally:
         broker.stop()
 
@@ -736,10 +804,11 @@ def test_runs_as_the_requested_identity() -> None:
         res = broker.ask("id -un", b"y\n", as_user="kek")
         if res.returncode == 0:
             assert res.stdout.strip() == b"kek", res.stdout
-            assert b"approved as kek" in res.stderr
+            assert res.stderr == b""
         else:
             # A host without a `kek` user must refuse cleanly, not silently run.
-            assert b"no such user" in res.stderr or b"may not be used" in res.stderr
+            assert res.returncode == 1
+            assert res.stderr == b""
     finally:
         broker.stop()
 
@@ -750,8 +819,7 @@ def test_unlisted_identity_is_refused_without_a_prompt() -> None:
     try:
         res = broker.ask("id -un", b"", as_user="postgres")
         assert res.returncode == 1, res.stderr.decode()
-        assert b"may not be used" in res.stderr
-        assert b"approved" not in res.stderr
+        assert res.stderr == b""
     finally:
         broker.stop()
 

@@ -37,6 +37,11 @@ def die(msg: str) -> None:
     sys.exit(2)
 
 
+def status(msg: str) -> None:
+    if sys.stdout.isatty():
+        print(f"(sudo-broker: {msg})", file=sys.stderr, flush=True)
+
+
 def main(argv: list[str]) -> int:
     if not argv or argv[0] in ("-h", "--help"):
         print(
@@ -142,20 +147,18 @@ def main(argv: list[str]) -> int:
                     state = msg.get("s")
                     if state == "queued":
                         ahead = int(msg.get("ahead", 0))
-                        print(f"(sudo-broker: queued — {ahead} ahead)",
-                              file=sys.stderr, flush=True)
+                        status(f"queued — {ahead} ahead")
                     elif state == "approved":
                         ran_as = msg.get("as", "root")
                         suffix = "" if ran_as == "root" else f" as {ran_as}"
-                        print(f"(sudo-broker: approved{suffix})", file=sys.stderr, flush=True)
+                        status(f"approved{suffix}")
                     elif state in ("denied", "error"):
                         reason = msg.get("msg", "")
-                        print(f"(sudo-broker: {state}{': ' + reason if reason else ''})",
-                              file=sys.stderr, flush=True)
+                        status(f"{state}{': ' + reason if reason else ''}")
                 elif kind == "exit":
                     code = int(msg.get("code", 1))
                     if msg.get("msg"):
-                        print(f"(sudo-broker: {msg['msg']})", file=sys.stderr, flush=True)
+                        status(msg["msg"])
     except OSError as exc:
         print(f"sudo-ask: connection lost ({exc})", file=sys.stderr)
         return 1
