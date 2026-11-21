@@ -82,7 +82,7 @@ def sync_argv(target: str) -> tuple[str, ...] | None:
         return None
     os.makedirs(COLLECT_LOCK_DIR, mode=0o700, exist_ok=True)
     return (
-        "/usr/bin/flock", os.path.join(COLLECT_LOCK_DIR, f"{target}.lock"), *template,
+        "flock", os.path.join(COLLECT_LOCK_DIR, f"{target}.lock"), *template,
     )
 ALLOWED_START_UNITS = ("mail-sync.service",)
 STATUS_UNITS = (

@@ -106,7 +106,7 @@ def test_sync_all_runs_every_target(isolated_runtime):
     seen: list[str] = []
 
     def runner(argv, timeout):
-        assert argv[0] == "/usr/bin/flock"
+        assert argv[0] == "flock"
         assert argv[1].startswith(str(isolated_runtime / "diary-collect") + "/")
         seen.append(argv[2])
         return {"ok": True, "output": "", "exit_code": 0}
