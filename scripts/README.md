@@ -15,7 +15,7 @@ uv run --project diary-scripts <entry-point> …
 Entry-point names: `mailshow`, `search-mail`, `embed-mail`, `embed-messages`,
 `archive-inbox`, `notmuch-sync-tags`, `spond-sync`, `spondshow`, `finance-ingest`,
 `retire-calendar`, `sjekk-collect`, `sjekk-advance`, `kindle-dashboard`, `immich-recent`,
-`dsh-web-notify`, `vigilo-api`, `vigilo-login`, `vigilo-sync`, `vigiloshown`,
+`dsh-web-notify`, `proton-bridge-await-ready`, `vigilo-api`, `vigilo-login`, `vigilo-sync`, `vigiloshown`,
 `skolemelding-api`, `skolemelding-login`, `skolemelding-sync`,
 `skolemeldingshow`, `diary-sync`, `diary-sync-broker`, `diary-pipeline-triage`,
 `agent-merge-wait`, `agent-merge-review`, `agent-tree-permissions`, `diary-audit`, `diary-auditd`, `diary-production-baseline`, `diary-lock`, `diary-lockd`, `diary-network-auditd`, `diary-dns-auditd`, `diary-network-policy`, `diary-dns-policy`, `diary-dns-policyd`, `diary-fresh-unlock`, `diary-lock-dashboard`, `diary-lock-ui`, `diary-lockdown-acceptance`, `diary-mac-link`. Server modules are invoked as `uv run python -m mail_reader.server` and

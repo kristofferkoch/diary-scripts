@@ -27,6 +27,10 @@ def _until() -> dt.datetime:
     return dt.datetime(2026, 11, 2, 9, 0, 0, tzinfo=dt.UTC)
 
 
+def test_sync_timeout_includes_readiness_wait_and_existing_sync_budget() -> None:
+    assert sjekk_collect.MAIL_SYNC_TIMEOUT >= 480
+
+
 def _sh(script: str) -> list[str]:
     return ["sh", "-c", script]
 

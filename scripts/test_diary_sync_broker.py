@@ -144,6 +144,23 @@ def test_start_accepts_only_mail_sync():
         assert _handle({"cmd": "start", "unit": unit})["ok"] is False, unit
 
 
+def test_mail_sync_start_timeout_includes_readiness_wait():
+    seen = {}
+
+    def runner(argv, timeout):
+        seen["timeout"] = timeout
+        return {"ok": True, "output": "ran"}
+
+    reply = _handle({"cmd": "start", "unit": "mail-sync.service"}, runner=runner)
+    assert reply["ok"] is True
+    assert seen["timeout"] >= 480
+
+
+def test_client_timeout_matches_operation():
+    assert broker.request_timeout({"cmd": "start"}) == broker.START_TIMEOUT + 30
+    assert broker.request_timeout({"cmd": "sync"}) == broker.SYNC_TIMEOUT + 30
+
+
 def test_sync_is_rate_limited():
     sync_limiter, status_limiter = _limiters(sync_burst=2)
     lock = threading.Lock()

@@ -100,6 +100,14 @@ just query notmuch; if something genuinely looks stale, check
 `systemctl --user status mail-sync.service` first. No digest cron yet
 (planned alongside Signal).
 
+At boot, `proton-bridge-await-ready` holds `mail-sync` and `goimapnotify` in
+`ExecStartPre` until Bridge's local gRPC API reports every account as
+`CONNECTED`. It reads the atomically replaced `grpcServerConfig.json`, uses its
+TLS certificate and per-start token, and never performs an IMAP login or logs
+account details. This avoids failed-login and retry noise while the vault is
+still locked. The helper has a 180-second timeout; `Restart=on-failure` remains
+as a fallback for actual sync failures.
+
 (Per-mail LLM **summaries were retired 2026-08-02** — the chat endpoint
 they depended on is gone. The webapp still renders summaries stored
 before that date; nothing new is generated, and the `mail_reader.summarize_inbox`

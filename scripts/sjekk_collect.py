@@ -73,6 +73,7 @@ from scripts import sjekk_cursor
 
 DEFAULT_TIMEOUT = 120
 SYNC_TIMEOUT = 300
+MAIL_SYNC_TIMEOUT = 480
 MAIL_SYNC_MAX_AGE = dt.timedelta(minutes=15)
 
 # Vigilo and Skolemelding always send a notification mail when there is new
@@ -495,7 +496,7 @@ def phase_a(*, force_sync: bool, no_sync: bool) -> list[str]:
         if force_sync or mail_sync_stale():
             res = _run_one(
                 ["diary-sync", "start", "mail-sync.service", "--fallback"],
-                timeout=SYNC_TIMEOUT)
+                timeout=MAIL_SYNC_TIMEOUT)
             if res.failed:
                 log.append(f"!! mail-sync.service restart failed: "
                            f"{res.output.strip()[-200:]}")
