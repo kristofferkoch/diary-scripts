@@ -457,6 +457,23 @@ def test_input_between_prompts_is_consumed_and_refreshes_idle_timer() -> None:
         assert stream.read() == "", "input must not remain buffered for the next prompt"
 
 
+def test_auto_accept_newline_refreshes_idle_timer() -> None:
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b"\n")
+    with os.fdopen(read_fd, "r") as stream:
+        patched = _Patch()
+        patched.setattr(sys, "stdin", stream)
+        patched.setattr(sudo_broker, "AUTO_ACCEPT_ALL", True)
+        previous = time.monotonic() - 100.0
+        try:
+            last_activity, watch_stdin = sudo_broker.consume_operator_input(previous)
+        finally:
+            patched.restore()
+            os.close(write_fd)
+        assert watch_stdin
+        assert last_activity > previous
+
+
 def test_input_reader_rechecks_readiness_under_the_prompt_lock() -> None:
     read_fd, write_fd = os.pipe()
     with os.fdopen(read_fd, "r") as stream:

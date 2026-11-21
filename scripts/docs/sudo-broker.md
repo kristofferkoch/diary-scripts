@@ -71,7 +71,8 @@ requires a human confirmation.
 The existing command-length and identity checks still apply. Every ordinary
 request is printed and logged as `AUTO-APPROVED`; there is no prompt, bell, or
 desktop notification. The 600-second per-command timeout and 30-minute idle
-timeout remain in effect.
+timeout remain in effect. Pressing Enter on the broker's stdin renews the idle
+timeout in this mode too.
 
 ## Running as another user
 
