@@ -140,7 +140,9 @@ agent-merge-approve scripts <full-OID-from-rev-parse>
 ```
 
 For diary, use `/path/to/diary-automatic` and `agent-merge-approve diary <OID>`.
-The legacy `agent-merge-approve <OID>` form still means scripts.
+The legacy `agent-merge-approve <OID>` form still means scripts. The repository is
+always the first positional argument — `agent-merge-approve --repo <repo> <OID>` is
+rejected, so copy the `approve:` line the queue prints rather than inventing flags.
 
 ### Diary `diary-scripts` pointer is forward-only
 

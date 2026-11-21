@@ -945,10 +945,21 @@ def agent_request(
 
 
 def approve_main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Approve one explicitly reviewed queue commit.")
-    parser.add_argument("--repo", choices=("scripts", "diary"), default="scripts")
+    parser = argparse.ArgumentParser(
+        prog="agent-merge-approve",
+        description="Approve one explicitly reviewed queue commit.",
+    )
+    parser.add_argument(
+        "repo",
+        nargs="?",
+        choices=("scripts", "diary"),
+        default="scripts",
+        help="repository whose queue holds the commit (default: scripts)",
+    )
     parser.add_argument("reviewed", help="full queue commit OID copied from the reviewed diff")
     args = parser.parse_args(argv)
+    if args.reviewed in ("scripts", "diary"):
+        parser.error("give the full queue commit OID after the repository name")
     if not OID_RE.fullmatch(args.reviewed):
         parser.error("reviewed must be the full 40-character commit OID")
     paths = paths_for(args.repo)
@@ -1032,7 +1043,7 @@ def queue_main(argv: list[str] | None = None) -> int:
     doctor.add_argument("--approved", default=None)
     args = parser.parse_args(argv)
     if args.command == "client":
-        return approve_main(["--repo", args.repo, args.reviewed])
+        return approve_main([args.repo, args.reviewed])
     if args.command == "request":
         if args.timeout is not None and not args.wait:
             parser.error("request --timeout requires --wait")

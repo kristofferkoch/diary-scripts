@@ -303,8 +303,28 @@ def test_diary_client_names_the_repository_and_explicit_oid(paths: amq.QueuePath
     monkeypatch.setattr(amq, "diary_paths", lambda: paths)
     monkeypatch.setattr(amq, "request", lambda payload: seen.append(payload) or "RESULT ok 0\n")
 
-    assert amq.approve_main(["--repo", "diary", oid]) == 0
+    assert amq.approve_main(["diary", oid]) == 0
     assert seen == [f"approve diary {oid}"]
+
+
+def test_client_rejects_the_repository_flag_it_no_longer_takes(
+    paths: amq.QueuePaths, monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(amq, "request", lambda payload: pytest.fail("nothing was approved"))
+
+    with pytest.raises(SystemExit) as excinfo:
+        amq.approve_main(["--repo", "diary", "b" * 40])
+    assert excinfo.value.code == 2
+
+
+def test_client_wants_the_oid_after_the_repository_name(
+    paths: amq.QueuePaths, monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(amq, "request", lambda payload: pytest.fail("nothing was approved"))
+
+    with pytest.raises(SystemExit) as excinfo:
+        amq.approve_main(["diary"])
+    assert excinfo.value.code == 2
 
 
 def test_failed_push_can_be_retried_and_synchronizes_queue(paths: amq.QueuePaths):
