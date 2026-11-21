@@ -14,12 +14,13 @@ from urllib.parse import urlsplit
 HOSTS_CONFIG_PATH = Path("/etc/diary/hosts.toml")
 ALLOWED_HOST_KEYS = frozenset({
     "embed", "vlm", "server", "tailnet_base", "dsh_web", "kimi_web", "immich",
+    "opencode_web",
 })
 REQUIRED_HOST_KEYS = frozenset({
     "embed", "vlm", "tailnet_base", "dsh_web", "kimi_web", "immich",
 })
 HOST_PORT_KEYS = frozenset({"embed", "vlm", "immich"})
-HTTPS_URL_KEYS = frozenset({"tailnet_base", "dsh_web", "kimi_web"})
+HTTPS_URL_KEYS = frozenset({"tailnet_base", "dsh_web", "kimi_web", "opencode_web"})
 HOSTNAME_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
 
 

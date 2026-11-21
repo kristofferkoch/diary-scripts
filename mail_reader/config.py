@@ -212,6 +212,11 @@ def dsh_web_url() -> str:
     return _host_value("dsh_web").rstrip("/")
 
 
+def opencode_web_url() -> str:
+    """Public base URL of the opencode web UI, without a trailing slash."""
+    return _host_value("opencode_web").rstrip("/")
+
+
 def mail_web_url() -> str:
     """Public base URL of the authenticated mail UI, without a trailing slash."""
     return (_host_value("tailnet_base") + "/mail").rstrip("/")
