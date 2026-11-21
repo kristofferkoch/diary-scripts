@@ -1466,3 +1466,100 @@ def test_wait_operational_failure_returns_two_without_polling(monkeypatch: pytes
 
     assert amq.wait_for_approval("diary", "0" * 40, 30) == 2
     assert calls == ["status diary " + "0" * 40]
+
+
+def test_detached_integration_master_follows_the_checked_out_commit(
+    paths: amq.QueuePaths,
+) -> None:
+    """A detached integration must not advertise the commit it was detached from.
+
+    2026-11-21: the submodule integration sat detached at its own newest commit
+    while ``master`` stayed three weeks behind, so every agent worktree created
+    from the stale ``origin/master`` started from obsolete code.
+    """
+    integration = paths.integration
+    first = run("git", "rev-parse", "master", cwd=integration)
+    commit(integration, "newer.txt", "newer\n")
+    newer = run("git", "rev-parse", "HEAD", cwd=integration)
+    run("git", "checkout", "--quiet", "--detach", newer, cwd=integration)
+    run("git", "update-ref", "refs/heads/master", first, cwd=integration)
+
+    amq.attach_integration_master(integration)
+
+    assert run("git", "rev-parse", "refs/heads/master", cwd=integration) == newer
+    assert run("git", "rev-parse", "HEAD", cwd=integration) == newer
+
+
+def test_attached_integration_master_is_left_alone(paths: amq.QueuePaths) -> None:
+    """A diary-style integration on master already tracks its own commits."""
+    before = run("git", "rev-parse", "refs/heads/master", cwd=paths.integration)
+
+    amq.attach_integration_master(paths.integration)
+
+    assert run("git", "rev-parse", "refs/heads/master", cwd=paths.integration) == before
+
+
+def test_detached_integration_never_rewinds_master(paths: amq.QueuePaths) -> None:
+    """An integration detached at an older pointer keeps the newer master."""
+    integration = paths.integration
+    commit(integration, "ahead.txt", "ahead\n")
+    ahead = run("git", "rev-parse", "HEAD", cwd=integration)
+    run("git", "checkout", "--quiet", "--detach", "HEAD~1", cwd=integration)
+
+    amq.attach_integration_master(integration)
+
+    assert run("git", "rev-parse", "refs/heads/master", cwd=integration) == ahead
+
+
+def test_sync_integration_brings_a_detached_master_forward(paths: amq.QueuePaths) -> None:
+    """The sync path itself repairs the refs an agent clone fetches."""
+    commit(paths.approved, "approved.txt", "approved change\n")
+    approved_head = run("git", "rev-parse", "master", cwd=paths.approved)
+    run("git", "checkout", "--quiet", "--detach", "HEAD", cwd=paths.integration)
+
+    amq.sync_integration(paths)
+
+    assert run("git", "rev-parse", "HEAD", cwd=paths.integration) == approved_head
+    assert run("git", "rev-parse", "refs/heads/master", cwd=paths.integration) == approved_head
+
+
+def test_submodule_update_keeps_master_on_the_recorded_pointer(tmp_path: Path) -> None:
+    """The real shape: a submodule checkout detached at the superproject pointer."""
+    superproject = tmp_path / "diary"
+    superproject.mkdir()
+    run("git", "init", "-b", "master", cwd=superproject)
+    run("git", "config", "user.name", "Queue Test", cwd=superproject)
+    run("git", "config", "user.email", "queue@example.invalid", cwd=superproject)
+    commit(superproject, "README.md", "diary\n")
+
+    origin = tmp_path / "scripts.git"
+    run("git", "init", "--bare", str(origin))
+    seed = tmp_path / "scripts-seed"
+    seed.mkdir()
+    run("git", "init", "-b", "master", cwd=seed)
+    run("git", "config", "user.name", "Queue Test", cwd=seed)
+    run("git", "config", "user.email", "queue@example.invalid", cwd=seed)
+    commit(seed, "tool.py", "print('first')\n")
+    run("git", "remote", "add", "origin", str(origin), cwd=seed)
+    run("git", "push", "origin", "master", cwd=seed)
+    run("git", "-c", "protocol.file.allow=always", "submodule", "add",
+        str(origin), "diary-scripts", cwd=superproject)
+    run("git", "commit", "-m", "add the submodule", cwd=superproject)
+
+    submodule = superproject / "diary-scripts"
+    run("git", "config", "user.name", "Queue Test", cwd=submodule)
+    run("git", "config", "user.email", "queue@example.invalid", cwd=submodule)
+    old = run("git", "rev-parse", "HEAD", cwd=submodule)
+    commit(submodule, "tool.py", "print('second')\n")
+    pointer = run("git", "rev-parse", "HEAD", cwd=submodule)
+    run("git", "add", "diary-scripts", cwd=superproject)
+    run("git", "commit", "-m", "record the pointer", cwd=superproject)
+    # Exactly what a review pointer bump leaves behind: the checkout detached at
+    # the recorded commit, with master still on the revision it started from.
+    run("git", "checkout", "--quiet", "--detach", pointer, cwd=submodule)
+    run("git", "update-ref", "refs/heads/master", old, cwd=submodule)
+
+    amq.update_submodule(superproject)
+
+    assert run("git", "rev-parse", "HEAD", cwd=submodule) == pointer
+    assert run("git", "rev-parse", "refs/heads/master", cwd=submodule) == pointer

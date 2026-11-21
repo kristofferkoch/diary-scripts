@@ -174,6 +174,13 @@ checkout (the diary workspace itself, where `.git` is a directory) must still be
 on `master`, so the diary-side guard is unchanged. The hand workaround of moving
 the submodule's `master` branch before approving is no longer needed.
 
+Because the checkout stays detached, the sync also fast-forwards that checkout's
+own `master` to the commit it shows — forward only, never rewinding a pointer
+that is older than the branch. Agent source clones fetch `master` from this
+checkout and create their worktrees from it; without the ref they kept branching
+from whatever commit the checkout was first detached at (2026-11-21: three weeks
+behind the approved tip).
+
 For scripts, an allowlist pre-scan rejects simple unapproved identities before
 queue acceptance. The request returns sanitized categories and paths to the
 producing agent, whose worktree remains available for fix-and-retry; matched

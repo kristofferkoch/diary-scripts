@@ -591,6 +591,32 @@ def fetch_superproject(repo: Path, source: Path) -> None:
         "fetch", "--no-tags", str(source), "master")
 
 
+def attach_integration_master(repo: Path) -> None:
+    """Keep ``master`` on the commit a detached integration checkout shows.
+
+    ``git submodule update`` leaves a submodule integration detached at the
+    gitlink the superproject records, so a fast-forward there moves only
+    ``HEAD``. Agent source clones fetch ``master`` from that checkout, so
+    without this the integration keeps advertising whatever commit it was
+    first detached at: 2026-11-21 the submodule's ``master`` sat three weeks
+    behind its own working tree, and every worktree created from the stale
+    ``origin/master`` started from obsolete code.
+
+    Forward only. A ``master`` the checked-out commit does not descend from is
+    left alone, so an integration detached at an older pointer never rewinds
+    the branch.
+    """
+    if git(repo, "symbolic-ref", "--quiet", "HEAD", check=False).returncode == 0:
+        return
+    head = git(repo, "rev-parse", "HEAD").stdout.strip()
+    current = git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/master", check=False)
+    if current.returncode == 0 and git(
+        repo, "merge-base", "--is-ancestor", "refs/heads/master", head, check=False
+    ).returncode:
+        return
+    git(repo, "update-ref", "refs/heads/master", head)
+
+
 def update_submodule(repo: Path, name: str = "diary-scripts") -> None:
     """Bring an initialized submodule working tree to the reviewed pointer."""
     if not (repo / name / ".git").exists():
@@ -602,11 +628,14 @@ def update_submodule(repo: Path, name: str = "diary-scripts") -> None:
             f"{repo}: {(proc.stderr or proc.stdout).strip()}",
             file=sys.stderr,
         )
+        return
+    attach_integration_master(repo / name)
 
 
 def sync_integration(paths: QueuePaths) -> None:
     fetch_superproject(paths.integration, paths.approved)
     git(paths.integration, "merge", "--ff-only", "FETCH_HEAD")
+    attach_integration_master(paths.integration)
     update_submodule(paths.integration)
 
 
