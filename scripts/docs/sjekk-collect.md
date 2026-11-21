@@ -15,7 +15,8 @@ uv run sjekk-collect --timeout 60    # per-command cap (default 120 s)
 **Phase A — freshness:** checks when `mail-sync.service` last
 ran (`systemctl --user show mail-sync.service -p ExecMainExitTimestamp
 --value`); if older than ~15 min (or `--force-sync`), the unit is started
-and awaited (300 s cap) before any mail is read. In parallel,
+and awaited (480 s cap: 180 s Bridge readiness wait plus the previous 300 s
+sync budget) before any mail is read. In parallel,
 `spond-sync --once` fetches new Spond activity (idempotent, auto-bumps its
 own cursor). Then `vigilo-sync --once` / `skolemelding-sync --once` run —
 **gated on the notification mail**: both services always mail when there is

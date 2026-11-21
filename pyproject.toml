@@ -23,6 +23,7 @@ dependencies = [
     "pillow>=11",
     "playwright>=1.49",
     "astral>=3.2",
+    "grpcio>=1.76",
 ]
 
 # Console entry points — run as `uv run <name>` (no more `uv run scripts/foo.py`),
@@ -56,6 +57,7 @@ kindle-dashboard  = "scripts.kindle_dashboard.serve:main"
 immich-recent     = "scripts.immich_recent:main"
 dsh-web-notify    = "scripts.dsh_web_notify:main"
 mail-reader-token-notify = "scripts.mail_reader_token_notify:main"
+proton-bridge-await-ready = "scripts.proton_bridge_ready:main"
 diary-sync        = "scripts.diary_sync_broker:client_main"
 diary-sync-broker = "scripts.diary_sync_broker:main"
 diary-event-export = "scripts.event_export:main"

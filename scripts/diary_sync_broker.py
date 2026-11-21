@@ -53,6 +53,7 @@ import subprocess
 import sys
 import threading
 import time
+from typing import cast
 
 if __package__:
     from scripts import broker_audit
@@ -96,6 +97,7 @@ STATUS_UNITS = (
 MAX_REQUEST_BYTES = 64 * 1024
 MAX_OUTPUT_CHARS = 4000
 SYNC_TIMEOUT = 300.0
+START_TIMEOUT = 480.0
 STATUS_TIMEOUT = 60.0
 SYNC_BURST, SYNC_PERIOD = 6, 3600.0
 STATUS_BURST, STATUS_PERIOD = 120, 60.0
@@ -242,7 +244,7 @@ def services_status(*, runner=run_command) -> dict:
 def _start_unit(unit: str, *, runner=run_command) -> dict:
     if unit not in ALLOWED_START_UNITS:
         return {"ok": False, "error": f"unit {unit!r} is not startable through this broker"}
-    result = runner(["systemctl", "--user", "start", unit], SYNC_TIMEOUT)
+    result = runner(["systemctl", "--user", "start", unit], START_TIMEOUT)
     result["cmd"] = "start"
     result["unit"] = unit
     return result
@@ -420,10 +422,18 @@ def serve(
 # --- client ------------------------------------------------------------------
 
 
+def request_timeout(payload: object) -> float:
+    if isinstance(payload, dict) and cast(dict[str, object], payload).get("cmd") == "start":
+        return START_TIMEOUT + 30
+    return SYNC_TIMEOUT + 30
+
+
 def call(payload: object, socket_path: str = DEFAULT_SOCKET,
-         timeout: float = SYNC_TIMEOUT + 30) -> dict:
+         timeout: float | None = None) -> dict:
     """Send one request to the broker. Raises BrokerUnavailable when it is not
     reachable (missing socket, refused connection, no reply)."""
+    if timeout is None:
+        timeout = request_timeout(payload)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         sock.settimeout(timeout)
