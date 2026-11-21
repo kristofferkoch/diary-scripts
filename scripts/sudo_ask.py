@@ -12,18 +12,21 @@ A human with `sudo /usr/local/sbin/sudo-broker` running in a terminal sees the
 command, its cwd and the requesting uid, and types y or n. Output is streamed
 back; the exit status is the command's own, or:
 
-    2  no broker running / bad socket
+    2  bad socket / cannot watch for the broker
     1  denied or malformed request (a request nobody answers just waits)
     124 the broker killed an approved command that ran too long
 
 Nothing here can escalate on its own: the socket only exists while a root
 daemon is listening, and that daemon only runs what a human just approved.
+If the broker is not running, the client waits for its socket to appear.
 """
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
+import select
 import shlex
 import socket
 import stat
@@ -40,6 +43,90 @@ def die(msg: str) -> None:
 def status(msg: str) -> None:
     if sys.stdout.isatty():
         print(f"(sudo-broker: {msg})", file=sys.stderr, flush=True)
+
+
+class SocketWatcher:
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.libc = ctypes.CDLL(None, use_errno=True)
+        self.libc.inotify_init1.argtypes = [ctypes.c_int]
+        self.libc.inotify_init1.restype = ctypes.c_int
+        self.libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+        self.libc.inotify_add_watch.restype = ctypes.c_int
+        self.libc.inotify_rm_watch.argtypes = [ctypes.c_int, ctypes.c_int]
+        self.libc.inotify_rm_watch.restype = ctypes.c_int
+        self.fd = self.libc.inotify_init1(os.O_CLOEXEC)
+        if self.fd < 0:
+            raise OSError(ctypes.get_errno(), "inotify_init1 failed")
+        self.wd: int | None = None
+        self.target: str | None = None
+
+    def arm(self) -> None:
+        target = os.path.dirname(self.path) or "."
+        while not os.path.isdir(target):
+            parent = os.path.dirname(target)
+            if parent == target:
+                break
+            target = parent
+        if target == self.target:
+            return
+        if self.wd is not None:
+            self.libc.inotify_rm_watch(self.fd, self.wd)
+        wd = self.libc.inotify_add_watch(
+            self.fd, os.fsencode(target), 0x00000100 | 0x00000080,
+        )
+        if wd < 0:
+            raise OSError(ctypes.get_errno(), f"cannot watch {target}")
+        self.wd = wd
+        self.target = target
+
+    def wait(self) -> None:
+        select.select([self.fd], [], [])
+        os.read(self.fd, 4096)
+
+    def close(self) -> None:
+        os.close(self.fd)
+
+
+def connect_to_broker() -> socket.socket:
+    watcher = SocketWatcher(SOCK_PATH)
+    announced = False
+    try:
+        while True:
+            watcher.arm()
+            try:
+                st = os.stat(SOCK_PATH)
+            except (FileNotFoundError, NotADirectoryError):
+                st = None
+            if st is not None:
+                if not stat.S_ISSOCK(st.st_mode):
+                    die(f"{SOCK_PATH} exists but is not a socket — refusing to connect")
+                if st.st_uid != 0:
+                    # A user namespace may leave root unmapped. In that case the
+                    # non-writable parent directory supplies the ownership check.
+                    parent = os.path.dirname(SOCK_PATH) or "."
+                    try:
+                        pst = os.stat(parent)
+                    except OSError as exc:
+                        die(f"cannot stat {parent} ({exc})")
+                    if pst.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                        die(f"{parent} is writable by group/other — refusing to trust {SOCK_PATH}")
+                conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                try:
+                    conn.connect(SOCK_PATH)
+                except (FileNotFoundError, ConnectionRefusedError):
+                    conn.close()
+                except OSError as exc:
+                    conn.close()
+                    die(f"cannot reach the broker ({exc})")
+                else:
+                    return conn
+            if not announced:
+                status("waiting for broker to start")
+                announced = True
+            watcher.wait()
+    finally:
+        watcher.close()
 
 
 def main(argv: list[str]) -> int:
@@ -86,34 +173,9 @@ def main(argv: list[str]) -> int:
         cmd = rest[0] if len(rest) == 1 else shlex.join(rest)
 
     try:
-        st = os.stat(SOCK_PATH)
-    except OSError:
-        die(
-            "no broker running.\n"
-            "  Start one in your own terminal and leave it open:\n"
-            "      sudo sudo-broker"
-        )
-    if not stat.S_ISSOCK(st.st_mode):
-        die(f"{SOCK_PATH} exists but is not a socket — refusing to connect")
-    if st.st_uid != 0:
-        # Inside a user namespace (dsh sandboxes the shell in one that maps
-        # only the agent's uid/gid) root is unmapped and reads back as 65534,
-        # so the ownership check is meaningless there. Fall back to the
-        # property that matters: only root can create an entry in a directory
-        # that is not group- or world-writable.
-        parent = os.path.dirname(SOCK_PATH) or "."
-        try:
-            pst = os.stat(parent)
-        except OSError as exc:
-            die(f"cannot stat {parent} ({exc})")
-        if pst.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-            die(f"{parent} is writable by group/other — refusing to trust {SOCK_PATH}")
-
-    try:
-        conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        conn.connect(SOCK_PATH)
+        conn = connect_to_broker()
     except OSError as exc:
-        die(f"cannot reach the broker ({exc}). Is the terminal still open?")
+        die(f"cannot watch for the broker ({exc})")
 
     payload = {"cmd": cmd, "cwd": os.getcwd(), "client_pid": os.getpid()}
     if break_glass:

@@ -783,18 +783,48 @@ def test_empty_answer_is_a_denial() -> None:
         broker.stop()
 
 
-@requires_root
-def test_client_without_broker_fails_closed() -> None:
-    env = {**os.environ, "SUDO_BROKER_SOCK": "/nonexistent/agent.sock"}
-    res = subprocess.run(
-        [sys.executable, str(CLIENT), "id"],
-        capture_output=True,
-        env=env,
-        timeout=20,
-        check=False,
-    )
-    assert res.returncode == 2
-    assert b"no broker running" in res.stderr
+@pytest.mark.parametrize("layout", ["missing_socket", "missing_directory", "stale_socket"])
+def test_client_waits_for_broker_to_start(layout: str) -> None:
+    with tempfile.TemporaryDirectory(prefix="sudo-wait-test-") as directory:
+        parent = directory if layout != "missing_directory" else os.path.join(directory, "broker")
+        path = os.path.join(parent, "broker.sock")
+        if layout == "stale_socket":
+            stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            stale.bind(path)
+            stale.close()
+        client = subprocess.Popen(
+            [sys.executable, str(CLIENT), "ignored"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={**os.environ, "SUDO_BROKER_SOCK": path},
+        )
+        try:
+            time.sleep(0.2)
+            assert client.poll() is None, "client exited instead of waiting for the broker"
+
+            if layout == "missing_directory":
+                os.mkdir(parent, 0o755)
+            elif layout == "stale_socket":
+                os.unlink(path)
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.settimeout(5)
+            server.bind(path)
+            server.listen(1)
+            with server:
+                conn, _ = server.accept()
+                with conn:
+                    data = b""
+                    while not data.endswith(b"\n"):
+                        data += conn.recv(4096)
+                    conn.sendall(b'{"t":"exit","code":0}\n')
+            out, err = client.communicate(timeout=5)
+            assert client.returncode == 0, err
+            assert out == b""
+            assert err == b""
+        finally:
+            if client.poll() is None:
+                client.kill()
+                client.communicate()
 
 
 @requires_root

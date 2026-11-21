@@ -148,9 +148,9 @@ control surface.
   capability the client can request.
 - **The command cannot touch your terminal.** The child gets
   `stdin=/dev/null`, so an approved command can't read what you type next.
-- **Fail-closed.** No socket → `sudo-ask` exits 2 with instructions. A denial
-  or an empty answer exit 1 and run nothing. A request nobody answers stays
-  open — it never turns into an approval by itself.
+- **Fail-closed.** A denial or an empty answer exits 1 and runs nothing. An
+  invalid or untrusted socket is rejected. A request nobody answers stays open
+  — it never turns into an approval by itself.
 - **Root executes a root-owned copy.** The daemon and client are stdlib-only
   and are installed to `/usr/local/sbin/sudo-broker` and
   `/usr/local/bin/sudo-ask`. Never run the daemon with `uv run` — that would
@@ -190,7 +190,7 @@ mode and the peer check in `sudo_broker.py`.
 | Exit | Meaning |
 | --- | --- |
 | command's own | approved and ran; stdout/stderr streamed through |
-| 2 | no broker running, or the socket isn't root-owned |
+| 2 | invalid/untrusted socket, or the client cannot watch for the broker |
 | 1 | denied, or a malformed request (an unanswered one waits) |
 | 124 | approved, but killed after `EXEC_TIMEOUT` (600 s) |
 
@@ -198,11 +198,16 @@ mode and the peer check in `sudo_broker.py`.
 argv is joined with spaces otherwise, so shell syntax needs quoting. `--as
 USER` (or `--as=USER`) may lead, before the command.
 
-When stdout is not a terminal, broker-generated status lines (queued, approved,
-denied, and command errors) are omitted so piped and captured output contains
-only the command's own stdout/stderr. The exit status still reports the result,
-and client-side connection errors remain on stderr. Interactive terminal use
-continues to show the broker status lines.
+If the broker is not running, `sudo-ask` waits for its socket using Linux
+`inotify` and submits the request when the broker starts. This also handles a
+stale socket left by an unclean exit. There is no wait timeout; Ctrl-C cancels
+the client. Terminal clients print one waiting status line.
+
+When stdout is not a terminal, broker-generated status lines (waiting, queued,
+approved, denied, and command errors) are omitted so piped and captured output
+contains only the command's own stdout/stderr. The exit status still reports
+the result, and client-side socket errors remain on stderr. Interactive
+terminal use continues to show the broker status lines.
 
 ## Tests
 
@@ -231,7 +236,9 @@ command, bell/notification follow whichever of stdout/stderr is the terminal
 without ever landing in a redirected log, the requested identity is shown in
 the prompt and actually used, an unlisted identity is refused before the human
 is asked, and the per-user environment carries
-`HOME`/`USER`/`XDG_RUNTIME_DIR`. A missing broker fails closed.
+`HOME`/`USER`/`XDG_RUNTIME_DIR`. A missing broker makes the client wait, and
+the client connects when a missing directory, missing socket, or stale socket
+is replaced by a running broker.
 
 ## Removing a standing NOPASSWD rule
 
