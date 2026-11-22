@@ -3,16 +3,18 @@
 
 The web UI runs as the unprivileged owner-UI identity and holds no repository,
 publication, or audit authority. This process runs with the owner's
-(`kek`) authority and exposes exactly two verbs over a group-restricted Unix
-socket: read the reviewed queue snapshot, and execute one already-reviewed
-merge or deny decision. Every decision additionally requires a consumed,
-single-use owner grant issued by the root-owned fresh-authorization service and
-bound to the action plus the exact queue and approved-base OIDs.
+(`kek`) authority and exposes exactly three verbs over a group-restricted Unix
+socket: read the reviewed queue snapshot, read one text file changed by that
+exact queue/base pair, and execute one already-reviewed merge or deny decision.
+Every decision additionally requires a consumed, single-use owner grant issued
+by the root-owned fresh-authorization service and bound to the action plus the
+exact queue and approved-base OIDs.
 
-It is not a general broker: there is no shell, no arbitrary Git command, no
-path from the caller, and no verb that does not resolve through
-`agent_merge_console.MergeConsole`. A caller that fully controls the web UI can
-therefore only replay the exact decision an owner just authorized.
+It is not a general broker: there is no shell, no arbitrary Git command, and no
+verb that does not resolve through `agent_merge_console.MergeConsole`. File
+paths are accepted only from the reviewed diff, never as arbitrary repository
+paths. A caller that fully controls the web UI can therefore read the current
+review or replay the exact decision an owner just authorized.
 """
 from __future__ import annotations
 
@@ -35,7 +37,7 @@ DEFAULT_CONTROLLER_SOCKET = "/run/diary-lock/socket"
 DEFAULT_UI_USER = "diary-lock-ui"
 MAX_REQUEST_BYTES = 16 * 1024
 MAX_DIFF_BYTES = 2 * 1024 * 1024
-MAX_RESPONSE_BYTES = MAX_DIFF_BYTES + 64 * 1024
+MAX_RESPONSE_BYTES = MAX_DIFF_BYTES + console.MAX_FILE_BYTES + 64 * 1024
 
 
 class ExecutorError(RuntimeError):
@@ -141,6 +143,10 @@ def _snapshot_payload(snapshot: console.QueueSnapshot | None) -> dict[str, Any]:
         "base_oid": snapshot.base_oid,
         "commits": [{"oid": item.oid, "subject": item.subject} for item in snapshot.commits],
         "diff": snapshot.diff,
+        "files": [
+            {"path": item.path, "status": item.status, "diff": item.diff}
+            for item in snapshot.files
+        ],
         "advisory": {"status": snapshot.advisory.status, "text": snapshot.advisory.text},
     }
 
@@ -166,20 +172,21 @@ def _console(
     )
 
 
-def _publication(repo: str) -> console.Publisher:
+def _publication(repo: str, *, sync_environment: bool | None = None) -> console.Publisher:
     """Publish with the same environment handling the CLI uses per repository.
 
     A diary approval has no Python environment to sync; only the scripts
-    repository does. The CLI disables the venv sync for diary, and the console
-    must not reintroduce it.
+    repository does. NixOS disables that legacy venv sync for both repositories.
     """
+    sync = (repo == "scripts") if sync_environment is None else sync_environment
+
     def publish(
         reviewed: str, paths: queue.QueuePaths, /, *, expected_base: str | None = None,
     ) -> bool:
         return queue.approve_queue(
             reviewed, paths,
             expected_base=expected_base,
-            sync_environment=(repo == "scripts"),
+            sync_environment=sync,
         )
 
     return publish
@@ -221,6 +228,25 @@ def handle_request(
         except queue.QueueError as exc:
             raise ExecutorError("the reviewed queue cannot be read") from exc
         return {"ok": True, "snapshot": _snapshot_payload(snapshot)}
+    if command == "file":
+        if set(request) != {"cmd", "repo", "queue_oid", "base_oid", "path"}:
+            raise ExecutorError("file request has missing or extra fields")
+        repo = request["repo"]
+        paths = _paths_for(paths_by_repo, repo)
+        queue_oid, base_oid, path = request["queue_oid"], request["base_oid"], request["path"]
+        if not all(isinstance(value, str) for value in (queue_oid, base_oid, path)):
+            raise ExecutorError("file request is invalid")
+        try:
+            file_view = _console(
+                paths, verifier, _deny_all, auditor=auditor,
+                publisher=publisher or _publication(repo),
+                lock_state=lock_state, repo=repo,
+            ).read_file(queue_oid, base_oid, path)
+        except queue.QueueError as exc:
+            raise ExecutorError("the reviewed file cannot be read") from exc
+        if len(file_view.content.encode("utf-8")) > console.MAX_FILE_BYTES:
+            raise ExecutorError("the reviewed file is too large to display")
+        return {"ok": True, "file": {"path": file_view.path, "content": file_view.content}}
     if command != "decide":
         raise ExecutorError("unsupported request")
 
@@ -400,6 +426,10 @@ def main() -> None:
     parser.add_argument("--controller-socket", default=DEFAULT_CONTROLLER_SOCKET)
     parser.add_argument("--ui-user", default=DEFAULT_UI_USER)
     parser.add_argument("--lock-state", choices=("auto", "locked", "attended"), default="auto")
+    parser.add_argument(
+        "--no-sync-environment", action="store_true",
+        help="do not run the legacy scripts virtualenv sync after publication",
+    )
     args = parser.parse_args()
 
     paths_by_repo = {
@@ -411,9 +441,12 @@ def main() -> None:
     if args.lock_state == "auto":
         lock_state = LockStateReader(args.controller_socket)
 
+    publisher = _publication("scripts", sync_environment=False) if args.no_sync_environment else None
     if args.stdio:
         ui_uid = pwd.getpwnam(args.ui_user).pw_uid
-        raise SystemExit(serve_stdio(paths_by_repo, verifier, ui_uid, lock_state=lock_state))
+        raise SystemExit(serve_stdio(
+            paths_by_repo, verifier, ui_uid, publisher=publisher, lock_state=lock_state,
+        ))
 
     ui_uid = pwd.getpwnam(args.ui_user).pw_uid
     try:
@@ -422,7 +455,7 @@ def main() -> None:
         pass
     server = ExecutorServer(
         args.socket, paths_by_repo, verifier, ui_uid,
-        auditor=console.DiaryDecisionAudit(), lock_state=lock_state,
+        auditor=console.DiaryDecisionAudit(), publisher=publisher, lock_state=lock_state,
     )
     os.chmod(args.socket, 0o660)
     try:

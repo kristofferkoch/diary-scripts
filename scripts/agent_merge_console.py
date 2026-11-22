@@ -11,6 +11,7 @@ from __future__ import annotations
 import html
 import json
 import stat
+import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,7 @@ DecisionAction = Literal["merge", "deny"]
 Repo = Literal["scripts", "diary"]
 REPOS: tuple[str, ...] = ("scripts", "diary")
 MAX_REPORT_BYTES = 2 * 1024 * 1024
+MAX_FILE_BYTES = 2 * 1024 * 1024
 
 
 class ConsoleError(RuntimeError):
@@ -128,12 +130,26 @@ class AdvisoryView:
 
 
 @dataclass(frozen=True)
+class ChangedFile:
+    path: str
+    status: str
+    diff: str
+
+
+@dataclass(frozen=True)
+class FileView:
+    path: str
+    content: str
+
+
+@dataclass(frozen=True)
 class QueueSnapshot:
     queue_oid: str
     base_oid: str
     commits: tuple[QueueCommit, ...]
     diff: str
     advisory: AdvisoryView
+    files: tuple[ChangedFile, ...] = ()
     pending: bool = True
     repo: str = "scripts"
 
@@ -166,6 +182,36 @@ class Publisher(Protocol):
         expected_base: str | None = None,
     ) -> bool:
         """Publish only the reviewed queue/base pair."""
+
+
+def _diff_sections(text: str) -> list[str]:
+    sections: list[str] = []
+    current: list[str] = []
+    for line in text.splitlines(keepends=True):
+        if line.startswith("diff --git ") and current:
+            sections.append("".join(current))
+            current = []
+        current.append(line)
+    if current:
+        sections.append("".join(current))
+    return sections
+
+
+def _changed_files(paths: queue.QueuePaths, base: str, oid: str, diff: str) -> tuple[ChangedFile, ...]:
+    raw = queue.git(
+        paths.queue, "diff", "--name-status", "-z", "--no-renames", f"{base}...{oid}",
+    ).stdout
+    fields = raw.split("\0")
+    if fields[-1] or (len(fields) - 1) % 2:
+        raise ConsoleError("Git returned an unterminated changed-file list")
+    entries = [(fields[index], fields[index + 1]) for index in range(0, len(fields) - 1, 2)]
+    sections = _diff_sections(diff)
+    if len(entries) != len(sections):
+        raise ConsoleError("Git diff sections do not match the changed-file list")
+    return tuple(
+        ChangedFile(path, status, section)
+        for (status, path), section in zip(entries, sections, strict=True)
+    )
 
 
 class MergeConsole:
@@ -253,8 +299,49 @@ class MergeConsole:
             ).stdout
             return QueueSnapshot(
                 current.oid, base, commits, diff, self._advisory(current.oid, base),
-                repo=self.repo,
+                files=_changed_files(self.paths, base, current.oid, diff), repo=self.repo,
             )
+
+    def read_file(self, reviewed_oid: str, reviewed_base: str, path: str) -> FileView:
+        if (
+            not queue.OID_RE.fullmatch(reviewed_oid)
+            or not queue.OID_RE.fullmatch(reviewed_base)
+            or not isinstance(path, str)
+            or not path
+            or len(path.encode("utf-8")) > 4096
+        ):
+            raise ConsoleError("file review requires full reviewed OIDs and a changed path")
+        current = self._current()
+        if current.oid != reviewed_oid or current.base != reviewed_base or not current.pending:
+            raise QueueChanged("queue or approved master changed before the file was read")
+        with queue.queue_lock(self.paths):
+            latest = queue.git(self.paths.queue, "rev-parse", "HEAD").stdout.strip()
+            base = queue.git(self.paths.approved, "rev-parse", "master").stdout.strip()
+            if latest != reviewed_oid or base != reviewed_base:
+                raise QueueChanged("queue or approved master changed before the file was read")
+            raw_paths = queue.git(
+                self.paths.queue, "diff", "--name-only", "-z", "--no-renames",
+                f"{reviewed_base}...{reviewed_oid}",
+            ).stdout
+            changed = {item for item in raw_paths.split("\0") if item}
+            if path not in changed:
+                raise ConsoleError("only a file changed by the reviewed commit can be opened")
+            object_name = f"{reviewed_oid}:{path}"
+            if queue.git(self.paths.queue, "cat-file", "-t", object_name).stdout.strip() != "blob":
+                raise ConsoleError("the reviewed path is not a regular Git blob")
+            try:
+                size = int(queue.git(self.paths.queue, "cat-file", "-s", object_name).stdout.strip())
+            except ValueError as exc:
+                raise ConsoleError("the reviewed file size is invalid") from exc
+            if size > MAX_FILE_BYTES:
+                raise ConsoleError("the reviewed file is too large to display in the browser")
+            try:
+                content = queue.git(self.paths.queue, "cat-file", "blob", object_name).stdout
+            except UnicodeError as exc:
+                raise ConsoleError("binary files cannot be displayed as text") from exc
+            if "\x00" in content:
+                raise ConsoleError("binary files cannot be displayed as text")
+            return FileView(path, content)
 
     def _record(self, action: DecisionAction, oid: str, base: str, outcome: str) -> None:
         self.auditor.record(
@@ -334,25 +421,39 @@ class MergeConsole:
 
 
 DIFF_LINE_CLASSES = {
-    "+++ ": "meta", "--- ": "meta", "@@": "hunk", "+": "add", "-": "del",
+    "diff --git ": "meta", "index ": "meta", "new file": "meta",
+    "deleted file": "meta", "old mode": "meta", "new mode": "meta",
+    "Binary files": "meta", "+++ ": "meta", "--- ": "meta", "@@": "hunk",
+    "+": "add", "-": "del",
+}
+LANGUAGES = {
+    ".bash": "bash", ".c": "c", ".cc": "cpp", ".conf": "ini", ".cpp": "cpp",
+    ".css": "css", ".go": "go", ".h": "c", ".html": "xml", ".ini": "ini",
+    ".java": "java", ".js": "javascript", ".json": "json", ".jsx": "javascript",
+    ".md": "markdown", ".markdown": "markdown", ".nix": "nix", ".py": "python", ".rs": "rust",
+    ".sh": "bash", ".sql": "sql", ".toml": "ini", ".ts": "typescript",
+    ".tsx": "typescript", ".xml": "xml", ".yaml": "yaml", ".yml": "yaml",
 }
 
 
-def render_diff(text: str) -> str:
-    """Colourise a unified diff line by line, escaping every byte of content.
+def language_for_path(path: str) -> str:
+    if Path(path).name == "flake.lock":
+        return "json"
+    return LANGUAGES.get(Path(path).suffix.lower(), "plaintext")
 
-    No third-party highlighter is involved: the console host runs on the system
-    Python, so only the diff structure is rendered (file headers, hunks,
-    additions, removals) and the text stays escaped.
-    """
+
+def render_diff(text: str, path: str = "") -> str:
+    """Escape diff lines and annotate source lines for frontend highlighting."""
     lines = []
+    language = language_for_path(path)
     for line in text.splitlines():
         kind = "ctx"
         for prefix, candidate in DIFF_LINE_CLASSES.items():
             if line.startswith(prefix):
                 kind = candidate
                 break
-        lines.append(f'<span class="dline {kind}">{html.escape(line)}</span>')
+        syntax = "" if kind in {"meta", "hunk"} else f' data-syntax="{language}"'
+        lines.append(f'<span class="dline {kind}"{syntax}>{html.escape(line)}</span>')
     return "".join(lines)
 
 
@@ -361,6 +462,7 @@ def render_console(
     action_path: str = "/lock/merge/decide",
     csrf_token: str | None = None,
     notice: str | None = None,
+    file_path: str = "/lock/merge/file",
 ) -> str:
     """Render a fixed, escaped HTML fragment for the owner console host.
 
@@ -382,6 +484,21 @@ def render_console(
         note = "" if not notice else (
             f'<p class="notice" role="status">{html.escape(notice)}</p>'
         )
+        file_sections = []
+        for index, item in enumerate(snapshot.files):
+            view_link = ""
+            if item.status != "D":
+                query = urllib.parse.urlencode({
+                    "repo": snapshot.repo, "queue_oid": snapshot.queue_oid,
+                    "base_oid": snapshot.base_oid, "path": item.path, "anchor": f"file-{index}",
+                })
+                view_link = f' <a class="view-file" href="{file_path}?{html.escape(query, quote=True)}">View file</a>'
+            file_sections.append(f"""
+<section class="diff-file" id="file-{index}">
+  <h3><code>{html.escape(item.path)}</code> <span class="file-status">{html.escape(item.status)}</span>{view_link}</h3>
+  <pre class="diff">{render_diff(item.diff, item.path)}</pre>
+</section>""")
+        diff_content = "".join(file_sections) or f'<pre class="diff">{render_diff(snapshot.diff)}</pre>'
         content = f"""
 <section id="merge-review">
   {note}
@@ -392,7 +509,7 @@ def render_console(
   <p>Approved master OID: <code id="base-oid">{html.escape(snapshot.base_oid)}</code></p>
   <ul>{commits}</ul>
   <h2>Real diff against approved master</h2>
-  <pre class="diff">{render_diff(snapshot.diff)}</pre>
+  {diff_content}
   <h2>Advisory local-model report ({html.escape(snapshot.advisory.status)})</h2>
   <pre class="advisory">{html.escape(snapshot.advisory.text)}</pre>
   <p>The report is advisory only. Missing or stale reports do not block owner review or approval.</p>
@@ -418,10 +535,13 @@ def render_console(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'">
 <title>Owner merge review</title>
-<style>body{{font-family:system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#1b1b1b}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;padding:0;background:#f6f8fa;border:1px solid #d8dee4;border-radius:6px;overflow:hidden}}pre.advisory{{padding:1rem}}code{{overflow-wrap:anywhere;font-size:0.95em}}form{{display:inline-block;margin-right:1rem}}button{{padding:0.5rem 0.9rem;border-radius:4px;border:1px solid #8b949e;background:#f6f8fa;cursor:pointer}}button[value=merge]{{border-color:#1a7f37;background:#e6ffed}}button[value=deny]{{border-color:#cf222e;background:#ffeef0}}button:disabled{{opacity:0.5;cursor:not-allowed}}.notice{{padding:0.6rem 0.8rem;border-left:4px solid #bf8700;background:#fff8c5;border-radius:4px}}.diff{{padding:0.5rem 0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.875rem;line-height:1.45}}.dline{{display:block;padding:0 0.8rem;white-space:pre-wrap}}.dline.add{{background:#e6ffed}}.dline.del{{background:#ffeef0}}.dline.hunk{{background:#eef4ff;color:#0a3069}}.dline.meta{{color:#57606a}}</style>
+<style>body{{font-family:system-ui,sans-serif;max-width:1200px;margin:2rem auto;padding:0 1rem;color:#1b1b1b}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;padding:0;background:#f6f8fa;border:1px solid #d8dee4;border-radius:6px;overflow:hidden}}pre.advisory{{padding:1rem}}code{{overflow-wrap:anywhere;font-size:0.95em}}form{{display:inline-block;margin-right:1rem}}button{{padding:0.5rem 0.9rem;border-radius:4px;border:1px solid #8b949e;background:#f6f8fa;cursor:pointer}}button[value=merge]{{border-color:#1a7f37;background:#e6ffed}}button[value=deny]{{border-color:#cf222e;background:#ffeef0}}button:disabled{{opacity:0.5;cursor:not-allowed}}.notice{{padding:0.6rem 0.8rem;border-left:4px solid #bf8700;background:#fff8c5;border-radius:4px}}.diff-file{{margin:1rem 0 1.5rem}}.diff-file h3{{display:flex;align-items:center;gap:.6rem;margin-bottom:.4rem}}.file-status{{font-size:.75rem;color:#57606a}}.view-file{{font-size:.85rem;margin-left:auto}}.diff{{padding:0.5rem 0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.875rem;line-height:1.45}}.dline{{display:block;padding:0 0.8rem;white-space:pre-wrap}}.dline.add{{background:#e6ffed}}.dline.del{{background:#ffeef0}}.dline.hunk{{background:#eef4ff;color:#0a3069}}.dline.meta{{color:#57606a}}.hljs-keyword,.hljs-selector-tag,.hljs-literal{{color:#cf222e}}.hljs-string,.hljs-attr,.hljs-template-tag,.hljs-template-variable{{color:#0a3069}}.hljs-comment,.hljs-quote{{color:#6e7781;font-style:italic}}.hljs-number,.hljs-symbol,.hljs-bullet{{color:#953800}}.hljs-title,.hljs-title.function_,.hljs-name{{color:#8250df}}.hljs-type,.hljs-built_in,.hljs-variable,.hljs-property{{color:#0550ae}}</style>
 </head>
-<body><h1>Owner merge review</h1>{content}</body>
+<body><h1>Owner merge review</h1>{content}
+<script src="/lock/merge/assets/highlight.min.js" defer></script>
+<script src="/lock/merge/assets/nix.min.js" defer></script>
+<script src="/lock/merge/assets/review.js" defer></script></body>
 </html>
 """

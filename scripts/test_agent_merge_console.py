@@ -365,6 +365,61 @@ def test_advisory_report_never_controls_or_blocks_owner_approval(
     assert published == [(oid, base)]
 
 
+def test_changed_files_have_per_file_diffs_and_exact_commit_file_views(
+    environment: tuple[queue.QueuePaths, Path, Path],
+) -> None:
+    paths, _, reports = environment
+    commit(paths.queue, "README.md", "# Review\n\n<script>alert(1)</script>\n", "document the change")
+    ui = make_console(paths, reports)
+    snapshot = ui.snapshot()
+
+    assert snapshot is not None
+    assert [item.path for item in snapshot.files] == ["README.md", "queued.py"]
+    assert all(item.diff.startswith("diff --git ") for item in snapshot.files)
+    assert snapshot.files[0].path in console.render_console(snapshot)
+    rendered = console.render_console(snapshot)
+    assert 'class="view-file"' in rendered
+    assert 'data-syntax="markdown"' in rendered
+    assert 'data-syntax="python"' in rendered
+
+    file_view = ui.read_file(snapshot.queue_oid, snapshot.base_oid, "README.md")
+    assert file_view.content == "# Review\n\n<script>alert(1)</script>\n"
+
+    with pytest.raises(console.ConsoleError, match="changed by the reviewed commit"):
+        ui.read_file(snapshot.queue_oid, snapshot.base_oid, "owner.py")
+    with pytest.raises(console.ConsoleError, match="changed by the reviewed commit"):
+        ui.read_file(snapshot.queue_oid, snapshot.base_oid, "../approved/README.md")
+
+
+def test_file_view_rejects_a_stale_queue_pair(
+    environment: tuple[queue.QueuePaths, Path, Path],
+) -> None:
+    paths, _, reports = environment
+    ui = make_console(paths, reports)
+    snapshot = ui.snapshot()
+    assert snapshot is not None
+    commit(paths.queue, "later.py", "LATER = True\n", "queue moved")
+
+    with pytest.raises(console.QueueChanged):
+        ui.read_file(snapshot.queue_oid, snapshot.base_oid, "queued.py")
+
+
+def test_deleted_files_have_no_view_file_link(
+    environment: tuple[queue.QueuePaths, Path, Path],
+) -> None:
+    paths, _, reports = environment
+    git(paths.queue, "rm", "-q", "README.md")
+    git(paths.queue, "commit", "-qm", "remove readme")
+    snapshot = make_console(paths, reports).snapshot()
+
+    assert snapshot is not None
+    deleted = next(item for item in snapshot.files if item.path == "README.md")
+    assert deleted.status == "D"
+    section = console.render_console(snapshot).split('id="file-0"', 1)[1].split("</section>", 1)[0]
+    assert "README.md" in section
+    assert "View file" not in section
+
+
 def test_render_diff_marks_lines_and_escapes_content() -> None:
     """Diff lines are classified and every byte of content stays escaped."""
     markup = console.render_diff(

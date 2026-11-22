@@ -42,9 +42,14 @@ class FakeExecutor(ui.ExecutorClient):
             "queue_oid": QUEUE_OID,
             "base_oid": BASE_OID,
             "commits": [{"oid": QUEUE_OID, "subject": "queued change"}],
-            "diff": "+++ b/file\n+<script>alert(1)</script>",
+            "diff": "diff --git a/README.md b/README.md\n+++ b/README.md\n+<script>alert(1)</script>",
+            "files": [{
+                "path": "README.md", "status": "M",
+                "diff": "diff --git a/README.md b/README.md\n+++ b/README.md\n+<script>alert(1)</script>",
+            }],
             "advisory": {"status": "missing", "text": "none"},
         }
+        self.file = {"path": "README.md", "content": "# Heading\n\n<script>alert(1)</script>\n"}
         self.reply: ui.ExecutorReply = ui.ExecutorReply(True, "", None, "merged")
 
     def request(self, value: dict[str, Any]) -> ui.ExecutorReply:
@@ -53,6 +58,8 @@ class FakeExecutor(ui.ExecutorClient):
             snapshot = dict(self.snapshot)
             snapshot["repo"] = value.get("repo", "scripts")
             return ui.ExecutorReply(True, "", snapshot, "")
+        if value["cmd"] == "file":
+            return ui.ExecutorReply(True, "", None, "", dict(self.file))
         return self.reply
 
 
@@ -224,6 +231,68 @@ def test_page_renders_only_the_console_and_escapes_untrusted_diff(services: Serv
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in body
     assert "<script>alert(1)</script>" not in body
     assert body.count('name="csrf"') == 2
+
+
+def test_diff_has_frontend_highlighting_and_a_bound_file_link(services: Services) -> None:
+    cookies = authorized(services)
+    status, raw = http_request(services.ui_server, "GET", "/lock/merge/", cookies=cookies)
+    page = raw.decode()
+
+    assert status == 200
+    assert 'data-syntax="markdown"' in page
+    assert '/lock/merge/assets/highlight.min.js' in page
+    assert '/lock/merge/assets/review.js' in page
+    assert 'class="view-file"' in page
+    assert 'path=README.md' in page
+    assert f'queue_oid={QUEUE_OID}' in page
+    assert f'base_oid={BASE_OID}' in page
+
+
+def test_markdown_file_view_is_sanitized_in_the_frontend_and_has_a_source_view(
+    services: Services,
+) -> None:
+    cookies = authorized(services)
+    path = f"/lock/merge/file?repo=scripts&queue_oid={QUEUE_OID}&base_oid={BASE_OID}&path=README.md&anchor=file-0"
+    status, raw = http_request(services.ui_server, "GET", path, cookies=cookies)
+    page = raw.decode()
+
+    assert status == 200
+    assert 'id="markdown-rendered"' in page
+    assert 'id="markdown-source"' in page
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
+    assert "<script>alert(1)</script>" not in page
+    assert '/lock/merge/assets/marked.umd.js' in page
+    assert '/lock/merge/assets/purify.min.js' in page
+    assert "View highlighted source" in page
+    assert services.executor.requests[-1] == {
+        "cmd": "file", "repo": "scripts", "queue_oid": QUEUE_OID,
+        "base_oid": BASE_OID, "path": "README.md",
+    }
+
+    status, raw = http_request(services.ui_server, "GET", path + "&view=source", cookies=cookies)
+    assert status == 200
+    assert b'data-syntax="markdown"' in raw
+    assert b"Render Markdown" in raw
+
+
+def test_frontend_assets_are_same_origin_and_require_an_owner_session(services: Services) -> None:
+    path = "/lock/merge/assets/review.js"
+    status, _ = http_request(services.ui_server, "GET", path)
+    assert status == 403
+
+    cookies = authorized(services)
+    status, raw = http_request(services.ui_server, "GET", path, cookies=cookies)
+    assert status == 200
+    assert b"DOMPurify.sanitize" in raw
+    assert b"textContent" in raw
+
+
+def test_file_view_refuses_a_differently_returned_path(services: Services) -> None:
+    cookies = authorized(services)
+    base = f"/lock/merge/file?repo=scripts&queue_oid={QUEUE_OID}&base_oid={BASE_OID}&anchor=file-0"
+    services.executor.file["path"] = "different.md"
+    status, _ = http_request(services.ui_server, "GET", base + "&path=README.md", cookies=cookies)
+    assert status == 503
 
 
 def test_empty_queue_shows_a_page_without_decision_forms(services: Services) -> None:
@@ -407,9 +476,11 @@ def test_executor_forwards_the_exact_binding_and_requires_a_consumed_grant(
         {"cmd": "decide", "repo": "scripts", "action": "merge", "queue_oid": "abc", "base_oid": BASE_OID, "transaction": "t"},
         {"cmd": "decide", "repo": "scripts", "action": "merge", "queue_oid": QUEUE_OID, "base_oid": BASE_OID, "transaction": "t", "extra": 1},
         {"cmd": "snapshot", "repo": "scripts", "queue_oid": OTHER_OID},
+        {"cmd": "file", "repo": "scripts", "queue_oid": QUEUE_OID, "base_oid": BASE_OID},
+        {"cmd": "file", "repo": "scripts", "queue_oid": QUEUE_OID, "base_oid": BASE_OID, "path": "README.md", "extra": 1},
     ],
 )
-def test_executor_rejects_anything_outside_its_two_fixed_verbs(
+def test_executor_rejects_anything_outside_its_three_fixed_verbs(
     tmp_path: Path, payload: dict[str, Any],
 ) -> None:
     with pytest.raises(executor.ExecutorError):
@@ -433,6 +504,33 @@ def test_executor_snapshot_holds_no_decision_authority(
     monkeypatch.setattr(executor, "_console", fake_console)
     reply = executor.handle_request({"cmd": "snapshot", "repo": "scripts"}, _paths_by_repo(tmp_path), FakeVerifier(), auditor=object())  # ty: ignore[invalid-argument-type]
     assert reply == {"ok": True, "snapshot": {"pending": False}}
+    with pytest.raises(console.OwnerAuthorizationRequired):
+        seen[0]("merge", QUEUE_OID, BASE_OID)
+
+
+def test_executor_file_view_uses_the_reviewed_pair_without_grant_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[Any] = []
+
+    def fake_console(paths, verifier, authorizer, *, auditor, publisher, lock_state, repo="scripts"):
+        seen.append(authorizer)
+
+        class FakeConsole:
+            def read_file(self, queue_oid, base_oid, path):
+                assert (queue_oid, base_oid, path) == (QUEUE_OID, BASE_OID, "README.md")
+                return console.FileView(path, "# Review\n")
+
+        return FakeConsole()
+
+    monkeypatch.setattr(executor, "_console", fake_console)
+    reply = executor.handle_request(
+        {"cmd": "file", "repo": "scripts", "queue_oid": QUEUE_OID,
+         "base_oid": BASE_OID, "path": "README.md"},
+        _paths_by_repo(tmp_path), FakeVerifier(), auditor=object(),  # ty: ignore[invalid-argument-type]
+    )
+
+    assert reply == {"ok": True, "file": {"path": "README.md", "content": "# Review\n"}}
     with pytest.raises(console.OwnerAuthorizationRequired):
         seen[0]("merge", QUEUE_OID, BASE_OID)
 
@@ -771,10 +869,14 @@ def test_diary_publication_does_not_sync_a_python_environment(
     monkeypatch.setattr(executor.queue, "approve_queue", fake_approve)
     executor._publication("diary")("a" * 40, object(), expected_base="b" * 40)  # ty: ignore[invalid-argument-type]
     executor._publication("scripts")("a" * 40, object(), expected_base="b" * 40)  # ty: ignore[invalid-argument-type]
+    executor._publication("scripts", sync_environment=False)("c" * 40, object(), expected_base="d" * 40)  # ty: ignore[invalid-argument-type]
 
     # The reviewed base still reaches the publisher for both repositories; only
     # the venv sync differs.
-    assert calls == [("a" * 40, False, "b" * 40), ("a" * 40, True, "b" * 40)]
+    assert calls == [
+        ("a" * 40, False, "b" * 40), ("a" * 40, True, "b" * 40),
+        ("c" * 40, False, "d" * 40),
+    ]
 
 
 def test_decide_accepts_a_browser_that_omits_origin(services: Services) -> None:

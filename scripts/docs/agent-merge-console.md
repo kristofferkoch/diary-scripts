@@ -5,8 +5,9 @@
 `agent_merge_console` is the UI-neutral decision boundary for the independent
 owner console. It is not a second agent-merge broker and does not replace
 `agent-merge-approve`. The CTL-07 host and its fixed-argv executor are
-implemented in `diary_lock_console_ui.py` and `diary_merge_console_service.py`;
-they are not deployed.
+implemented in `diary_lock_console_ui.py` and `diary_merge_console_service.py`.
+Deployment is host-specific; the NixOS host runs only this review console and its
+decision audit, not the abandoned lockdown dashboard or unlock workflow.
 
 ## Review snapshot
 
@@ -17,7 +18,16 @@ from the queue checkout's potentially stale `master` ref, and displays:
 - the full exact queue commit OID and approved base OID;
 - queued commit OIDs and subjects;
 - the real `approved-master...queue-OID` diff, with external diff, textconv, and
-  rename processing disabled;
+  rename processing disabled, split into per-file sections;
+- a **View file** link for each non-deleted changed path. The executor's `file`
+  verb accepts only a path in the current reviewed diff and rechecks both exact
+  OIDs under the queue lock. It returns bounded text blobs only; it is not an
+  arbitrary historical-object or filesystem read;
+- frontend source/diff highlighting through self-hosted highlight.js. Markdown
+  files default to a pretty view rendered with marked and sanitized with
+  DOMPurify, with a highlighted-source alternative. The pinned assets and their
+  licenses live in `scripts/console_assets/`; no CDN or third-party request is
+  involved;
 - the advisory llama report only when its queue OID and base OID match that
   snapshot and its `stale` flag is false.
 
@@ -176,17 +186,19 @@ The console is split across two identities so that web compromise is not
 publication authority:
 
 1. **Web host** (`diary_lock_console_ui.py`, unprivileged `diary-lock-ui`,
-   loopback 9093 behind Caddy). It registers only `GET /lock/merge/`,
-   `POST /lock/merge/decide`, and `GET /lock/health`. It has no unlock,
+   loopback 9093 behind Caddy). It registers `GET /lock/merge/`, the bound
+   `GET /lock/merge/file`, same-origin static assets, `POST /lock/merge/decide`,
+   and `GET /lock/health`. It has no unlock,
    acknowledgement, attendance, or dashboard route, no repository or audit
    access, no controller membership, and no firewall authority. Its only
    privileged peer is the executor socket.
 2. **Executor** (`diary_merge_console_service.py`, `kek`, systemd
-   socket-activated, peer UID must be `diary-lock-ui`). It has exactly two
+   socket-activated, peer UID must be `diary-lock-ui`). It has exactly three
    verbs: `snapshot` (read the reviewed queue pair through
-   `MergeConsole.snapshot()`) and `decide` (run `MergeConsole.decide()`). There
-   is no shell, no caller-supplied path or Git argument, and no verb that skips
-   the console.
+   `MergeConsole.snapshot()`), `file` (read one changed text blob through
+   `MergeConsole.read_file()`), and `decide` (run `MergeConsole.decide()`).
+   There is no shell or caller-supplied Git argument, and file paths must come
+   from the exact reviewed diff. No verb skips the console.
 3. **Fresh grant** (root-owned `diary-fresh-unlock`, CTL-08 pattern). A merge or
    deny transaction is created with `purpose=merge` and bound to the action plus
    the exact queue and approved-base OIDs. The owner must complete a fresh

@@ -207,6 +207,28 @@ def test_session_and_reviewed_oids_without_a_grant_cannot_publish(
     assert merge_events(stack) == []
 
 
+def test_frontend_highlights_diff_and_renders_safe_markdown_file_view(
+    stack: browser.BrowserStack,
+) -> None:
+    harness.enqueue_change(
+        stack.harness_stack.scripts,
+        "README.md",
+        "# Pretty review\n\n<script>alert(1)</script>\n\n```python\nprint('highlighted')\n```\n",
+    )
+
+    result = run_browser(
+        stack, stack.session(),
+        [{"goto": stack.origin + "/lock/merge/"}, {"click": ".view-file"}],
+    )
+
+    assert "Pretty review" in result["text"]
+    assert "<h1>Pretty review</h1>" in result["html"]
+    assert 'id="markdown-source" class="source" hidden=""' in result["html"]
+    assert 'class="hljs' in result["html"]
+    assert "<script>alert(1)</script>" not in result["html"]
+    assert "alert(1)" not in result["text"]
+
+
 def test_opaque_origin_is_accepted(stack: browser.BrowserStack) -> None:
     """Firefox sends Origin: null on a same-origin form post."""
     queued = harness.enqueue_change(stack.harness_stack.scripts)
