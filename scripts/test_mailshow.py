@@ -152,3 +152,36 @@ def test_exclude_ids_and_ids_out(tmp_path, monkeypatch, capsys):
     assert '"id": "A"' in out and '"id": "C"' in out
     assert '"id": "B"' not in out, "excluded overlap id must not be re-shown"
     assert (tmp_path / "mail.ids").read_text().split() == ["A", "C"]
+
+
+def test_window_query_all_drops_the_inbox_filter():
+    assert (mailshow.window_query(None, None, "thread:abc", all_messages=True)
+            == "thread:abc")
+
+
+def test_window_query_all_keeps_date_bounds_and_ands_the_extra_query():
+    from datetime import datetime
+    since = datetime(2026, 5, 17, 17, 0, tzinfo=UTC)
+    q = mailshow.window_query(since, None, "from:astrid", all_messages=True)
+    assert q == f"(date:@{int(since.timestamp()) + 1}..) and (from:astrid)"
+
+
+def test_main_all_flag_forwards_the_unfiltered_query(monkeypatch):
+    queries = []
+
+    def fake_search(q, limit):
+        queries.append(q)
+        return []
+
+    monkeypatch.setattr(mailshow, "notmuch_search_ids", fake_search)
+    assert mailshow.main(["--all", "thread:abc"]) == 1  # no messages to render
+    assert queries == ["thread:abc"]
+
+
+def test_main_all_id_query_skips_the_search(monkeypatch, capsys):
+    monkeypatch.setattr(mailshow, "notmuch_search_ids",
+                        lambda q, limit: pytest.fail("id: must not hit notmuch search"))
+    monkeypatch.setattr(mailshow, "render_message",
+                        lambda mid, *a, **k: f"MSG {mid}")
+    assert mailshow.main(["--all", "id:abc@example.com"]) == 0
+    assert "MSG abc@example.com" in capsys.readouterr().out

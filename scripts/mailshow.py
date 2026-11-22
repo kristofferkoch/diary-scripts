@@ -4,6 +4,7 @@ Read mail bodies (and headers) from notmuch as plain text.
 
 Examples:
     scripts/mailshow.py thread:00000000000349df
+    scripts/mailshow.py --all thread:00000000000349df
     scripts/mailshow.py id:abcdef@example.com
     scripts/mailshow.py --limit=5 'tag:inbox and date:today..'
     scripts/mailshow.py --headers-only 'from:gonordic'
@@ -33,22 +34,31 @@ from scripts.sjekk_cursor import parse_iso
 
 
 def window_query(since: datetime | None, until: datetime | None,
-                 extra: str | None) -> str:
-    """Build a notmuch query for inbox mail in the half-open window ``(since, until]``.
+                 extra: str | None, all_messages: bool = False) -> str:
+    """Build a notmuch query for mail in the half-open window ``(since, until]``.
 
     notmuch's ``date:@N..`` is inclusive at both ends, so the lower bound is
     shifted one second past ``since`` (the message at ``since`` was triaged with
     the previous window). A ``None`` bound is left open.
+
+    The inbox filter is dropped with ``all_messages``, so archived and sent
+    threads (which never carry ``tag:inbox``) can be read by ``thread:`` or
+    ``id:``.
+
+    >>> window_query(None, None, None)
+    'tag:inbox'
+    >>> window_query(None, None, 'thread:3d96', all_messages=True)
+    'thread:3d96'
     """
-    parts = ["tag:inbox"]
+    parts = [] if all_messages else ["tag:inbox"]
     if since is not None or until is not None:
         lo = f"@{int(since.timestamp()) + 1}" if since is not None else ""
         hi = f"@{int(until.timestamp())}" if until is not None else ""
         parts.append(f"date:{lo}..{hi}")
     base = " and ".join(parts)
-    if extra:
-        return f"({base}) and ({extra})"
-    return base
+    if not extra:
+        return base
+    return f"({base}) and ({extra})" if base else extra
 
 from scripts.embed_mail import iter_attachments
 
@@ -228,6 +238,9 @@ def main(argv: list[str] | None = None) -> int:
                          "when a --since/--until window is given).")
     ap.add_argument("--max-chars", type=int, default=4000, help="Truncate each body at N chars (default: 4000, 0 = no truncation).")
     ap.add_argument("--headers-only", action="store_true", help="Print headers + attachment list, skip body.")
+    ap.add_argument("--all", action="store_true",
+                    help="Search all mail, not only inbox-tagged messages: "
+                         "archived/sent threads, and the id: fast path.")
     ap.add_argument("--attachment-text", action="store_true",
                     help="Render extracted attachment text (PDF/DOCX/ODT/text) inline after body.")
     ap.add_argument("--attachments", type=Path, metavar="DIR", default=None,
@@ -237,7 +250,8 @@ def main(argv: list[str] | None = None) -> int:
     since = parse_iso(args.since) if args.since else None
     until = parse_iso(args.until) if args.until else None
     if since is not None or until is not None or args.query:
-        q = window_query(since, until, args.query.strip() if args.query else None)
+        q = window_query(since, until, args.query.strip() if args.query else None,
+                         all_messages=args.all)
         print(f"(window: {q})", file=sys.stderr)
     else:
         ap.error("a query, --since or --until is required")

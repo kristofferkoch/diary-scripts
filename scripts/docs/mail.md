@@ -25,6 +25,7 @@ attachment summary). Examples:
 ```bash
 uv run mailshow --limit=5 'tag:inbox and date:today..'
 uv run mailshow thread:00000000000349df
+uv run mailshow --all thread:00000000000349df   # archived/sent thread (never tag:inbox)
 uv run mailshow --headers-only --limit=20 'from:gonordic'
 uv run mailshow --max-chars=8000 id:<message-id>
 
@@ -83,7 +84,8 @@ inbox. A status summary built from cursor + topic-file scans will miss
 things user already handled. When the user asks "are we good with X?" or
 "what's left on Y?" for an ongoing correspondence, run
 `notmuch search 'from:user@example.com and to:<counterparty> and date:<window>..'`
-(or `uv run mailshow thread:<id>` for the full conversation) before
+(or `uv run mailshow --all thread:<id>` for the full conversation — sent
+replies never carry `tag:inbox`) before
 answering. Treat both directions as load-bearing. Lesson 2026-05-27 —
 declared a VPS-årsoppgave outstanding for User Holding regnskapet that
 user had already forwarded to the accountant the day before.
