@@ -189,7 +189,9 @@ and stored-record counts. `review` includes only `deny`, `would_deny`, and
 Times are `now`, bounded durations (`30m`, `24h`, `7d`), or ISO-8601. Reports
 accept no arbitrary matches, search strings, or journalctl flags. The daemon
 uses a fixed argv and returns only allowlisted metadata, never raw `MESSAGE` or
-unrecognized journal fields. At most 10,000 stored records are summarized;
+unrecognized journal fields. The executable defaults to `/usr/bin/journalctl`;
+the root-owned service environment may set `DIARY_JOURNALCTL` to an absolute
+NixOS store path instead. At most 10,000 stored records are summarized;
 `truncated` warns when the cap was reached.
 
 For AUD-05, `diary-production-baseline` consumes this fixed baseline API and

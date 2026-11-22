@@ -276,6 +276,23 @@ def test_journal_query_uses_fixed_argv_without_shell() -> None:
     assert result == [{"DIARY_AUDIT_SCHEMA_VERSION": "1"}]
 
 
+def test_journal_query_uses_the_daemon_configured_executable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(audit, "JOURNALCTL", "/run/current-system/sw/bin/journalctl")
+    captured = {}
+
+    def run(argv, **kwargs):
+        captured["argv"] = argv
+        return SimpleNamespace(returncode=0, stdout="")
+
+    with patch.object(audit.subprocess, "run", side_effect=run):
+        audit.read_journal(
+            "diary-lock", dt.datetime.fromtimestamp(1, dt.UTC),
+            dt.datetime.fromtimestamp(2, dt.UTC), 50,
+        )
+
+    assert captured["argv"][0] == "/run/current-system/sw/bin/journalctl"
+
+
 @pytest.mark.parametrize("value", ["24h; journalctl --vacuum", "1h --output=cat", "-1h", "9999d", "select * from audit"])
 def test_report_time_injection_is_rejected(value: str) -> None:
     with pytest.raises(audit.AuditError):

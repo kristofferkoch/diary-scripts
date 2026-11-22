@@ -38,6 +38,7 @@ DEFAULT_STATE = "/var/lib/diary-audit/dedup.json"
 DEFAULT_GROUP = "diary-audit"
 DEFAULT_JOURNAL_GROUP = "diary-audit-journal"
 DEFAULT_NAMESPACE = "diary-lock"
+JOURNALCTL = os.environ.get("DIARY_JOURNALCTL", "/usr/bin/journalctl")
 DUPLICATE_WINDOW_US = 60_000_000
 STATE_RETENTION_US = 31 * 24 * 60 * 60 * 1_000_000
 MAX_REQUEST_BYTES = 32 * 1024
@@ -566,7 +567,7 @@ def _timestamp(microseconds: int) -> str:
 
 def read_journal(namespace: str, since: dt.datetime, until: dt.datetime, limit: int) -> list[dict]:
     argv = [
-        "/usr/bin/journalctl",
+        JOURNALCTL,
         f"--namespace={namespace}",
         "--output=json",
         "--no-pager",
@@ -608,7 +609,7 @@ def read_journal_emission(namespace: str, emission_id: str, since: dt.datetime) 
     if not EMISSION_ID_RE.fullmatch(emission_id):
         raise AuditError("invalid heartbeat emission ID")
     argv = [
-        "/usr/bin/journalctl",
+        JOURNALCTL,
         f"--namespace={namespace}",
         "--output=json",
         "--no-pager",
