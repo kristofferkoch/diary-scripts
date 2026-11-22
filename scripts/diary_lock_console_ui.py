@@ -280,48 +280,6 @@ def render_result(code: str) -> str:
 AUTHORIZE_ACTION = "/lock/merge/begin"
 
 
-def render_authorize(action: str, queue_oid: str, base_oid: str, repo: str) -> str:
-    """Offer the fresh-authorization ceremony as a plain same-origin form.
-
-    Nothing is decided on this page. It exists so an owner without a current
-    grant gets a button instead of a dead end: the root-owned service shows the
-    bound action and OIDs before the console can consume it.
-    """
-    verb = "merge and publish" if action == "merge" else "deny (record only)"
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'">
-<title>Fresh authorization required</title>
-<style>body{{font-family:sans-serif;max-width:40rem;margin:3rem auto;padding:0 1rem}}code{{overflow-wrap:anywhere}}</style>
-</head>
-<body>
-<h1>Fresh authorization required</h1>
-<p>This decision needs a passkey ceremony bound to
-exactly this action and OID pair:</p>
-<dl>
-<dt>Action</dt><dd><strong>{html.escape(verb)}</strong></dd>
-<dt>Queue</dt><dd><code>{html.escape(repo)}</code></dd>
-<dt>Reviewed queue OID</dt><dd><code>{html.escape(queue_oid)}</code></dd>
-<dt>Approved base OID</dt><dd><code>{html.escape(base_oid)}</code></dd>
-</dl>
-<p>After signing in, the authorization service shows the same decision on its
-own page. Nothing is merged until you confirm here again.</p>
-<form method="post" action="{AUTHORIZE_ACTION}">
-<input type="hidden" name="repo" value="{html.escape(repo, quote=True)}">
-<input type="hidden" name="action" value="{html.escape(action, quote=True)}">
-<input type="hidden" name="queue_oid" value="{html.escape(queue_oid, quote=True)}">
-<input type="hidden" name="base_oid" value="{html.escape(base_oid, quote=True)}">
-<button type="submit">Tap passkey to authorize</button>
-</form>
-<p><a href="{PAGE_PATH}">Cancel</a></p>
-</body>
-</html>
-"""
-
-
 def _repo_link(repo: str) -> str:
     return f"{PAGE_PATH}?{REPO_PARAM}={repo}"
 
@@ -647,7 +605,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             transaction = _transaction_id(cookie)
             self.server.fresh.consume(cookie, repo)
         except AuthorizationError:
-            self._html(200, render_authorize(action, queue_oid, base_oid, repo))
+            self.send_response(307)
+            self._common_headers()
+            self.send_header("Location", AUTHORIZE_ACTION)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
             return
         reply = self.server.executor.request({
             "cmd": "decide", "repo": repo, "action": action, "queue_oid": queue_oid,

@@ -108,11 +108,11 @@ def services(tmp_path: Path) -> Iterator[Services]:
         thread.join(timeout=5)
 
 
-def http_request(
+def http_response(
     server: Any, method: str, path: str,
     cookies: dict[str, str] | None = None, headers: dict[str, str] | None = None,
     body: bytes | str | None = None,
-) -> tuple[int, bytes]:
+) -> tuple[int, bytes, dict[str, str]]:
     all_headers = dict(headers or {})
     if cookies:
         all_headers["Cookie"] = "; ".join(f"{key}={value}" for key, value in cookies.items())
@@ -122,8 +122,14 @@ def http_request(
     connection.request(method, path, headers=all_headers, body=body)
     response = connection.getresponse()
     raw = response.read()
+    response_headers = dict(response.getheaders())
     connection.close()
-    return response.status, raw
+    return response.status, raw, response_headers
+
+
+def http_request(*args: Any, **kwargs: Any) -> tuple[int, bytes]:
+    status, raw, _ = http_response(*args, **kwargs)
+    return status, raw
 
 
 def browser_headers(action: str | None = None) -> dict[str, str]:
@@ -174,11 +180,11 @@ def page_token(services: Services, cookies: dict[str, str], repo: str = "scripts
     return match.group(1).decode()
 
 
-def decide(
+def decide_response(
     services: Services, cookies: dict[str, str], token: str,
     action: str = "merge", origin: str = "https://example.test",
     queue_oid: str = QUEUE_OID, repo: str = "scripts",
-) -> tuple[int, bytes]:
+) -> tuple[int, bytes, dict[str, str]]:
     body = urllib.parse.urlencode(
         {
             "repo": repo, "action": action, "queue_oid": queue_oid,
@@ -188,10 +194,15 @@ def decide(
     headers = browser_headers()
     headers["Origin"] = origin
     headers["Content-Type"] = "application/x-www-form-urlencoded"
-    return http_request(
+    return http_response(
         services.ui_server, "POST", "/lock/merge/decide",
         cookies=cookies, headers=headers, body=body,
     )
+
+
+def decide(*args: Any, **kwargs: Any) -> tuple[int, bytes]:
+    status, raw, _ = decide_response(*args, **kwargs)
+    return status, raw
 
 
 # -------------------------------------------------------------------------- routes
@@ -332,12 +343,13 @@ def test_decision_requires_same_origin_explicit_form_and_current_token(services:
     assert all(request["cmd"] == "snapshot" for request in services.executor.requests[calls:])
 
 
-def test_decision_requires_a_fresh_merge_transaction(services: Services) -> None:
+def test_decision_without_a_grant_redirects_directly_into_the_passkey_ceremony(services: Services) -> None:
     cookies = authorized(services)
     token = page_token(services, cookies)
-    status, raw = decide(services, {SESSION_COOKIE: cookies[SESSION_COOKIE]}, token)
-    assert status == 200
-    assert b'action="/lock/merge/begin"' in raw
+    status, raw, headers = decide_response(services, {SESSION_COOKIE: cookies[SESSION_COOKIE]}, token)
+    assert status == 307
+    assert headers["Location"] == "/lock/merge/begin"
+    assert raw == b""
     assert all(request["cmd"] == "snapshot" for request in services.executor.requests)
 
 
@@ -367,9 +379,10 @@ def test_a_consumed_grant_cannot_be_replayed(services: Services) -> None:
     assert len(decisions) == 1
 
     second_token = page_token(services, cookies)
-    second_status, second_raw = decide(services, cookies, second_token)
-    assert second_status == 200
-    assert b'action="/lock/merge/begin"' in second_raw
+    second_status, second_raw, headers = decide_response(services, cookies, second_token)
+    assert second_status == 307
+    assert headers["Location"] == "/lock/merge/begin"
+    assert second_raw == b""
     assert len([request for request in services.executor.requests if request["cmd"] == "decide"]) == 1
 
 
@@ -630,6 +643,20 @@ def test_merge_begin_accepts_the_console_form_without_script(services: Services)
     assert any(value.startswith(f"{fresh.TRANSACTION_COOKIE}=") for value in cookies)
 
 
+def test_merge_begin_rejects_a_redirected_button_that_disagrees(services: Services) -> None:
+    services.auth_state.add("old")
+    body = urllib.parse.urlencode({
+        "repo": "scripts", "action": "merge", "queue_oid": QUEUE_OID,
+        "base_oid": BASE_OID, "csrf": "console-validated", "confirm": "deny",
+    })
+    status, _ = http_request(
+        services.fresh_server, "POST", "/lock/merge/begin", cookies={SESSION_COOKIE: "old"},
+        headers={**browser_headers(), "Content-Type": "application/x-www-form-urlencoded"}, body=body,
+    )
+
+    assert status == 403
+
+
 def test_return_page_shows_the_decision_bound_to_the_ceremony(services: Services) -> None:
     services.auth_state.add("old")
     body = json.dumps({"repo": "scripts", "action": "deny", "queue_oid": QUEUE_OID, "base_oid": BASE_OID})
@@ -659,22 +686,39 @@ def test_return_page_shows_the_decision_bound_to_the_ceremony(services: Services
     assert status == 200
     assert "Deny (record only" in page
     assert QUEUE_OID in page and BASE_OID in page
-    assert 'href="/lock/merge/"' in page
+    assert 'href="/lock/merge/?repo=scripts"' in page
 
 
-def test_decision_without_a_grant_offers_the_authorization_form(services: Services) -> None:
+def test_confirmation_page_returns_to_the_diary_queue() -> None:
+    page = fresh._confirmation_page("merge", QUEUE_OID, BASE_OID, "diary", 300)
+
+    assert 'href="/lock/merge/?repo=diary"' in page
+
+
+def test_first_decision_click_preserves_the_reviewed_post_for_merge_begin(services: Services) -> None:
     services.auth_state.add("old")
     cookies = {SESSION_COOKIE: "old"}
     status, raw = http_request(services.ui_server, "GET", "/lock/merge/", cookies=cookies)
     assert status == 200
     match = re.search(rb'name="csrf" value="([^"]+)"', raw)
     assert match is not None
-    status, raw = decide(services, cookies, match.group(1).decode())
-    page = raw.decode()
-    assert status == 200
-    assert 'action="/lock/merge/begin"' in page
-    assert QUEUE_OID in page and BASE_OID in page
+    status, raw, headers = decide_response(services, cookies, match.group(1).decode())
+
+    assert status == 307
+    assert headers["Location"] == "/lock/merge/begin"
+    assert raw == b""
     assert all(item["cmd"] == "snapshot" for item in services.executor.requests)
+
+    body = urllib.parse.urlencode({
+        "repo": "scripts", "action": "merge", "queue_oid": QUEUE_OID,
+        "base_oid": BASE_OID, "csrf": match.group(1).decode(), "confirm": "merge",
+    })
+    status, raw, headers = http_response(
+        services.fresh_server, "POST", headers["Location"], cookies=cookies,
+        headers={**browser_headers(), "Content-Type": "application/x-www-form-urlencoded"}, body=body,
+    )
+    assert status == 303
+    assert headers["Location"].startswith("https://example.test/lock/auth/")
 
 
 def test_unlock_transaction_cannot_be_consumed_as_a_merge_grant(services: Services) -> None:
@@ -807,10 +851,11 @@ def test_a_scripts_grant_cannot_authorize_the_diary_queue(services: Services) ->
     token = page_token(services, cookies, repo="diary")
     before = len(services.executor.requests)
 
-    status, raw = decide(services, cookies, token, repo="diary")
+    status, raw, headers = decide_response(services, cookies, token, repo="diary")
 
-    assert status == 200
-    assert b"Fresh authorization required" in raw
+    assert status == 307
+    assert headers["Location"] == "/lock/merge/begin"
+    assert raw == b""
     assert all(request["cmd"] != "decide" for request in services.executor.requests[before:])
 
 

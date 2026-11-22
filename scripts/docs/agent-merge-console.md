@@ -203,7 +203,12 @@ publication authority:
    deny transaction is created with `purpose=merge` and bound to the action plus
    the exact queue and approved-base OIDs. The owner must complete a fresh
    user-verified passkey ceremony (`/lock/merge/begin` →
-   `/lock/auth/` → `/lock/merge/return`). At decision time the host consumes it
+   `/lock/auth/` → `/lock/merge/return`). When no current grant exists, the
+   first decision POST receives a same-origin 307 directly into `begin`, so the
+   owner's first click opens the passkey ceremony without an intermediate page.
+   The redirected form may carry the console's already-validated CSRF and button
+   fields, which are not authority; `begin` still accepts only the exact action,
+   repository, and OID binding. At decision time the host consumes it
    (`/lock/merge/consume`), which is single-use and session-bound, and the
    executor independently asks the root-owned verifier socket whether that exact
    grant was consumed. An unlock transaction cannot be consumed as a merge

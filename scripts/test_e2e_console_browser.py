@@ -179,7 +179,11 @@ def test_cross_queue_grant_is_refused_by_the_browser_path(
         transaction=transaction,
     )
 
-    assert "Fresh authorization required" in result["text"]
+    assert f"Queue: {repo}" in result["text"]
+    assert "Merged" not in result["text"]
+    assert len(stack.grants.pending) == 2
+    assert list(stack.grants.pending.values())[-1].repo == repo
+    assert stack.grants.consumed == []
     assert head(paths) == base
     assert merge_events(stack) == []
 
@@ -201,7 +205,12 @@ def test_session_and_reviewed_oids_without_a_grant_cannot_publish(
         [{"goto": stack.origin + "/lock/merge/"}, {"click": 'button[value="merge"]'}],
     )
 
-    assert "Fresh authorization required" in result["text"]
+    assert "Queue: scripts" in result["text"]
+    assert "Merged" not in result["text"]
+    grant = next(iter(stack.grants.pending.values()))
+    assert (grant.repo, grant.action, grant.queue_oid, grant.base_oid) == (
+        "scripts", "merge", queued, before,
+    )
     assert head(stack.harness_stack.scripts) == before
     assert harness.git(stack.harness_stack.scripts.queue, "rev-parse", "HEAD") == queued
     assert merge_events(stack) == []
@@ -265,8 +274,8 @@ def test_foreign_origin_is_refused(stack: browser.BrowserStack) -> None:
     assert merge_events(stack) == []
 
 
-def test_two_click_ceremony_publishes_once(stack: browser.BrowserStack) -> None:
-    """Merge → sign-in form → back to the review → Merge executes once."""
+def test_first_click_starts_ceremony_and_second_publishes_once(stack: browser.BrowserStack) -> None:
+    """Merge redirects into the ceremony; Merge after it executes once."""
     queued = harness.enqueue_change(stack.harness_stack.scripts)
     session = stack.session()
 
@@ -276,7 +285,6 @@ def test_two_click_ceremony_publishes_once(stack: browser.BrowserStack) -> None:
             {"goto": stack.origin + "/lock/merge/"},
             {"wait": 2500},
             {"click": 'button[value="merge"]'},
-            {"click": 'form button[type="submit"]'},
             {"click": 'button[value="merge"]'},
         ],
     )
@@ -326,7 +334,8 @@ def test_replayed_grant_cannot_publish_twice(stack: browser.BrowserStack) -> Non
         transaction=transaction,
     )
 
-    assert "Fresh authorization required" in replay["text"]
+    assert "Queue: scripts" in replay["text"]
+    assert "Merged" not in replay["text"]
     assert head(stack.harness_stack.scripts) == first
     assert harness.git(stack.harness_stack.scripts.queue, "rev-parse", "HEAD") == second
 

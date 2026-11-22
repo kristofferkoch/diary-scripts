@@ -188,7 +188,7 @@ class FakeFresh:
                         return
                     grant = state.grants.mint(repo, action, queue_oid, base_oid)
                     self._send(303, headers={
-                        "Location": "/lock/merge/",
+                        "Location": "/lock/merge/?" + urllib.parse.urlencode({"repo": repo}),
                         "Set-Cookie": (
                             f"{TRANSACTION_COOKIE}={grant.transaction}.{grant.transaction}"
                             f"; Path=/lock/merge; HttpOnly; SameSite=Strict"

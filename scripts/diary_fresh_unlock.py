@@ -733,7 +733,7 @@ the root-owned authorization service, which bound the ceremony to exactly:</p>
 <p>If that is not the decision you reviewed, close this page: nothing is merged
 or denied until the console confirms, and the grant expires on its own after
 {minutes} minutes.</p>
-<p><a href="/lock/merge/">Continue to the merge review</a></p>
+<p><a href="/lock/merge/?{urllib.parse.urlencode({'repo': repo})}">Continue to the merge review</a></p>
 </body>
 </html>
 """
@@ -1216,7 +1216,8 @@ class FreshUnlockHandler(BaseHTTPRequestHandler):
 
     def _merge_begin(self) -> None:
         body = self._begin_action("X-Diary-Merge-Begin")
-        if set(body) != {"action", "queue_oid", "base_oid", "repo"}:
+        required = {"action", "queue_oid", "base_oid", "repo"}
+        if not required <= set(body) or not set(body) <= required | {"csrf", "confirm"}:
             raise AuthorizationError("invalid merge authorization request")
         repo = body["repo"]
         if repo not in REPOS:
@@ -1224,6 +1225,8 @@ class FreshUnlockHandler(BaseHTTPRequestHandler):
         action = body["action"]
         if action not in MERGE_ACTIONS:
             raise AuthorizationError("merge authorization action must be merge or deny")
+        if "confirm" in body and body["confirm"] != action:
+            raise AuthorizationError("merge authorization button does not match its action")
         queue_oid, base_oid = body["queue_oid"], body["base_oid"]
         if not isinstance(queue_oid, str) or not isinstance(base_oid, str):
             raise AuthorizationError("merge authorization requires full queue and base OIDs")
